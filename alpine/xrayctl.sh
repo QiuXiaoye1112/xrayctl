@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.0-alpine"
+readonly XRAYCTL_VERSION="1.0.1-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -208,16 +208,20 @@ validate_ip_literal() {
 detect_public_ip() {
   local response raw
   response=$({ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 4 --max-time 8 https://api64.ipify.org 2>/dev/null || true; } | tr -d '[:space:]')
-  if validate_ip_literal "$response"; then printf '%s' "$response"; return 0; fi
+    --connect-timeout 4 --max-time 8 https://api.ipify.org 2>/dev/null || true; } | tr -d '[:space:]')
+  if validate_ipv4 "$response"; then printf '%s' "$response"; return 0; fi
 
   response=$({ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
     --connect-timeout 4 --max-time 8 https://checkip.amazonaws.com 2>/dev/null || true; } | tr -d '[:space:]')
-  if validate_ip_literal "$response"; then printf '%s' "$response"; return 0; fi
+  if validate_ipv4 "$response"; then printf '%s' "$response"; return 0; fi
 
   raw=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
     --connect-timeout 4 --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
   response=$(awk -F= '$1=="ip" {print $2; exit}' <<<"$raw" | tr -d '[:space:]')
+  if validate_ipv4 "$response"; then printf '%s' "$response"; return 0; fi
+
+  response=$({ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 4 --max-time 8 https://api64.ipify.org 2>/dev/null || true; } | tr -d '[:space:]')
   if validate_ip_literal "$response"; then printf '%s' "$response"; return 0; fi
   return 1
 }
@@ -619,14 +623,10 @@ install_xray_core() {
 }
 
 copy_certificate_pair() {
-  local domain=$1 cert_source=$2 key_source=$3 cert_target key_target cert_pub key_pub
+  local domain=$1 cert_source=$2 key_source=$3 cert_target key_target
   [[ -r $cert_source ]] || die "无法读取证书：$cert_source"
   [[ -r $key_source ]] || die "无法读取私钥：$key_source"
-  openssl x509 -in "$cert_source" -noout >/dev/null || die "证书格式无效。"
-  openssl pkey -in "$key_source" -noout >/dev/null || die "私钥格式无效。"
-  cert_pub=$(openssl x509 -in "$cert_source" -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | openssl sha256)
-  key_pub=$(openssl pkey -in "$key_source" -pubout -outform DER 2>/dev/null | openssl sha256)
-  [[ $cert_pub == "$key_pub" ]] || die "证书与私钥不匹配。"
+  validate_certificate_pair_files "$cert_source" "$key_source" || die "证书或私钥无效。"
   setup_certificate_access
   cert_target="${CERT_DIR}/${domain}.crt"; key_target="${CERT_DIR}/${domain}.key"
   install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$cert_source" "$cert_target"
@@ -769,13 +769,59 @@ prompt_public_host() {
     default=$(detect_public_ip || true)
   fi
   while true; do
-    prompt_value value "客户端地址" "$default"
+    prompt_value value "客户端连接地址" "$default"
     if [[ -n $value && $value != *" "* ]]; then
       printf -v "$__var" '%s' "$value"
       return
     fi
     warn "地址无效。"
   done
+}
+
+validate_certificate_pair_files() {
+  local cert=$1 key=$2 cert_pub key_pub
+  [[ -r $cert ]] || { warn "证书文件不存在或不可读，请重新输入。"; return 1; }
+  [[ -r $key ]] || { warn "私钥文件不存在或不可读，请重新输入。"; return 1; }
+  openssl x509 -in "$cert" -noout >/dev/null 2>&1 \
+    || { warn "证书格式无效，请重新输入。"; return 1; }
+  openssl pkey -in "$key" -noout >/dev/null 2>&1 \
+    || { warn "私钥格式无效，请重新输入。"; return 1; }
+  cert_pub=$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | openssl sha256)
+  key_pub=$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | openssl sha256)
+  [[ -n $cert_pub && $cert_pub == "$key_pub" ]] \
+    || { warn "证书与私钥不匹配，请重新输入。"; return 1; }
+}
+
+prompt_certificate_files() {
+  local __cert=$1 __key=$2 default_cert=${3:-} default_key=${4:-} cert_value key_value
+  while true; do
+    prompt_value cert_value "证书文件路径" "$default_cert"
+    prompt_value key_value "私钥文件路径" "$default_key"
+    if validate_certificate_pair_files "$cert_value" "$key_value"; then
+      printf -v "$__cert" '%s' "$cert_value"
+      printf -v "$__key" '%s' "$key_value"
+      return 0
+    fi
+  done
+}
+
+prompt_tls_certificate() {
+  local __cert=$1 __key=$2 choice identifier cert_value key_value
+  if (( $(certificate_count) > 0 )); then
+    choose choice "选择 TLS 证书" "使用托管证书" "使用证书文件"
+    if [[ $choice == 1 ]]; then
+      select_managed_certificate identifier || return 1
+      cert_value="${CERT_DIR}/${identifier}.crt"
+      key_value="${CERT_DIR}/${identifier}.key"
+      validate_certificate_pair_files "$cert_value" "$key_value" || return 1
+      printf -v "$__cert" '%s' "$cert_value"
+      printf -v "$__key" '%s' "$key_value"
+      return 0
+    fi
+  fi
+  prompt_certificate_files cert_value key_value
+  printf -v "$__cert" '%s' "$cert_value"
+  printf -v "$__key" '%s' "$key_value"
 }
 
 generate_reality_keys() {
@@ -843,9 +889,7 @@ build_stream_settings() {
       printf -v "$__public_key" '%s' "$public"
       ;;
     tls)
-      prompt_value cert "证书文件路径（PEM/fullchain）" "${CERT_DIR}/example.com.crt"
-      prompt_value key "私钥文件路径（PEM）" "${CERT_DIR}/example.com.key"
-      [[ -r $cert && -r $key ]] || warn "证书文件当前不可读；配置校验会失败。可先从证书管理菜单导入/签发。"
+      prompt_tls_certificate cert key
       if [[ $method == websocket ]]; then alpn='["http/1.1"]'; else alpn='["h2","http/1.1"]'; fi
       json=$(jq --arg cert "$cert" --arg key "$key" --argjson alpn "$alpn" \
         '. + {tlsSettings:{alpn:$alpn,minVersion:"1.2",certificates:[{certificateFile:$cert,keyFile:$key}]}}' <<<"$json")
@@ -1653,7 +1697,7 @@ bootstrap_certbot_venv_without_apt() {
   fi
   if [[ ! -x $venv_dir/bin/pip ]]; then
     bootstrap=$(temp_file)
-    info "正在准备 Certbot 依赖（最多等待 ${pip_timeout} 秒）。"
+    info "正在准备 Certbot 依赖。"
     if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 2 \
       --connect-timeout 15 --max-time 60 https://bootstrap.pypa.io/get-pip.py -o "$bootstrap"; then
       rm -f "$bootstrap"
@@ -1676,11 +1720,11 @@ install_certbot_ip_support() {
     info "正在切换 Certbot 安装方式。"
     case $manager in
       apk)
-        info "正在准备 Python 环境（最多等待 ${apt_timeout} 秒）。"
+        info "正在准备 Python 环境。"
         run_bounded "$apt_timeout" apk add --no-cache python3 py3-pip \
           || die "Python 环境安装失败或超时。" ;;
       apt)
-        info "正在准备 Python 环境（最多等待 ${apt_timeout} 秒）。"
+        info "正在准备 Python 环境。"
         DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$apt_timeout" \
           apt_get_guarded install -y --no-install-recommends python3 python3-venv \
           || die "Python venv 安装失败或超时，请检查 APT 软件源。" ;;
@@ -1691,7 +1735,7 @@ install_certbot_ip_support() {
     esac
     python3 -m venv "$venv_dir" || die "无法创建 Certbot Python 环境。"
   fi
-  info "安装支持 IP 证书的 Certbot（最多等待 ${pip_timeout} 秒）。"
+  info "正在安装 Certbot。"
   run_bounded "$pip_timeout" "$venv_dir/bin/pip" install --disable-pip-version-check \
     --timeout 15 --retries 2 --upgrade 'certbot>=5.4' \
     || die "新版 Certbot 安装失败。"
@@ -1741,36 +1785,31 @@ EOF
   chmod 750 "$hook"
 }
 
-apply_certificate_to_inbound() {
-  local identifier=$1 cert_path=$2 key_path=$3 tag tmp method
-  select_inbound tag '^(vless|vmess|trojan)$' || return
+update_tls_inbound_certificate() {
+  local tag=$1 cert_path=$2 key_path=$3 tmp method
+  inbound_exists "$tag" || { warn "入站不存在：${tag}"; return 1; }
+  [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE") == tls ]] \
+    || { warn "只有使用 TLS 的入站可以更换证书。"; return 1; }
+  validate_certificate_pair_files "$cert_path" "$key_path" || return 1
   method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.method // "raw"' "$CONFIG_FILE")
   tmp=$(temp_file)
   jq --arg tag "$tag" --arg cert "$cert_path" --arg key "$key_path" --arg method "$method" '
     (.inbounds[]|select(.tag==$tag)|.streamSettings) |= (
-      .security="tls" |
-      del(.realitySettings) |
       .tlsSettings={
         alpn:(if $method=="websocket" then ["http/1.1"] else ["h2","http/1.1"] end),
         minVersion:"1.2",
         certificates:[{certificateFile:$cert,keyFile:$key}]
       }
-    ) |
-    if (.inbounds[]|select(.tag==$tag)|.protocol)=="vless" then
-      (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(
-        if $method=="raw" then .flow="xtls-rprx-vision" else del(.flow) end
-      )
-    else . end' "$CONFIG_FILE" >"$tmp"
+    )' "$CONFIG_FILE" >"$tmp"
   if apply_candidate "$tmp"; then
-    meta_set_inbound "$tag" "$identifier" "" replace
-    info "证书已应用：${tag}"
+    info "证书已更新：${tag}"
   fi
   rm -f "$tmp"
 }
 
 issue_certificate() {
   ensure_runtime_dependencies cert-issue
-  local domain=${1-} email=${2-} was_active=0 paths cert_path key_path default_domain="" mode=domain
+  local domain=${1-} email=${2-} was_active=0 paths cert_path default_domain="" mode=domain
   if [[ -z $domain ]]; then
     default_domain=$(detect_public_ip || true)
     prompt_validated_value domain "证书域名/IP" "$default_domain" validate_domain_or_ip "域名/IP 无效，请重新输入。"
@@ -1793,14 +1832,11 @@ issue_certificate() {
     die "证书签发失败；确认 ${domain} 的 TCP 80 可从公网访问。"
   fi
   paths=$(copy_certificate_pair "$domain" "/etc/letsencrypt/live/${domain}/fullchain.pem" "/etc/letsencrypt/live/${domain}/privkey.pem")
-  cert_path=$(head -n1 <<<"$paths"); key_path=$(tail -n1 <<<"$paths")
+  cert_path=$(head -n1 <<<"$paths")
   write_certbot_deploy_hook "$domain"
   [[ $mode != ip ]] || setup_certbot_renewal_timer
   if ((was_active)); then rc-service "$SERVICE_NAME" start; CERT_STOPPED_SERVICE=0; fi
   info "证书已保存：${cert_path}"
-  if [[ -t 0 ]] && confirm "应用到现有入站？" N; then
-    apply_certificate_to_inbound "$domain" "$cert_path" "$key_path"
-  fi
 }
 
 import_certificate() {
@@ -1849,10 +1885,34 @@ select_managed_certificate() {
   printf -v "$__var" '%s' "${identifiers[$((answer-1))]}"
 }
 
-apply_managed_certificate() {
-  local identifier
-  select_managed_certificate identifier || return
-  apply_certificate_to_inbound "$identifier" "${CERT_DIR}/${identifier}.crt" "${CERT_DIR}/${identifier}.key"
+manage_inbound_certificate_menu() {
+  local tag=$1 choice identifier cert key current_cert current_key
+  while inbound_exists "$tag"; do
+    [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE") == tls ]] || return 0
+    current_cert=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.tlsSettings.certificates[0].certificateFile // "未设置"' "$CONFIG_FILE")
+    current_key=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.tlsSettings.certificates[0].keyFile // "未设置"' "$CONFIG_FILE")
+    clear_screen
+    heading "证书管理 · ${tag}"
+    printf '证书: %s\n私钥: %s\n\n' "$current_cert" "$current_key"
+    printf '1) 更换托管证书\n2) 使用证书文件\n0) 返回入站\n'
+    read -r -p "请选择: " choice
+    case $choice in
+      1)
+        if select_managed_certificate identifier; then
+          run_menu_action update_tls_inbound_certificate "$tag" "${CERT_DIR}/${identifier}.crt" "${CERT_DIR}/${identifier}.key"
+          pause
+        else
+          pause
+        fi
+        ;;
+      2)
+        prompt_certificate_files cert key "$current_cert" "$current_key"
+        run_menu_action update_tls_inbound_certificate "$tag" "$cert" "$key"
+        pause
+        ;;
+      0) return;; *) warn "无效选项。"; pause;;
+    esac
+  done
 }
 
 backup_all() {
@@ -2299,7 +2359,7 @@ modify_inbound_menu() {
 }
 
 manage_inbound_menu() {
-  local tag=$1 choice protocol auth
+  local tag=$1 choice protocol auth security
   while inbound_exists "$tag"; do
     clear_screen
     protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
@@ -2307,13 +2367,24 @@ manage_inbound_menu() {
     show_node_summary "$tag"
     case $protocol in
       vless|vmess|trojan)
-        printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
-        read -r -p "请选择: " choice
-        case $choice in
-          1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
-          4) run_menu_action show_inbound "$tag"; pause;;
-          0) return;; *) warn "无效选项。"; pause;;
-        esac
+        security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
+        if [[ $security == tls ]]; then
+          printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 证书管理\n5) 查看 JSON\n0) 返回列表\n'
+          read -r -p "请选择: " choice
+          case $choice in
+            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
+            4) manage_inbound_certificate_menu "$tag";; 5) run_menu_action show_inbound "$tag"; pause;;
+            0) return;; *) warn "无效选项。"; pause;;
+          esac
+        else
+          printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
+          read -r -p "请选择: " choice
+          case $choice in
+            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
+            4) run_menu_action show_inbound "$tag"; pause;;
+            0) return;; *) warn "无效选项。"; pause;;
+          esac
+        fi
         ;;
       http)
         if http_inbound_has_auth "$tag"; then auth=password; else auth=noauth; fi
@@ -2403,12 +2474,12 @@ certificate_menu() {
     clear_screen
     heading "TLS 证书"
     printf '托管证书: %s\n\n' "$(certificate_count)"
-    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 应用证书到入站\n4) 查看托管证书\n5) 测试自动续期\n0) 返回\n'
+    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 测试自动续期\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) run_menu_action issue_certificate; pause;; 2) run_menu_action import_certificate; pause;; 3) run_menu_action apply_managed_certificate; pause;;
-      4) run_menu_action list_certificates; pause;;
-      5) run_menu_action test_certificate_renewal; pause;;
+      1) run_menu_action issue_certificate; pause;; 2) run_menu_action import_certificate; pause;;
+      3) run_menu_action list_certificates; pause;;
+      4) run_menu_action test_certificate_renewal; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
