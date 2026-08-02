@@ -140,7 +140,7 @@ xrayctl uninstall --purge       # 删除 Xray 配置、证书和日志
 
 ## 安装卡在 APT
 
-如果旧版安装过程停在 `0% [Waiting for headers]`，可按 `Ctrl+C` 中止后重新执行一键安装。当前版本会优先使用 IPv4，并为 APT 设置连接超时、重试次数和 180 秒总超时，不再无限等待失效的软件源。
+如果旧版安装过程停在 `0% [Waiting for headers]`，可按 `Ctrl+C` 中止后重新执行一键安装。当前版本会优先从 [jq 官方 GitHub 仓库](https://github.com/jqlang/jq/releases)下载并校验静态版 jq，从而绕过 APT；其他依赖仍会使用带连接超时、重试次数和 180 秒总超时的 APT，不再无限等待失效的软件源。
 
 仅有 IPv6 网络的服务器可以关闭 IPv4 强制模式：
 

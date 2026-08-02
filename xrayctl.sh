@@ -5,8 +5,9 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.1.0"
+readonly XRAYCTL_VERSION="1.1.1"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+readonly JQ_VERSION="1.8.2"
 
 XRAY_BIN="${XRAYCTL_XRAY_BIN:-/usr/local/bin/xray}"
 CONFIG_DIR="${XRAYCTL_CONFIG_DIR:-/usr/local/etc/xray}"
@@ -19,6 +20,7 @@ QUICK_SYMLINK="${XRAYCTL_SYMLINK_PATH:-/usr/local/bin/xrayctl}"
 SERVICE_NAME="${XRAYCTL_SERVICE_NAME:-xray}"
 SYSTEMD_UNIT="${SERVICE_NAME}.service"
 LOCK_FILE="${XRAYCTL_LOCK_FILE:-/run/lock/xrayctl.lock}"
+JQ_INSTALL_PATH="${XRAYCTL_JQ_INSTALL_PATH:-/usr/local/bin/jq}"
 CERT_STOPPED_SERVICE=0
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -157,9 +159,50 @@ apt_get_guarded() {
   fi
 }
 
+install_jq_standalone() {
+  local machine asset expected_hash download_url temp actual_hash
+  machine=$(uname -m)
+  case $machine in
+    x86_64|amd64) asset=jq-linux-amd64; expected_hash=b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f ;;
+    aarch64|arm64) asset=jq-linux-arm64; expected_hash=8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 ;;
+    armv7l|armv7|armhf) asset=jq-linux-armhf; expected_hash=78458244fb546469b4042e9e07cf78714ef6848895eb9515df76b4eb0b1dc992 ;;
+    armv5*|armv6*|armel) asset=jq-linux-armel; expected_hash=d88f6bd640ef8909b3deb587f12c03a0ed38fe8bd5e2e882e2b1bf88f5dab8d2 ;;
+    i386|i486|i586|i686) asset=jq-linux-i386; expected_hash=ba996e8ce436973e2f39e2639405a37e8c81ba8c722b71c83996278ad0af16dd ;;
+    riscv64) asset=jq-linux-riscv64; expected_hash=a96e5a78a7b2c5a0575bc2a10dda4b20d84efd8c02c8806539ee5f5e57603e8d ;;
+    s390x) asset=jq-linux-s390x; expected_hash=42b3306c786e3352e3097b8aa03ca0e5631bdc7a6bf133bb8ddd9e4b148d20c8 ;;
+    ppc64le) asset=jq-linux-ppc64el; expected_hash=0dba61281e525ced2111bc00c8bd8078100e8822c33bfb35feee95314bbeeea2 ;;
+    *) warn "没有适用于 ${machine} 的 jq 静态包。"; return 1 ;;
+  esac
+  download_url="https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/${asset}"
+  temp=$(temp_file)
+  info "正在从 jq 官方仓库安装静态版 jq ${JQ_VERSION}（跳过 APT）。"
+  if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$download_url" -o "$temp"; then
+    rm -f "$temp"; warn "jq 静态包下载失败。"; return 1
+  fi
+  if command_exists sha256sum; then actual_hash=$(sha256sum "$temp" | awk '{print $1}');
+  elif command_exists openssl; then actual_hash=$(openssl dgst -sha256 "$temp" | awk '{print $NF}');
+  else rm -f "$temp"; warn "缺少 SHA-256 校验工具。"; return 1; fi
+  if [[ $actual_hash != "$expected_hash" ]]; then
+    rm -f "$temp"; warn "jq 静态包 SHA-256 校验失败，拒绝安装。"; return 1
+  fi
+  install -d -m 755 "$(dirname "$JQ_INSTALL_PATH")"
+  install -m 755 "$temp" "$JQ_INSTALL_PATH"
+  rm -f "$temp"
+  if [[ ${XRAYCTL_TESTING:-0} != 1 ]]; then
+    "$JQ_INSTALL_PATH" --version >/dev/null || { warn "jq 静态包无法运行。"; return 1; }
+  fi
+  info "jq 已安装：${JQ_INSTALL_PATH}"
+}
+
 install_packages() {
-  local missing=() item manager
+  local missing=() remaining=() item manager
   for item in "$@"; do command_exists "$item" || missing+=("$item"); done
+  ((${#missing[@]})) || return 0
+  for item in "${missing[@]}"; do
+    if [[ $item == jq ]] && install_jq_standalone; then continue; fi
+    remaining+=("$item")
+  done
+  missing=("${remaining[@]}")
   ((${#missing[@]})) || return 0
   manager=$(pkg_manager) || die "未识别包管理器，请手动安装：${missing[*]}"
   info "安装依赖：${missing[*]}"
