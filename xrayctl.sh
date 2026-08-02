@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.3"
+readonly XRAYCTL_VERSION="1.2.4"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -491,6 +491,17 @@ meta_delete_inbound() {
   install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
 }
 
+meta_rename_inbound() {
+  local old_tag=$1 new_tag=$2 tmp
+  init_meta; tmp=$(temp_file)
+  jq --arg old "$old_tag" --arg new "$new_tag" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '
+    if .inbounds[$old] then
+      .inbounds[$new]=(.inbounds[$old] + {updatedAt:$now}) | del(.inbounds[$old])
+    else . end' \
+    "$META_FILE" >"$tmp"
+  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+}
+
 get_service_user() {
   local user
   user=$(systemctl show "$SERVICE_NAME" -p User --value 2>/dev/null || true)
@@ -856,6 +867,48 @@ select_inbound() {
   printf -v "$__var" '%s' "$selected_tag"
 }
 
+prompt_renamed_inbound_tag() {
+  local __var=$1 old_tag=$2 candidate
+  while true; do
+    prompt_validated_value candidate "新的节点名称" "$old_tag" validate_tag "名称只能包含字母、数字、点、下划线和横线。" || return 1
+    if [[ $candidate != "$old_tag" ]] && { inbound_exists "$candidate" || outbound_exists "$candidate" || [[ $candidate == xrayctl-api ]]; }; then
+      warn "名称已被节点或出站使用，请重新输入。"
+      continue
+    fi
+    printf -v "$__var" '%s' "$candidate"
+    return 0
+  done
+}
+
+rename_inbound() {
+  ensure_runtime_dependencies inbound-rename; require_xray_installed; ensure_config
+  local old_tag=${1-} new_tag=${2-} tmp
+  [[ -n $old_tag ]] || select_inbound old_tag || return
+  inbound_exists "$old_tag" || die "找不到节点：$old_tag"
+  [[ -n $new_tag ]] || prompt_renamed_inbound_tag new_tag "$old_tag"
+  validate_tag "$new_tag" || die "节点名称格式无效。"
+  if [[ $new_tag == "$old_tag" ]]; then info "节点名称未更改。"; return 0; fi
+  if inbound_exists "$new_tag" || outbound_exists "$new_tag" || [[ $new_tag == xrayctl-api ]]; then
+    die "名称已被节点或出站使用：$new_tag"
+  fi
+  tmp=$(temp_file)
+  jq --arg old "$old_tag" --arg new "$new_tag" '
+    (.inbounds[]|select(.tag==$old)|.tag)=$new |
+    .routing=(.routing // {domainStrategy:"IPIfNonMatch",rules:[]}) |
+    .routing.rules=((.routing.rules // []) | map(
+      if (.inboundTag|type)=="array" then
+        .inboundTag |= map(if .==$old then $new else . end)
+      elif .inboundTag==$old then .inboundTag=$new
+      else . end |
+      if (.ruleTag // "")==("xrayctl-outbound:"+$old) then .ruleTag=("xrayctl-outbound:"+$new) else . end
+    ))' "$CONFIG_FILE" >"$tmp"
+  if apply_candidate "$tmp"; then
+    meta_rename_inbound "$old_tag" "$new_tag"
+    info "节点已重命名：${old_tag} → ${new_tag}。"
+  fi
+  rm -f "$tmp"
+}
+
 modify_inbound_basic() {
   ensure_runtime_dependencies inbound-modify; ensure_config
   local tag=${1-} current listen port host tmp old_port
@@ -966,7 +1019,7 @@ print_client_traffic_row() {
     [[ $parsed_down =~ ^[0-9]+$ ]] || parsed_down=0
     total=$((parsed_up+parsed_down))
   fi
-  print_table_cell "$number" 6; print_table_cell "$label" 28; print_table_cell "$credential" 40
+  print_table_cell "$number" 5; print_table_cell "$label" 16; print_table_cell "$credential" 40
   if ((snapshot_available)); then
     print_table_cell "$(format_bytes "$parsed_up")" 14
     print_table_cell "$(format_bytes "$parsed_down")" 14
@@ -992,7 +1045,7 @@ list_clients() {
     vless|vmess|trojan)
       stats_file=$(temp_file)
       if query_user_traffic_snapshot >"$stats_file"; then stats_available=1; fi
-      print_table_cell "序号" 6; print_table_cell "用户" 28; print_table_cell "凭据" 40
+      print_table_cell "序号" 5; print_table_cell "用户" 16; print_table_cell "凭据" 40
       print_table_cell "上传" 14; print_table_cell "下载" 14; printf '总计\n'
       if [[ $protocol == vless || $protocol == vmess ]]; then
         jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE"
@@ -1004,9 +1057,9 @@ list_clients() {
       rm -f "$stats_file"
       ;;
     socks|http)
-      print_table_cell "序号" 6; print_table_cell "用户" 32; printf '凭据\n'
+      print_table_cell "序号" 5; print_table_cell "用户" 16; printf '凭据\n'
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts // []|to_entries[]|[.key+1,.value.user,(.value.pass // "-")]|@tsv' "$CONFIG_FILE" \
-        | while IFS=$'\t' read -r number label credential; do print_table_cell "$number" 6; print_table_cell "$label" 32; printf '%s\n' "$credential"; done ;;
+        | while IFS=$'\t' read -r number label credential; do print_table_cell "$number" 5; print_table_cell "$label" 16; printf '%s\n' "$credential"; done ;;
     *) die "${protocol} 不支持独立多用户管理。";;
   esac
 }
@@ -1848,7 +1901,7 @@ show_node_summary() {
       .protocol,(.port|tostring),(.streamSettings.method // "raw"),
       (.streamSettings.security // "none"),(.listen // "0.0.0.0")]|@tsv' "$CONFIG_FILE"
   )
-  printf '协议: %s  |  端口: %s  |  传输: %s  |  安全: %s\n监听: %s\n\n' \
+  printf '协议: %s  |  端口: %s  |  传输: %s  |  安全: %s  |  监听: %s\n\n' \
     "$protocol" "$port" "$method" "$security" "$listen"
   if query_inbound_traffic "$tag" up down; then
     total=$((up+down))
@@ -2010,6 +2063,32 @@ client_menu_for_tag() {
   done
 }
 
+modify_inbound_menu() {
+  local tag=$1 protocol=$2 choice
+  while inbound_exists "$tag"; do
+    clear_screen
+    heading "修改节点信息 · ${tag}"
+    if [[ $protocol == vless || $protocol == vmess || $protocol == trojan ]]; then
+      printf '1) 修改节点名称\n2) 修改地址/端口\n3) 修改传输/安全\n0) 返回节点\n'
+      read -r -p "请选择: " choice
+      case $choice in
+        1) run_menu_action rename_inbound "$tag"; pause; return;;
+        2) run_menu_action modify_inbound_basic "$tag"; pause;;
+        3) run_menu_action modify_inbound_transport "$tag"; pause;;
+        0) return;; *) warn "无效选项。"; pause;;
+      esac
+    else
+      printf '1) 修改节点名称\n2) 修改地址/端口\n0) 返回节点\n'
+      read -r -p "请选择: " choice
+      case $choice in
+        1) run_menu_action rename_inbound "$tag"; pause; return;;
+        2) run_menu_action modify_inbound_basic "$tag"; pause;;
+        0) return;; *) warn "无效选项。"; pause;;
+      esac
+    fi
+  done
+}
+
 manage_inbound_menu() {
   local tag=$1 choice protocol auth
   while inbound_exists "$tag"; do
@@ -2019,19 +2098,19 @@ manage_inbound_menu() {
     show_node_summary "$tag"
     case $protocol in
       vless|vmess|trojan)
-        printf '1) 分享信息\n2) 用户管理\n3) 修改地址/端口\n4) 修改传输/安全\n5) 查看 JSON\n6) 删除节点\n0) 返回列表\n'
+        printf '1) 分享信息\n2) 用户管理\n3) 修改节点信息\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
         read -r -p "请选择: " choice
         case $choice in
-          1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) run_menu_action modify_inbound_basic "$tag"; pause;;
-          4) run_menu_action modify_inbound_transport "$tag"; pause;; 5) run_menu_action show_inbound "$tag"; pause;;
-          6) run_menu_action delete_inbound "$tag"; pause;; 0) return;; *) warn "无效选项。"; pause;;
+          1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
+          4) run_menu_action show_inbound "$tag"; pause;; 5) run_menu_action delete_inbound "$tag"; pause;;
+          0) return;; *) warn "无效选项。"; pause;;
         esac
         ;;
       http)
-        printf '1) 客户端配置\n2) 用户管理\n3) 修改地址/端口\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
+        printf '1) 客户端配置\n2) 用户管理\n3) 修改节点信息\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
         read -r -p "请选择: " choice
         case $choice in
-          1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) run_menu_action modify_inbound_basic "$tag"; pause;;
+          1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
           4) run_menu_action show_inbound "$tag"; pause;; 5) run_menu_action delete_inbound "$tag"; pause;;
           0) return;; *) warn "无效选项。"; pause;;
         esac
@@ -2040,18 +2119,18 @@ manage_inbound_menu() {
         auth=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth // "noauth"' "$CONFIG_FILE")
         printf '认证: %s\n\n' "$auth"
         if [[ $auth == password ]]; then
-          printf '1) 客户端配置\n2) 用户管理\n3) 修改地址/端口\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
+          printf '1) 客户端配置\n2) 用户管理\n3) 修改节点信息\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
           read -r -p "请选择: " choice
           case $choice in
-            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) run_menu_action modify_inbound_basic "$tag"; pause;;
+            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
             4) run_menu_action show_inbound "$tag"; pause;; 5) run_menu_action delete_inbound "$tag"; pause;;
             0) return;; *) warn "无效选项。"; pause;;
           esac
         else
-          printf '1) 客户端配置\n2) 修改地址/端口\n3) 查看 JSON\n4) 删除节点\n0) 返回列表\n'
+          printf '1) 客户端配置\n2) 修改节点信息\n3) 查看 JSON\n4) 删除节点\n0) 返回列表\n'
           read -r -p "请选择: " choice
           case $choice in
-            1) run_menu_action print_links "$tag"; pause;; 2) run_menu_action modify_inbound_basic "$tag"; pause;;
+            1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol";;
             3) run_menu_action show_inbound "$tag"; pause;; 4) run_menu_action delete_inbound "$tag"; pause;;
             0) return;; *) warn "无效选项。"; pause;;
           esac
@@ -2248,6 +2327,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl inbound list            列出节点
   xrayctl inbound add             交互新增节点
   xrayctl inbound show <标签>     查看节点 JSON
+  xrayctl inbound rename <旧标签> <新标签>
   xrayctl inbound modify <标签>   修改监听端口/地址
   xrayctl inbound transport <标签> 修改传输与安全方式
   xrayctl inbound delete <标签> [--yes]
@@ -2293,6 +2373,7 @@ dispatch() {
     inbound)
       case ${1:-list} in
         list) ensure_config; list_inbounds;; add) add_inbound;; show) ensure_config; show_inbound "${2:?请提供节点标签}";;
+        rename) rename_inbound "${2-}" "${3-}";;
         modify|edit) modify_inbound_basic "${2-}";; transport|stream) modify_inbound_transport "${2-}";;
         delete|remove) delete_inbound "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
         *) die "未知 inbound 子命令：${1}";; esac;;

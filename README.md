@@ -2,7 +2,7 @@
 
 `xrayctl` 是一个面向 systemd Linux 服务器的单文件 Xray 管理脚本。交互界面按“先看对象、再直接操作”设计：进入节点管理就能看到全部节点，选中节点后可在同一页管理分享信息、用户、端口和传输方式。它使用 XTLS 官方安装器安装核心，使用 Xray 自带的 `run -test` 检查每次配置变更，并在服务重启失败时自动回滚配置。
 
-当前版本：`1.2.3`
+当前版本：`1.2.4`
 
 ## 功能
 
@@ -10,7 +10,7 @@
 - VLESS、VMess、Trojan、SOCKS5、HTTP 入站
 - RAW、XHTTP、WebSocket、gRPC 传输
 - REALITY、TLS、无传输安全（仅建议可信私网）
-- 节点新增、修改监听信息、修改传输、安全方式、删除、JSON 高级编辑
+- 节点新增、重命名、修改监听信息、修改传输、安全方式、删除、JSON 高级编辑
 - 节点上传、下载和总流量统计，以及 VLESS、VMess、Trojan 用户级流量统计（Xray 本次运行期间累计）
 - 多用户新增、重命名、更换 UUID/密码、删除；用户列表直接显示当前凭据
 - SOCKS5、HTTP 出站新增、节点绑定和删除
@@ -33,8 +33,10 @@ Xray Linux 管理脚本
 │  ├─ 管理已有节点
 │  │  ├─ 分享信息 / 客户端配置
 │  │  ├─ 用户管理（进入即显示凭据与支持协议的用户流量）
-│  │  ├─ 修改地址和端口
-│  │  ├─ 修改传输和安全方式
+│  │  ├─ 修改节点信息
+│  │  │  ├─ 修改节点名称
+│  │  │  ├─ 修改地址和端口
+│  │  │  └─ 修改传输和安全方式
 │  │  ├─ 查看 JSON
 │  │  └─ 删除节点
 │  ├─ 输出全部节点订阅
@@ -103,6 +105,7 @@ xrayctl status                   # 状态
 xrayctl update                   # 升级核心
 xrayctl inbound list             # 节点列表
 xrayctl inbound add              # 新建节点
+xrayctl inbound rename OLD NEW   # 修改节点名称
 xrayctl inbound modify TAG       # 修改监听地址/端口/公网地址
 xrayctl inbound transport TAG    # 修改传输和安全方式
 xrayctl inbound delete TAG       # 删除节点
