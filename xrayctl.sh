@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.20"
+readonly XRAYCTL_VERSION="1.2.21"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
 readonly JQ_VERSION="1.8.2"
@@ -1946,19 +1946,19 @@ delete_managed_certificate() {
   validate_certificate_identifier "$identifier" || die "证书标识无效。"
   cert_path="${CERT_DIR}/${identifier}.crt"
   key_path="${CERT_DIR}/${identifier}.key"
-  [[ -e $cert_path || -e $key_path ]] || { warn "托管证书不存在：${identifier}"; return 1; }
+  [[ -e $cert_path || -e $key_path ]] || { warn "托管证书不存在：${identifier}"; return 0; }
   users=$(certificate_inbound_users "$identifier")
   if [[ -n $users ]]; then
     warn "证书正在被以下 TLS 入站使用，不能删除："
     while IFS= read -r tag; do [[ -n $tag ]] && printf '  - %s\n' "$tag" >&2; done <<<"$users"
-    return 1
+    return 0
   fi
   [[ $assume_yes == 1 ]] || confirm "删除托管证书 ${identifier}？" N || return 0
   renewal="/etc/letsencrypt/renewal/${identifier}.conf"
   if [[ -f $renewal ]]; then
-    command_exists certbot || { warn "该证书仍有 Let's Encrypt 续期配置，但当前找不到 certbot，未执行删除。"; return 1; }
+    command_exists certbot || { warn "该证书仍有 Let's Encrypt 续期配置，但当前找不到 certbot，未执行删除。"; return 0; }
     certbot delete --cert-name "$identifier" --non-interactive \
-      || { warn "Let's Encrypt 证书删除失败，托管副本未改动。"; return 1; }
+      || { warn "Let's Encrypt 证书删除失败，托管副本未改动。"; return 0; }
   fi
   hook="/etc/letsencrypt/renewal-hooks/deploy/xrayctl-${identifier}"
   rm -f "$cert_path" "$key_path" "$hook"
