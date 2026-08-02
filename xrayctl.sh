@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.0"
+readonly XRAYCTL_VERSION="1.0.1"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 
 XRAY_BIN="${XRAYCTL_XRAY_BIN:-/usr/local/bin/xray}"
@@ -141,6 +141,22 @@ pkg_manager() {
   else return 1; fi
 }
 
+apt_get_guarded() {
+  local total_timeout=${XRAYCTL_APT_TIMEOUT:-180}
+  local apt_options=(
+    -o Acquire::Retries=2
+    -o Acquire::http::Timeout=15
+    -o Acquire::https::Timeout=15
+    -o Dpkg::Use-Pty=0
+  )
+  [[ ${XRAYCTL_APT_FORCE_IPV4:-1} == 0 ]] || apt_options+=(-o Acquire::ForceIPv4=true)
+  if command_exists timeout; then
+    timeout --foreground "${total_timeout}s" apt-get "${apt_options[@]}" "$@"
+  else
+    apt-get "${apt_options[@]}" "$@"
+  fi
+}
+
 install_packages() {
   local missing=() item manager
   for item in "$@"; do command_exists "$item" || missing+=("$item"); done
@@ -148,7 +164,13 @@ install_packages() {
   manager=$(pkg_manager) || die "未识别包管理器，请手动安装：${missing[*]}"
   info "安装依赖：${missing[*]}"
   case $manager in
-    apt) DEBIAN_FRONTEND=noninteractive apt-get update -y; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}" ;;
+    apt)
+      if ! DEBIAN_FRONTEND=noninteractive apt_get_guarded update -y; then
+        warn "APT 软件索引更新失败或超时，尝试使用现有索引继续安装。"
+      fi
+      DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y --no-install-recommends "${missing[@]}" \
+        || die "APT 依赖安装失败。请检查 /etc/apt/sources.list、DNS 和服务器网络后重试。"
+      ;;
     dnf) dnf install -y "${missing[@]}" ;;
     yum) yum install -y "${missing[@]}" ;;
     pacman) pacman -Sy --noconfirm "${missing[@]}" ;;
@@ -326,7 +348,7 @@ install_or_update_xray() {
   xray_installed && installed_before=1
   installer=$(temp_file)
   info "从 XTLS 官方仓库下载安装脚本。"
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 "$OFFICIAL_INSTALLER_URL" -o "$installer"
+  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
   chmod 700 "$installer"
   if [[ -n $version ]]; then bash "$installer" install --version "${version#v}";
   else bash "$installer" install; fi
@@ -373,7 +395,7 @@ uninstall_xray() {
   fi
   backup_all || true
   installer=$(temp_file)
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 "$OFFICIAL_INSTALLER_URL" -o "$installer"
+  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
   chmod 700 "$installer"
   if [[ $purge == 1 ]]; then bash "$installer" remove --purge; else bash "$installer" remove; fi
   rm -f "$installer"
@@ -983,7 +1005,12 @@ install_certbot() {
   local manager; manager=$(pkg_manager) || die "无法自动安装 certbot。"
   info "安装 certbot。"
   case $manager in
-    apt) apt-get update -y; DEBIAN_FRONTEND=noninteractive apt-get install -y certbot ;;
+    apt)
+      DEBIAN_FRONTEND=noninteractive apt_get_guarded update -y \
+        || warn "APT 软件索引更新失败或超时，尝试使用现有索引。"
+      DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y certbot \
+        || die "certbot 安装失败，请检查 APT 软件源。"
+      ;;
     dnf) dnf install -y certbot ;;
     yum) yum install -y epel-release; yum install -y certbot ;;
     pacman) pacman -Sy --noconfirm certbot ;;
