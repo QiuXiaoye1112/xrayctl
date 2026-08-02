@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.3-alpine"
+readonly XRAYCTL_VERSION="1.0.4-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -787,22 +787,24 @@ prompt_port() {
 }
 
 prompt_public_host() {
-  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} value ipv4="" ipv6="" address_choice
+  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} value ipv4="" ipv6="" address_choice prompt_label="客户端连接地址"
   if [[ -z $default ]]; then
     ipv4=$(detect_public_ipv4 || true)
     ipv6=$(detect_public_ipv6 || true)
     if [[ -n $ipv4 && -n $ipv6 ]]; then
-      choose address_choice "选择客户端连接地址" "IPv4  ${ipv4}" "IPv6  ${ipv6}" "手动输入"
+      choose address_choice "选择客户端连接地址" "IPv4  ${ipv4}" "IPv6  ${ipv6}" "域名/其他地址"
       case $address_choice in
         1) printf -v "$__var" '%s' "$ipv4"; return 0;;
         2) printf -v "$__var" '%s' "$ipv6"; return 0;;
+        3) prompt_label="客户端连接域名/IP";;
       esac
     elif [[ -n $ipv4 ]]; then default=$ipv4
     elif [[ -n $ipv6 ]]; then default=$ipv6
+    else prompt_label="客户端连接域名/IP"
     fi
   fi
   while true; do
-    prompt_value value "客户端连接地址" "$default"
+    prompt_value value "$prompt_label" "$default"
     if [[ -n $value && $value != *" "* ]]; then
       printf -v "$__var" '%s' "$value"
       return
