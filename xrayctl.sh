@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.0"
+readonly XRAYCTL_VERSION="1.2.1"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -443,8 +443,8 @@ install_or_update_xray() {
   info "从 XTLS 官方仓库下载安装脚本。"
   curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
   chmod 700 "$installer"
-  if [[ -n $version ]]; then bash "$installer" install --version "${version#v}";
-  else bash "$installer" install; fi
+  if [[ -n $version ]]; then TERM="${TERM:-xterm}" bash "$installer" install --version "${version#v}";
+  else TERM="${TERM:-xterm}" bash "$installer" install; fi
   rm -f "$installer"
   [[ -x $XRAY_BIN ]] || die "Xray 安装后未找到：$XRAY_BIN"
   if ((installed_before == 0)) || [[ ! -f $CONFIG_FILE ]]; then write_default_config; else ensure_config; fi
@@ -491,7 +491,7 @@ uninstall_xray() {
   installer=$(temp_file)
   curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
   chmod 700 "$installer"
-  if [[ $purge == 1 ]]; then bash "$installer" remove --purge; else bash "$installer" remove; fi
+  if [[ $purge == 1 ]]; then TERM="${TERM:-xterm}" bash "$installer" remove --purge; else TERM="${TERM:-xterm}" bash "$installer" remove; fi
   rm -f "$installer"
   if [[ $purge == 1 ]]; then
     for hook in /etc/letsencrypt/renewal-hooks/deploy/xrayctl-*; do
