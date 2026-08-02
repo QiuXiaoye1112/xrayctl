@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.9"
+readonly XRAYCTL_VERSION="1.2.10"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
 readonly JQ_VERSION="1.8.2"
@@ -278,7 +278,7 @@ install_jq_standalone() {
   esac
   download_url="https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/${asset}"
   temp=$(temp_file)
-  info "正在从 jq 官方仓库安装静态版 jq ${JQ_VERSION}（跳过 APT）。"
+  info "正在安装 jq ${JQ_VERSION}。"
   if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$download_url" -o "$temp"; then
     rm -f "$temp"; warn "jq 静态包下载失败。"; return 1
   fi
@@ -1588,12 +1588,12 @@ bootstrap_certbot_venv_without_apt() {
   command_exists python3 || return 1
   install -d -m 755 "$(dirname "$venv_dir")"
   if [[ ! -x $venv_dir/bin/python ]]; then
-    info "创建 Certbot Python 环境（跳过 APT）。"
+    info "正在准备 Certbot 环境。"
     python3 -m venv --without-pip "$venv_dir" >/dev/null 2>&1 || return 1
   fi
   if [[ ! -x $venv_dir/bin/pip ]]; then
     bootstrap=$(temp_file)
-    info "从 PyPA 安装 pip（跳过 APT，最多等待 ${pip_timeout} 秒）。"
+    info "正在准备 Certbot 依赖（最多等待 ${pip_timeout} 秒）。"
     if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 2 \
       --connect-timeout 15 --max-time 60 https://bootstrap.pypa.io/get-pip.py -o "$bootstrap"; then
       rm -f "$bootstrap"
@@ -1613,10 +1613,10 @@ install_certbot_ip_support() {
   local apt_timeout=${XRAYCTL_CERT_APT_TIMEOUT:-60} pip_timeout=${XRAYCTL_CERT_PIP_TIMEOUT:-120}
   manager=$(pkg_manager) || die "无法安装支持 IP 证书的 Certbot。"
   if ! bootstrap_certbot_venv_without_apt "$venv_dir"; then
-    warn "无法免 APT 创建 Python 环境，尝试系统包管理器。"
+    info "正在切换 Certbot 安装方式。"
     case $manager in
       apt)
-        info "安装 Python venv（APT 最多等待 ${apt_timeout} 秒）。"
+        info "正在准备 Python 环境（最多等待 ${apt_timeout} 秒）。"
         DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$apt_timeout" \
           apt_get_guarded install -y --no-install-recommends python3 python3-venv \
           || die "Python venv 安装失败或超时，请检查 APT 软件源。" ;;
