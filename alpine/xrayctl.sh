@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.1-alpine"
+readonly XRAYCTL_VERSION="1.0.2-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -793,31 +793,28 @@ validate_certificate_pair_files() {
 }
 
 prompt_certificate_files() {
-  local __cert=$1 __key=$2 default_cert=${3:-} default_key=${4:-} cert_value key_value
+  local __cert=$1 __key=$2 default_cert=${3:-} default_key=${4:-} entered_cert entered_key
   while true; do
-    prompt_value cert_value "证书文件路径" "$default_cert"
-    prompt_value key_value "私钥文件路径" "$default_key"
-    if validate_certificate_pair_files "$cert_value" "$key_value"; then
-      printf -v "$__cert" '%s' "$cert_value"
-      printf -v "$__key" '%s' "$key_value"
+    prompt_value entered_cert "证书文件路径" "$default_cert"
+    prompt_value entered_key "私钥文件路径" "$default_key"
+    if validate_certificate_pair_files "$entered_cert" "$entered_key"; then
+      printf -v "$__cert" '%s' "$entered_cert"
+      printf -v "$__key" '%s' "$entered_key"
       return 0
     fi
   done
 }
 
 prompt_tls_certificate() {
-  local __cert=$1 __key=$2 choice identifier cert_value key_value
-  if (( $(certificate_count) > 0 )); then
-    choose choice "选择 TLS 证书" "使用托管证书" "使用证书文件"
-    if [[ $choice == 1 ]]; then
-      select_managed_certificate identifier || return 1
-      cert_value="${CERT_DIR}/${identifier}.crt"
-      key_value="${CERT_DIR}/${identifier}.key"
-      validate_certificate_pair_files "$cert_value" "$key_value" || return 1
-      printf -v "$__cert" '%s' "$cert_value"
-      printf -v "$__key" '%s' "$key_value"
-      return 0
-    fi
+  local __cert=$1 __key=$2 identifier cert_value key_value
+  if (( $(managed_certificate_count) > 0 )) && confirm "使用托管证书？" Y; then
+    select_managed_certificate identifier || return 1
+    cert_value="${CERT_DIR}/${identifier}.crt"
+    key_value="${CERT_DIR}/${identifier}.key"
+    validate_certificate_pair_files "$cert_value" "$key_value" || return 1
+    printf -v "$__cert" '%s' "$cert_value"
+    printf -v "$__key" '%s' "$key_value"
+    return 0
   fi
   prompt_certificate_files cert_value key_value
   printf -v "$__cert" '%s' "$cert_value"
@@ -1865,6 +1862,16 @@ list_certificates() {
 certificate_count() {
   local cert count=0
   for cert in "$CERT_DIR"/*.crt; do [[ -e $cert ]] && ((count+=1)); done
+  printf '%s' "$count"
+}
+
+managed_certificate_count() {
+  local cert identifier count=0
+  for cert in "$CERT_DIR"/*.crt; do
+    [[ -e $cert ]] || continue
+    identifier=$(basename "$cert" .crt)
+    [[ -r "${CERT_DIR}/${identifier}.key" ]] && ((count+=1))
+  done
   printf '%s' "$count"
 }
 
