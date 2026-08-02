@@ -121,3 +121,13 @@ xrayctl uninstall --purge       # 删除 Xray 配置、证书和日志
 ```
 
 两种卸载方式都会先创建备份；备份目录默认保留，便于恢复。
+
+## 安装卡在 APT
+
+如果旧版安装过程停在 `0% [Waiting for headers]`，可按 `Ctrl+C` 中止后重新执行一键安装。当前版本会优先使用 IPv4，并为 APT 设置连接超时、重试次数和 180 秒总超时，不再无限等待失效的软件源。
+
+仅有 IPv6 网络的服务器可以关闭 IPv4 强制模式：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh | sudo env XRAYCTL_APT_FORCE_IPV4=0 bash
+```

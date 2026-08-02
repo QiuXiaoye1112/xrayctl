@@ -19,7 +19,7 @@ cleanup() { rm -rf "$temp_dir"; }
 trap cleanup EXIT
 
 info "正在下载 xrayctl..."
-curl --fail --location --proto '=https' --tlsv1.2 --retry 3 "$SCRIPT_URL" -o "${temp_dir}/xrayctl"
+curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 120 "$SCRIPT_URL" -o "${temp_dir}/xrayctl"
 grep -q '^# xrayctl - Xray Linux terminal manager' "${temp_dir}/xrayctl" \
   || die "下载内容校验失败。"
 
