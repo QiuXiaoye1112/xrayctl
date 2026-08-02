@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.7"
+readonly XRAYCTL_VERSION="1.2.8"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -137,6 +137,7 @@ validate_domain_or_ip() { validate_ip_literal "$1" || validate_domain "$1"; }
 validate_certificate_identifier() { [[ $1 =~ ^[A-Za-z0-9.-]+$ ]]; }
 validate_readable_file() { [[ -f $1 && -r $1 ]]; }
 validate_proxy_address() { [[ -n $1 && $1 != *" "* ]]; }
+validate_uuid() { [[ $1 =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; }
 
 validate_reality_target() {
   local value=$1 host port
@@ -253,6 +254,11 @@ apt_get_guarded() {
   else
     apt-get "${apt_options[@]}" "$@"
   fi
+}
+
+apt_package_index_available() {
+  [[ -d /var/lib/apt/lists ]] &&
+    find /var/lib/apt/lists -maxdepth 1 -type f -size +0c ! -name lock -print -quit 2>/dev/null | grep -q .
 }
 
 install_jq_standalone() {
@@ -1233,7 +1239,7 @@ delete_client() {
 
 rotate_client_credential() {
   ensure_runtime_dependencies client-rotate; ensure_config
-  local tag=${1-} label=${2-} protocol value tmp
+  local tag=${1-} label=${2-} protocol value generated tmp
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
   [[ -n $label ]] || select_client label "$tag" || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
@@ -1241,13 +1247,14 @@ rotate_client_credential() {
   tmp=$(temp_file)
   case $protocol in
     vless|vmess)
-      value=$(generate_uuid)
+      generated=$(generate_uuid)
+      prompt_validated_value value "新 UUID" "$generated" validate_uuid "UUID 格式无效，请重新输入。" || { rm -f "$tmp"; return 1; }
       jq --arg tag "$tag" --arg label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
     trojan)
-      value=$(random_password)
+      prompt_secret value "新密码" "$(random_password)" || { rm -f "$tmp"; return 1; }
       jq --arg tag "$tag" --arg label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)|.password)=$value' "$CONFIG_FILE" >"$tmp" ;;
     socks|http)
-      value=$(random_password)
+      prompt_secret value "新密码" "$(random_password)" || { rm -f "$tmp"; return 1; }
       jq --arg tag "$tag" --arg label "$label" --arg value "$value" '
         (.inbounds[]|select(.tag==$tag)|.settings) |= (
           ((.accounts // .users // [])|map(if .user==$label then .pass=$value else . end)) as $all |
@@ -1451,18 +1458,22 @@ print_all_share_links() {
 
 install_firewall() {
   ensure_system_context firewall-install
-  local manager ssh_port=${XRAYCTL_SSH_PORT:-} tool_timeout=${XRAYCTL_SYSTEM_TOOL_TIMEOUT:-60}
+  local manager ssh_port=${XRAYCTL_SSH_PORT:-} tool_timeout=${XRAYCTL_SYSTEM_TOOL_TIMEOUT:-20}
   if ! has_net_admin; then
     warn "当前 NAT/容器没有 NET_ADMIN 权限，不能管理系统防火墙；请在服务商控制台放行端口。"
     return 0
   fi
   if ! command_exists ufw && ! command_exists firewall-cmd; then
     manager=$(pkg_manager) || { error "无法识别包管理器。"; return 0; }
-    info "安装防火墙（每个安装阶段最多等待 ${tool_timeout} 秒）。"
     case $manager in
       apt)
-        DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$tool_timeout" apt_get_guarded update -y || true
-        DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$tool_timeout" apt_get_guarded install -y ufw || { error "UFW 安装失败或超时。"; return 0; }
+        if ! apt_package_index_available; then
+          DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$tool_timeout" apt_get_guarded update -y \
+            || { error "APT 软件索引更新失败或超时。"; return 0; }
+        fi
+        DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$tool_timeout" \
+          apt_get_guarded install -y --no-install-recommends ufw \
+          || { error "UFW 安装失败或超时。"; return 0; }
         ;;
       dnf) run_bounded "$tool_timeout" dnf install -y firewalld || { error "firewalld 安装失败或超时。"; return 0; } ;;
       yum) run_bounded "$tool_timeout" yum install -y firewalld || { error "firewalld 安装失败或超时。"; return 0; } ;;
@@ -1472,7 +1483,6 @@ install_firewall() {
   fi
   if command_exists ufw; then
     if ufw status 2>/dev/null | grep -q '^Status: active'; then info "UFW 已安装并启用。"; return; fi
-    info "UFW 已安装。"
     [[ -t 0 ]] && confirm "启用 UFW？" N || return 0
     [[ -n $ssh_port ]] || ssh_port=$(awk '{print $4}' <<<"${SSH_CONNECTION:-}" 2>/dev/null || true)
     validate_port "${ssh_port:-}" || ssh_port=22
@@ -1481,7 +1491,6 @@ install_firewall() {
     else error "UFW 启用失败或超时。"; fi
   elif command_exists firewall-cmd; then
     if firewall-cmd --state >/dev/null 2>&1; then info "firewalld 已安装并启用。"; return; fi
-    info "firewalld 已安装。"
     [[ -t 0 ]] && confirm "启用 firewalld？" N || return 0
     if run_bounded 30 systemctl enable --now firewalld; then
       [[ -n $ssh_port ]] || ssh_port=$(awk '{print $4}' <<<"${SSH_CONNECTION:-}" 2>/dev/null || true)
@@ -1555,32 +1564,53 @@ EOF
   systemctl enable --now xrayctl-certbot-renew.timer >/dev/null
 }
 
+bootstrap_certbot_venv_without_apt() {
+  local venv_dir=$1 bootstrap pip_timeout=${XRAYCTL_CERT_PIP_TIMEOUT:-120}
+  command_exists python3 || return 1
+  install -d -m 755 "$(dirname "$venv_dir")"
+  if [[ ! -x $venv_dir/bin/python ]]; then
+    info "创建 Certbot Python 环境（跳过 APT）。"
+    python3 -m venv --without-pip "$venv_dir" >/dev/null 2>&1 || return 1
+  fi
+  if [[ ! -x $venv_dir/bin/pip ]]; then
+    bootstrap=$(temp_file)
+    info "从 PyPA 安装 pip（跳过 APT，最多等待 ${pip_timeout} 秒）。"
+    if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 2 \
+      --connect-timeout 15 --max-time 60 https://bootstrap.pypa.io/get-pip.py -o "$bootstrap"; then
+      rm -f "$bootstrap"
+      return 1
+    fi
+    if ! run_bounded "$pip_timeout" "$venv_dir/bin/python" "$bootstrap" --disable-pip-version-check; then
+      rm -f "$bootstrap"
+      return 1
+    fi
+    rm -f "$bootstrap"
+  fi
+  [[ -x $venv_dir/bin/pip ]]
+}
+
 install_certbot_ip_support() {
   local manager venv_dir=/opt/xrayctl/certbot
+  local apt_timeout=${XRAYCTL_CERT_APT_TIMEOUT:-60} pip_timeout=${XRAYCTL_CERT_PIP_TIMEOUT:-120}
   manager=$(pkg_manager) || die "无法安装支持 IP 证书的 Certbot。"
-  if ! command_exists python3 || ! python3 -m venv --help >/dev/null 2>&1; then
-    info "安装 Python venv。"
+  if ! bootstrap_certbot_venv_without_apt "$venv_dir"; then
+    warn "无法免 APT 创建 Python 环境，尝试系统包管理器。"
     case $manager in
       apt)
-        DEBIAN_FRONTEND=noninteractive apt_get_guarded update -y || true
-        DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y python3 python3-venv ;;
-      dnf) dnf install -y python3 python3-pip ;;
-      yum) yum install -y python3 python3-pip ;;
-      pacman) pacman -Sy --noconfirm python python-pip ;;
-      zypper) zypper --non-interactive install python3 python3-pip ;;
-    esac
-  fi
-  install -d -m 755 "$(dirname "$venv_dir")"
-  if ! python3 -m venv "$venv_dir" >/dev/null 2>&1; then
-    case $manager in
-      apt) DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y python3-venv ;;
-      dnf|yum) "$manager" install -y python3-pip ;;
-      pacman) pacman -Sy --noconfirm python-pip ;;
-      zypper) zypper --non-interactive install python3-pip ;;
+        info "安装 Python venv（APT 最多等待 ${apt_timeout} 秒）。"
+        DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$apt_timeout" \
+          apt_get_guarded install -y --no-install-recommends python3 python3-venv \
+          || die "Python venv 安装失败或超时，请检查 APT 软件源。" ;;
+      dnf) run_bounded "$apt_timeout" dnf install -y python3 python3-pip || die "Python 环境安装失败或超时。" ;;
+      yum) run_bounded "$apt_timeout" yum install -y python3 python3-pip || die "Python 环境安装失败或超时。" ;;
+      pacman) run_bounded "$apt_timeout" pacman -Sy --noconfirm python python-pip || die "Python 环境安装失败或超时。" ;;
+      zypper) run_bounded "$apt_timeout" zypper --non-interactive install python3 python3-pip || die "Python 环境安装失败或超时。" ;;
     esac
     python3 -m venv "$venv_dir" || die "无法创建 Certbot Python 环境。"
   fi
-  "$venv_dir/bin/pip" install --disable-pip-version-check --upgrade 'certbot>=5.4' \
+  info "安装支持 IP 证书的 Certbot（最多等待 ${pip_timeout} 秒）。"
+  run_bounded "$pip_timeout" "$venv_dir/bin/pip" install --disable-pip-version-check \
+    --timeout 15 --retries 2 --upgrade 'certbot>=5.4' \
     || die "新版 Certbot 安装失败。"
   if [[ -e /usr/local/bin/certbot && ! -L /usr/local/bin/certbot ]]; then
     die "/usr/local/bin/certbot 已存在且不是符号链接。"
@@ -1592,22 +1622,23 @@ install_certbot_ip_support() {
 }
 
 install_certbot() {
-  local mode=${1:-domain} manager
+  local mode=${1:-domain} manager install_timeout=${XRAYCTL_CERT_APT_TIMEOUT:-60}
   if command_exists certbot && { [[ $mode != ip ]] || certbot_supports_ip; }; then return 0; fi
   if [[ $mode == ip ]]; then install_certbot_ip_support; return; fi
   manager=$(pkg_manager) || die "无法自动安装 certbot。"
   info "安装 certbot。"
   case $manager in
     apt)
-      DEBIAN_FRONTEND=noninteractive apt_get_guarded update -y \
+      DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$install_timeout" apt_get_guarded update -y \
         || warn "APT 软件索引更新失败或超时，尝试使用现有索引。"
-      DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y certbot \
-        || die "certbot 安装失败，请检查 APT 软件源。"
+      DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$install_timeout" \
+        apt_get_guarded install -y --no-install-recommends certbot \
+        || die "certbot 安装失败或超时，请检查 APT 软件源。"
       ;;
-    dnf) dnf install -y certbot ;;
-    yum) yum install -y epel-release; yum install -y certbot ;;
-    pacman) pacman -Sy --noconfirm certbot ;;
-    zypper) zypper --non-interactive install certbot ;;
+    dnf) run_bounded "$install_timeout" dnf install -y certbot || die "certbot 安装失败或超时。" ;;
+    yum) run_bounded "$install_timeout" yum install -y epel-release || die "EPEL 安装失败或超时。"; run_bounded "$install_timeout" yum install -y certbot || die "certbot 安装失败或超时。" ;;
+    pacman) run_bounded "$install_timeout" pacman -Sy --noconfirm certbot || die "certbot 安装失败或超时。" ;;
+    zypper) run_bounded "$install_timeout" zypper --non-interactive install certbot || die "certbot 安装失败或超时。" ;;
   esac
 }
 
