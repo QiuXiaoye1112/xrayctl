@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.1"
+readonly XRAYCTL_VERSION="1.1.0"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 
 XRAY_BIN="${XRAYCTL_XRAY_BIN:-/usr/local/bin/xray}"
@@ -291,10 +291,11 @@ apply_candidate() {
 temp_file() { mktemp "${TMPDIR:-/tmp}/xrayctl.XXXXXX"; }
 
 meta_set_inbound() {
-  local tag=$1 host=$2 public_key=${3-} key_mode=${4:-keep} tmp
+  local tag=$1 host=$2 public_key=${3-} key_mode=${4:-keep} public_port=${5-} tmp
   init_meta; tmp=$(temp_file)
-  jq --arg tag "$tag" --arg host "$host" --arg publicKey "$public_key" --arg keyMode "$key_mode" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+  jq --arg tag "$tag" --arg host "$host" --arg publicKey "$public_key" --arg keyMode "$key_mode" --arg publicPort "$public_port" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now}) |
+     if $publicPort != "" then .inbounds[$tag].publicPort=($publicPort|tonumber) else . end |
      if $publicKey != "" then .inbounds[$tag].realityPublicKey=$publicKey
      elif $keyMode == "replace" then del(.inbounds[$tag].realityPublicKey)
      else . end' \
@@ -458,6 +459,15 @@ prompt_public_host() {
   printf -v "$__var" '%s' "$value"
 }
 
+prompt_public_port() {
+  local __var=$1 default=$2 value
+  while true; do
+    prompt_value value "客户端公网端口（NAT 主机填写服务商映射端口）" "$default"
+    validate_port "$value" || { warn "公网端口必须是 1-65535。"; continue; }
+    printf -v "$__var" '%s' "$value"; return
+  done
+}
+
 generate_reality_keys() {
   local __private=$1 __public=$2 output key_private key_public
   xray_installed || die "生成 REALITY 密钥前请先安装 Xray。"
@@ -609,13 +619,18 @@ build_inbound() {
 
 add_inbound() {
   ensure_runtime_dependencies inbound-add; require_xray_installed; ensure_config
-  local inbound host public_key tag tmp
+  local inbound host public_key tag tmp listen_port public_port
   build_inbound inbound host public_key
-  tag=$(jq -r '.tag' <<<"$inbound"); tmp=$(temp_file)
+  tag=$(jq -r '.tag' <<<"$inbound"); listen_port=$(jq -r '.port' <<<"$inbound")
+  prompt_public_port public_port "$listen_port"
+  tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
   if apply_candidate "$tmp"; then
-    meta_set_inbound "$tag" "$host" "$public_key" replace
-    open_firewall_for_port "$(jq -r '.port' <<<"$inbound")" prompt
+    meta_set_inbound "$tag" "$host" "$public_key" replace "$public_port"
+    if [[ $public_port != "$listen_port" ]]; then
+      info "NAT 映射：客户端 ${host}:${public_port} -> 本机 ${listen_port}；请在服务商面板确认 TCP 映射。"
+    fi
+    open_firewall_for_port "$listen_port" prompt
     heading "节点已创建"
     show_inbound "$tag"
     print_links "$tag" "" || true
@@ -628,10 +643,11 @@ list_inbounds() {
   local count
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站节点。"; return; fi
-  printf '%-4s %-24s %-14s %-8s %-12s %-10s %s\n' "序号" "标签" "协议" "端口" "传输" "安全" "监听"
-  jq -r '.inbounds | to_entries[] | [(.key+1),.value.tag,.value.protocol,(.value.port|tostring),(.value.streamSettings.method // "raw"),(.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r n tag protocol port method security listen; do
-        printf '%-4s %-24s %-14s %-8s %-12s %-10s %s\n' "$n" "$tag" "$protocol" "$port" "$method" "$security" "$listen"
+  printf '%-4s %-22s %-12s %-8s %-8s %-12s %-10s %s\n' "序号" "标签" "协议" "内网端口" "公网端口" "传输" "安全" "监听"
+  jq -r --slurpfile meta "$META_FILE" '.inbounds | to_entries[] |
+    [(.key+1),.value.tag,.value.protocol,(.value.port|tostring),(($meta[0].inbounds[.value.tag].publicPort // .value.port)|tostring),(.value.streamSettings.method // "raw"),(.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r n tag protocol listen_port public_port method security listen; do
+        printf '%-4s %-22s %-12s %-8s %-8s %-12s %-10s %s\n' "$n" "$tag" "$protocol" "$listen_port" "$public_port" "$method" "$security" "$listen"
       done
 }
 
@@ -658,7 +674,7 @@ select_inbound() {
 
 modify_inbound_basic() {
   ensure_runtime_dependencies inbound-modify; ensure_config
-  local tag=${1-} current listen port host tmp old_port
+  local tag=${1-} current listen port host public_port tmp old_port old_public_port
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到节点：$tag"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
@@ -666,10 +682,16 @@ modify_inbound_basic() {
   prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")"
   prompt_port port "$old_port" "$tag"
   prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")"
+  old_public_port=$(jq -r --arg tag "$tag" --argjson fallback "$old_port" '.inbounds[$tag].publicPort // $fallback' "$META_FILE")
+  prompt_public_port public_port "$old_public_port"
   tmp=$(temp_file)
   jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
     '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then meta_set_inbound "$tag" "$host"; open_firewall_for_port "$port" prompt; fi
+  if apply_candidate "$tmp"; then
+    meta_set_inbound "$tag" "$host" "" keep "$public_port"
+    [[ $public_port == "$port" ]] || info "NAT 映射：客户端 ${host}:${public_port} -> 本机 ${port}。"
+    open_firewall_for_port "$port" prompt
+  fi
   rm -f "$tmp"
 }
 
@@ -860,6 +882,15 @@ public_host_for_tag() {
   printf '%s' "$host"
 }
 
+public_port_for_tag() {
+  local tag=$1 port
+  port=$(jq -r --arg tag "$tag" '.inbounds[$tag].publicPort // empty' "$META_FILE" 2>/dev/null || true)
+  [[ -n $port ]] || port=${XRAYCTL_PUBLIC_PORT:-}
+  [[ -n $port ]] || port=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.port' "$CONFIG_FILE")
+  validate_port "$port" || die "${tag} 的公网端口无效，请运行 xrayctl inbound modify ${tag} 修正。"
+  printf '%s' "$port"
+}
+
 reality_public_key() {
   local tag=$1 private output public
   public=$(jq -r --arg tag "$tag" '.inbounds[$tag].realityPublicKey // empty' "$META_FILE" 2>/dev/null || true)
@@ -915,7 +946,7 @@ print_links() {
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   host=$(public_host_for_tag "$tag"); uri_host=$host
   [[ $uri_host == *:* && $uri_host != \[*\] ]] && uri_host="[${uri_host}]"
-  port=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.port' "$CONFIG_FILE")
+  port=$(public_port_for_tag "$tag")
   heading "${tag} 分享信息"
   case $protocol in
     vless|trojan)
