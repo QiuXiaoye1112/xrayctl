@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.18"
+readonly XRAYCTL_VERSION="1.2.19"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
 readonly JQ_VERSION="1.8.2"
@@ -912,7 +912,12 @@ build_inbound() {
   prompt_tag tag "${protocol}-$(random_hex 2)"
   prompt_value listen "监听地址" "0.0.0.0"
   prompt_port port 443
-  prompt_public_host public_host "" "$suggested_host"
+  if [[ -n $suggested_host ]] && validate_ip_literal "$suggested_host"; then
+    public_host=$suggested_host
+    info "客户端连接地址：${public_host}"
+  else
+    prompt_public_host public_host "" "$suggested_host"
+  fi
 
   case $protocol in
     vless|vmess|trojan)
@@ -1907,7 +1912,7 @@ managed_certificate_count() {
 }
 
 select_managed_certificate() {
-  local __var=$1 cert answer cert_identifier
+  local __var=$1 always_choose=${2:-0} cert answer cert_identifier
   local identifiers=()
   for cert in "$CERT_DIR"/*.crt; do
     [[ -e $cert ]] || continue
@@ -1915,12 +1920,49 @@ select_managed_certificate() {
     [[ -r "${CERT_DIR}/${cert_identifier}.key" ]] && identifiers+=("$cert_identifier")
   done
   ((${#identifiers[@]} > 0)) || { warn "没有可用的托管证书。"; return 1; }
-  if ((${#identifiers[@]} == 1)); then
+  if ((${#identifiers[@]} == 1)) && [[ $always_choose != 1 ]]; then
     printf -v "$__var" '%s' "${identifiers[0]}"
     return 0
   fi
   choose answer "选择证书" "${identifiers[@]}"
   printf -v "$__var" '%s' "${identifiers[$((answer-1))]}"
+}
+
+certificate_inbound_users() {
+  local identifier=$1 cert_path="${CERT_DIR}/${identifier}.crt" key_path="${CERT_DIR}/${identifier}.key"
+  [[ -r $CONFIG_FILE ]] || return 0
+  jq -r --arg cert "$cert_path" --arg key "$key_path" '
+    .inbounds[]? |
+    select(.streamSettings.security=="tls") |
+    select([.streamSettings.tlsSettings.certificates[]? |
+      select(.certificateFile==$cert or .keyFile==$key)] | length > 0) |
+    .tag' "$CONFIG_FILE"
+}
+
+delete_managed_certificate() {
+  ensure_runtime_dependencies cert-delete
+  local identifier=${1-} assume_yes=${2:-0} cert_path key_path hook renewal users tag
+  [[ -n $identifier ]] || select_managed_certificate identifier 1 || return 0
+  validate_certificate_identifier "$identifier" || die "证书标识无效。"
+  cert_path="${CERT_DIR}/${identifier}.crt"
+  key_path="${CERT_DIR}/${identifier}.key"
+  [[ -e $cert_path || -e $key_path ]] || { warn "托管证书不存在：${identifier}"; return 1; }
+  users=$(certificate_inbound_users "$identifier")
+  if [[ -n $users ]]; then
+    warn "证书正在被以下 TLS 入站使用，不能删除："
+    while IFS= read -r tag; do [[ -n $tag ]] && printf '  - %s\n' "$tag" >&2; done <<<"$users"
+    return 1
+  fi
+  [[ $assume_yes == 1 ]] || confirm "删除托管证书 ${identifier}？" N || return 0
+  renewal="/etc/letsencrypt/renewal/${identifier}.conf"
+  if [[ -f $renewal ]]; then
+    command_exists certbot || { warn "该证书仍有 Let's Encrypt 续期配置，但当前找不到 certbot，未执行删除。"; return 1; }
+    certbot delete --cert-name "$identifier" --non-interactive \
+      || { warn "Let's Encrypt 证书删除失败，托管副本未改动。"; return 1; }
+  fi
+  hook="/etc/letsencrypt/renewal-hooks/deploy/xrayctl-${identifier}"
+  rm -f "$cert_path" "$key_path" "$hook"
+  info "托管证书已删除：${identifier}"
 }
 
 manage_inbound_certificate_menu() {
@@ -2515,12 +2557,13 @@ certificate_menu() {
     clear_screen
     heading "TLS 证书"
     printf '托管证书: %s\n\n' "$(certificate_count)"
-    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 测试自动续期\n0) 返回\n'
+    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 删除托管证书\n5) 测试自动续期\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
       1) run_menu_action issue_certificate; pause;; 2) run_menu_action import_certificate; pause;;
       3) run_menu_action list_certificates; pause;;
-      4) run_menu_action test_certificate_renewal; pause;;
+      4) run_menu_action delete_managed_certificate; pause;;
+      5) run_menu_action test_certificate_renewal; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -2728,7 +2771,7 @@ dispatch() {
       case ${1:-check} in check|test) check_config;; show) ensure_config; jq . "$CONFIG_FILE";; edit) edit_config;; *) die "未知 config 子命令。";; esac;;
     backup) backup_all "${1-}";; restore) restore_backup "${1-}";;
     cert)
-      case ${1:-list} in list) list_certificates;; issue) issue_certificate "${2-}" "${3-}";; import) import_certificate "${2-}" "${3-}" "${4-}";; renew) ensure_runtime_dependencies cert-renew; install_certbot; certbot renew;; *) die "未知 cert 子命令。";; esac;;
+      case ${1:-list} in list) list_certificates;; issue) issue_certificate "${2-}" "${3-}";; import) import_certificate "${2-}" "${3-}" "${4-}";; delete|remove) delete_managed_certificate "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";; renew) ensure_runtime_dependencies cert-renew; install_certbot; certbot renew;; *) die "未知 cert 子命令。";; esac;;
     firewall)
       case ${1-} in install) install_firewall;; open) ensure_runtime_dependencies firewall; open_firewall_for_port "${2:?请提供端口}" force;; close) ensure_runtime_dependencies firewall; close_firewall_for_port "${2:?请提供端口}";; *) die "用法: xrayctl firewall install|open|close [端口]";; esac;;
     bbr) enable_bbr;; diagnose|doctor) system_diagnostics;; quick-command) ensure_runtime_dependencies quick-command; install_quick_command;;
