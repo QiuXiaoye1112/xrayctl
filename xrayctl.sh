@@ -5,8 +5,9 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.8"
+readonly XRAYCTL_VERSION="1.2.9"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
 readonly JQ_VERSION="1.8.2"
 
 XRAY_BIN="${XRAYCTL_XRAY_BIN:-/usr/local/bin/xray}"
@@ -588,10 +589,25 @@ install_or_update_xray() {
 }
 
 install_quick_command() {
-  local source=${BASH_SOURCE[0]}
-  [[ -r $source ]] || die "无法定位当前脚本。"
+  local source=${BASH_SOURCE[0]:-} downloaded=""
   mkdir -p "$(dirname "$QUICK_COMMAND")" "$(dirname "$QUICK_SYMLINK")"
+
+  if [[ -f $QUICK_COMMAND ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null; then
+    source=$QUICK_COMMAND
+  elif [[ -z $source || ! -r $source ]] || ! grep -q '^# xrayctl - Xray Linux terminal manager' "$source" 2>/dev/null; then
+    downloaded=$(temp_file)
+    info "正在下载快捷命令脚本。"
+    if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+      --connect-timeout 15 --max-time 120 "$SCRIPT_DOWNLOAD_URL" -o "$downloaded"; then
+      rm -f "$downloaded"
+      die "快捷命令脚本下载失败。"
+    fi
+    grep -q '^# xrayctl - Xray Linux terminal manager' "$downloaded" \
+      || { rm -f "$downloaded"; die "快捷命令脚本校验失败。"; }
+    source=$downloaded
+  fi
   if [[ -e $QUICK_COMMAND && ! $source -ef $QUICK_COMMAND ]] && ! grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null; then
+    [[ -z $downloaded ]] || rm -f "$downloaded"
     die "${QUICK_COMMAND} 已存在且不是本脚本，拒绝覆盖。"
   fi
   if [[ ! -e $QUICK_COMMAND ]] || ! [[ $source -ef $QUICK_COMMAND ]]; then
@@ -599,6 +615,7 @@ install_quick_command() {
   else
     chmod 755 "$QUICK_COMMAND"
   fi
+  [[ -z $downloaded ]] || rm -f "$downloaded"
   if [[ -e $QUICK_SYMLINK && ! -L $QUICK_SYMLINK && ! $QUICK_SYMLINK -ef $QUICK_COMMAND ]]; then
     die "${QUICK_SYMLINK} 已存在且不是本脚本，拒绝覆盖。"
   fi
@@ -631,8 +648,10 @@ uninstall_xray() {
     fi
     systemctl daemon-reload
   fi
-  if [[ -L $QUICK_SYMLINK ]] && [[ $(readlink "$QUICK_SYMLINK") == "$QUICK_COMMAND" ]]; then rm -f "$QUICK_SYMLINK"; fi
-  if [[ $QUICK_COMMAND == /usr/local/sbin/xrayctl ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null; then rm -f "$QUICK_COMMAND"; fi
+  if [[ $purge == 1 ]]; then
+    if [[ -L $QUICK_SYMLINK ]] && [[ $(readlink "$QUICK_SYMLINK") == "$QUICK_COMMAND" ]]; then rm -f "$QUICK_SYMLINK"; fi
+    if [[ $QUICK_COMMAND == /usr/local/sbin/xrayctl ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null; then rm -f "$QUICK_COMMAND"; fi
+  fi
   info "卸载完成；备份保留在 ${BACKUP_DIR}。"
 }
 
