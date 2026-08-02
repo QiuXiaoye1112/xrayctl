@@ -2,7 +2,7 @@
 
 `xrayctl` 是一个面向 systemd Linux 服务器的单文件 Xray 管理脚本。交互界面按“先看对象、再直接操作”设计：进入节点管理就能看到全部节点，选中节点后可在同一页管理分享信息、用户、端口和传输方式。它使用 XTLS 官方安装器安装核心，使用 Xray 自带的 `run -test` 检查每次配置变更，并在服务重启失败时自动回滚配置。
 
-当前版本：`1.2.1`
+当前版本：`1.2.2`
 
 ## 功能
 
@@ -11,7 +11,9 @@
 - RAW、XHTTP、WebSocket、gRPC 传输
 - REALITY、TLS、无传输安全（仅建议可信私网）
 - 节点新增、修改监听信息、修改传输、安全方式、删除、JSON 高级编辑
+- 节点上传、下载和总流量统计（Xray 本次运行期间累计）
 - 多用户新增、重命名、重置凭据、删除
+- SOCKS5、HTTP 出站新增、节点绑定和删除
 - VLESS、VMess、Trojan、Shadowsocks 分享链接及 Base64 订阅内容
 - Let's Encrypt 域名/公网 IP 签发、自动续期、签发后应用到节点、已有证书导入
 - 配置校验、日志级别、systemd 服务与日志管理
@@ -22,7 +24,7 @@
 
 ## 交互菜单
 
-主菜单只保留日常管理需要的五个入口。节点列表、服务状态、证书数量、BBR 和防火墙状态会直接显示，不再为“查看状态”单独占用一个选项。
+主菜单只保留日常管理需要的六个入口。节点列表、服务状态、证书数量、BBR 和防火墙状态会直接显示，不再为“查看状态”单独占用一个选项。
 
 ```text
 Xray Linux 管理脚本
@@ -37,6 +39,11 @@ Xray Linux 管理脚本
 │  │  └─ 删除节点
 │  ├─ 输出全部节点订阅
 │  └─ 高级编辑完整配置
+├─ 出站管理
+│  ├─ 查看节点当前出站规则
+│  ├─ 选择节点并设置出站
+│  ├─ 添加 SOCKS5/HTTP 出站
+│  └─ 删除出站
 ├─ TLS 证书（签发、导入、应用、查看、续期测试）
 ├─ 服务管理（启停、重启、自启、日志、更新修复）
 ├─ 系统工具
@@ -99,6 +106,10 @@ xrayctl inbound add              # 新建节点
 xrayctl inbound modify TAG       # 修改监听地址/端口/公网地址
 xrayctl inbound transport TAG    # 修改传输和安全方式
 xrayctl inbound delete TAG       # 删除节点
+xrayctl outbound list            # 查看节点与出站规则
+xrayctl outbound add             # 添加 SOCKS5/HTTP 出站
+xrayctl outbound assign TAG OUT  # 为节点选择出站或 direct
+xrayctl outbound delete OUT      # 删除出站
 xrayctl client add TAG           # 添加用户
 xrayctl client rename TAG OLD NEW
 xrayctl client rotate TAG USER   # 重置 UUID/密码
@@ -135,6 +146,8 @@ xrayctl help
 
 - VLESS 或 Trojan 暴露在公网时不要选择“无传输安全”。这个选项只用于可信私网。
 - SOCKS5 无认证模式只应监听 `127.0.0.1`、`::1` 或受控内网。
+- SOCKS5/HTTP 出站本身不加密，只应连接可信代理；HTTP 出站仅支持 TCP。
+- 节点流量由 Xray 内存统计，从服务本次启动开始累计，重启 Xray 后重新计数。
 - 脚本不会在删除节点时自动关闭端口，避免误伤共享同一端口的其他服务；可用 `xrayctl firewall close PORT` 手动关闭。
 - 分享链接、配置和备份含有 UUID 或密码，应按密钥材料保护。
 - 云厂商安全组不受 UFW/firewalld 命令控制，需要在云控制台单独设置。
@@ -157,6 +170,8 @@ xrayctl uninstall --purge       # 删除 Xray 配置、证书和日志
 ## 安装卡在 APT
 
 如果旧版安装过程停在 `0% [Waiting for headers]`，可按 `Ctrl+C` 中止后重新执行一键安装。当前版本会优先从 [jq 官方 GitHub 仓库](https://github.com/jqlang/jq/releases)下载并校验静态版 jq，从而绕过 APT；其他依赖仍会使用带连接超时、重试次数和 180 秒总超时的 APT，不再无限等待失效的软件源。
+
+防火墙安装阶段默认每步最多等待 60 秒，可通过 `XRAYCTL_SYSTEM_TOOL_TIMEOUT` 调整。NAT 容器没有 `NET_ADMIN` 权限时，防火墙和 BBR 会立即跳过并提示使用服务商控制台，不会继续等待安装。
 
 仅有 IPv6 网络的服务器可以关闭 IPv4 强制模式：
 
