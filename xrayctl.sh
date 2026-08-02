@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.26"
+readonly XRAYCTL_VERSION="1.2.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
 readonly JQ_VERSION="1.8.2"
@@ -1025,13 +1025,15 @@ list_inbounds() {
   local count
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站。"; return; fi
-  print_table_cell_clipped "标签" 24; print_table_cell_clipped "协议" 14
-  print_table_cell "端口" 10; print_table_cell_clipped "传输" 14; print_table_cell_clipped "安全" 12; printf '监听\n'
+  print_table_cell_clipped "标签" 20; printf '| '; print_table_cell_clipped "协议" 8; printf '| '
+  print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 10; printf '| '
+  print_table_cell_clipped "安全" 10; printf '| 监听\n'
   jq -r '.inbounds | to_entries[] |
     [.value.tag,.value.protocol,(.value.port|tostring),(.value.streamSettings.method // "raw"),(.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port method security listen; do
-        print_table_cell_clipped "$tag" 24; print_table_cell_clipped "$protocol" 14
-        print_table_cell "$port" 10; print_table_cell_clipped "$method" 14; print_table_cell_clipped "$security" 12; printf '%s\n' "$listen"
+        print_table_cell_clipped "$tag" 20; printf '| '; print_table_cell_clipped "$protocol" 8; printf '| '
+        print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 10; printf '| '
+        print_table_cell_clipped "$security" 10; printf '| %s\n' "$listen"
       done
 }
 
@@ -2284,9 +2286,10 @@ show_main_inbounds() {
   if snapshot=$(query_inbound_traffic_snapshot) && jq -e '(.stat // [])|type=="array"' <<<"$snapshot" >/dev/null 2>&1; then
     stats_available=1
   fi
-  print_table_cell_clipped "标签" 22; print_table_cell_clipped "协议" 10
-  print_table_cell "端口" 8; print_table_cell_clipped "传输" 12; print_table_cell_clipped "安全" 10
-  print_table_cell "上传" 14; print_table_cell "下载" 14; printf '总计\n'
+  print_table_cell_clipped "标签" 20; printf '| '; print_table_cell_clipped "协议" 8; printf '| '
+  print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 10; printf '| '
+  print_table_cell_clipped "安全" 10; printf '| '; print_table_cell "上传" 12; printf '| '
+  print_table_cell "下载" 12; printf '| 总计\n'
   jq -r '.inbounds[] | [.tag,.protocol,
     (.port|tostring),(.streamSettings.method // "raw"),
     (.streamSettings.security // "none")] | @tsv' "$CONFIG_FILE" \
@@ -2304,9 +2307,10 @@ show_main_inbounds() {
         else
           up="-"; down="-"; total="-"
         fi
-        print_table_cell_clipped "$tag" 22; print_table_cell_clipped "$protocol" 10
-        print_table_cell "$port" 8; print_table_cell_clipped "$method" 12; print_table_cell_clipped "$security" 10
-        print_table_cell "$up" 14; print_table_cell "$down" 14; printf '%s\n' "$total"
+        print_table_cell_clipped "$tag" 20; printf '| '; print_table_cell_clipped "$protocol" 8; printf '| '
+        print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 10; printf '| '
+        print_table_cell_clipped "$security" 10; printf '| '; print_table_cell "$up" 12; printf '| '
+        print_table_cell "$down" 12; printf '| %s\n' "$total"
       done
   printf '\n'
 }
