@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.6"
+readonly XRAYCTL_VERSION="1.2.7"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -99,11 +99,12 @@ prompt_optional_value() {
 prompt_secret() {
   local __var=$1 prompt=$2 generated=${3-} secret_value=""
   if [[ -n $generated ]]; then
-    read -r -s -p "${prompt}（留空自动生成）: " secret_value; printf '\n'
+    if ! read -r -p "${prompt}（留空自动生成）: " secret_value; then warn "输入已中断。"; return 1; fi
     secret_value=${secret_value:-$generated}
   else
     while [[ -z $secret_value ]]; do
-      read -r -s -p "${prompt}: " secret_value; printf '\n'
+      if ! read -r -p "${prompt}: " secret_value; then warn "输入已中断。"; return 1; fi
+      [[ -n $secret_value ]] || warn "密码不能为空，请重新输入。"
     done
   fi
   printf -v "$__var" '%s' "$secret_value"
@@ -1194,10 +1195,12 @@ add_client() {
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
     jq --arg tag "$tag" --arg protocol "$protocol" --argjson user "$user" '
-      (.inbounds[]|select(.tag==$tag)|.settings) |=
-      ((.accounts // .users // [])+[$user]) as $all |
-      .accounts=$all | .users=$all |
-      if $protocol=="socks" then .auth="password" else . end' "$CONFIG_FILE" >"$tmp"
+      (.inbounds[]|select(.tag==$tag)|.settings) |= (
+        ((.accounts // .users // [])+[$user]) as $all |
+        .accounts=$all | .users=$all |
+        if $protocol=="socks" then .auth="password" else . end
+      ) |
+      del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else jq --arg tag "$tag" --argjson user "$user" '(.inbounds[]|select(.tag==$tag)|.settings.clients) += [$user]' "$CONFIG_FILE" >"$tmp"; fi
   if apply_candidate "$tmp"; then info "用户 ${label} 已添加。"; print_links "$tag" "$label" || true; fi
   rm -f "$tmp"
@@ -1215,8 +1218,11 @@ delete_client() {
     count=$(jq --arg tag "$tag" --arg label "$label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$label)]|length' "$CONFIG_FILE")
     ((count > 0)) || die "找不到用户：$label"
     jq --arg tag "$tag" --arg label "$label" '
-      (.inbounds[]|select(.tag==$tag)|.settings) |=
-      ((.accounts // .users // [])|map(select(.user!=$label))) as $all | .accounts=$all | .users=$all' "$CONFIG_FILE" >"$tmp"
+      (.inbounds[]|select(.tag==$tag)|.settings) |= (
+        ((.accounts // .users // [])|map(select(.user!=$label))) as $all |
+        .accounts=$all | .users=$all
+      ) |
+      del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else
     count=$(jq --arg tag "$tag" --arg label "$label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)]|length' "$CONFIG_FILE")
     ((count > 0)) || die "找不到用户：$label"
@@ -1243,9 +1249,11 @@ rotate_client_credential() {
     socks|http)
       value=$(random_password)
       jq --arg tag "$tag" --arg label "$label" --arg value "$value" '
-        (.inbounds[]|select(.tag==$tag)|.settings) |=
-        ((.accounts // .users // [])|map(if .user==$label then .pass=$value else . end)) as $all |
-        .accounts=$all | .users=$all' "$CONFIG_FILE" >"$tmp" ;;
+        (.inbounds[]|select(.tag==$tag)|.settings) |= (
+          ((.accounts // .users // [])|map(if .user==$label then .pass=$value else . end)) as $all |
+          .accounts=$all | .users=$all
+        ) |
+        del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp" ;;
     *) die "不支持此协议。";;
   esac
   apply_candidate "$tmp"; rm -f "$tmp"
@@ -1275,9 +1283,11 @@ rename_client() {
     count=$(jq --arg tag "$tag" --arg label "$old_label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$label)]|length' "$CONFIG_FILE")
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
     jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '
-      (.inbounds[]|select(.tag==$tag)|.settings) |=
-      ((.accounts // .users // [])|map(if .user==$old then .user=$new else . end)) as $all |
-      .accounts=$all | .users=$all' "$CONFIG_FILE" >"$tmp"
+      (.inbounds[]|select(.tag==$tag)|.settings) |= (
+        ((.accounts // .users // [])|map(if .user==$old then .user=$new else . end)) as $all |
+        .accounts=$all | .users=$all
+      ) |
+      del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else
     count=$(jq --arg tag "$tag" --arg label "$old_label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)]|length' "$CONFIG_FILE")
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
@@ -1316,7 +1326,7 @@ share_separator() { printf '%s\n' '---------------------------------------------
 print_share_entry() {
   local label=$1 field=$2 value=$3
   share_separator
-  printf '用户: %s\n%s:\n%s\n' "$label" "$field" "$value"
+  printf '用户: %s\n%s: %s\n' "$label" "$field" "$value"
 }
 
 link_query_for_stream() {
@@ -1391,6 +1401,7 @@ print_links() {
     socks)
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
         while IFS=$'\t' read -r label password; do
+          [[ -z $filter || $label == "$filter" ]] || continue
           print_share_entry "$label" "配置" "SOCKS5  ${uri_host}:${port}  用户: ${label}  密码: ${password}"
         done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
       else
@@ -1400,6 +1411,7 @@ print_links() {
     http)
       if http_inbound_has_auth "$tag"; then
         while IFS=$'\t' read -r label password; do
+          [[ -z $filter || $label == "$filter" ]] || continue
           print_share_entry "$label" "配置" "HTTP  ${uri_host}:${port}  用户: ${label}  密码: ${password}"
         done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
       else
