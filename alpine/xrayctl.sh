@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.6-alpine"
+readonly XRAYCTL_VERSION="1.0.7-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -2349,7 +2349,7 @@ add_outbound() {
   settings=$(jq -n --arg address "$address" --argjson port "$port" '{address:$address,port:$port}')
   if [[ $auth == 2 ]]; then
     prompt_value username "用户名"
-    prompt_secret password "密码" "$(random_password)"
+    prompt_secret password "密码"
     settings=$(jq --arg user "$username" --arg pass "$password" '.+{user:$user,pass:$pass,level:0}' <<<"$settings")
   fi
   outbound=$(jq -n --arg tag "$tag" --arg protocol "$protocol" --argjson settings "$settings" \
