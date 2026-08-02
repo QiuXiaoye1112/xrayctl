@@ -2,7 +2,7 @@
 
 这是与仓库根目录 systemd 版完全分离的 Alpine Linux 包。它使用 `apk` 管理依赖、使用 OpenRC 管理 Xray 服务，不会改动根目录的 `install.sh` 和 `xrayctl.sh`。
 
-当前版本：`1.0.15-alpine`
+当前版本：`1.0.16-alpine`
 
 ## 一键安装
 

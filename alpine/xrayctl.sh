@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.15-alpine"
+readonly XRAYCTL_VERSION="1.0.16-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -1095,13 +1095,13 @@ list_inbounds() {
   local count
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站。"; return; fi
-  print_table_cell "序号" 6; print_table_cell "标签" 24; print_table_cell "协议" 14
-  print_table_cell "端口" 10; print_table_cell "传输" 14; print_table_cell "安全" 12; printf '监听\n'
+  print_table_cell_clipped "标签" 24; print_table_cell_clipped "协议" 14
+  print_table_cell "端口" 10; print_table_cell_clipped "传输" 14; print_table_cell_clipped "安全" 12; printf '监听\n'
   jq -r '.inbounds | to_entries[] |
-    [(.key+1),.value.tag,.value.protocol,(.value.port|tostring),(.value.streamSettings.method // "raw"),(.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r n tag protocol port method security listen; do
-        print_table_cell "$n" 6; print_table_cell "$tag" 24; print_table_cell "$protocol" 14
-        print_table_cell "$port" 10; print_table_cell "$method" 14; print_table_cell "$security" 12; printf '%s\n' "$listen"
+    [.value.tag,.value.protocol,(.value.port|tostring),(.value.streamSettings.method // "raw"),(.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r tag protocol port method security listen; do
+        print_table_cell_clipped "$tag" 24; print_table_cell_clipped "$protocol" 14
+        print_table_cell "$port" 10; print_table_cell_clipped "$method" 14; print_table_cell_clipped "$security" 12; printf '%s\n' "$listen"
       done
 }
 
@@ -2340,7 +2340,7 @@ show_main_summary() {
 
 show_main_inbounds() {
   command_exists jq && [[ -r $CONFIG_FILE ]] || return 0
-  local count snapshot="" stats_available=0 number tag protocol port method security
+  local count snapshot="" stats_available=0 tag protocol port method security
   local up down total up_name down_name
   count=$(jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null) || return 0
   heading "当前入站"
@@ -2352,13 +2352,13 @@ show_main_inbounds() {
   if snapshot=$(query_inbound_traffic_snapshot) && jq -e '(.stat // [])|type=="array"' <<<"$snapshot" >/dev/null 2>&1; then
     stats_available=1
   fi
-  print_table_cell "序号" 6; print_table_cell_clipped "标签" 22; print_table_cell_clipped "协议" 10
+  print_table_cell_clipped "标签" 22; print_table_cell_clipped "协议" 10
   print_table_cell "端口" 8; print_table_cell_clipped "传输" 12; print_table_cell_clipped "安全" 10
   print_table_cell "上传" 14; print_table_cell "下载" 14; printf '总计\n'
-  jq -r '.inbounds | to_entries[] | [(.key+1),.value.tag,.value.protocol,
-    (.value.port|tostring),(.value.streamSettings.method // "raw"),
-    (.value.streamSettings.security // "none")] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r number tag protocol port method security; do
+  jq -r '.inbounds[] | [.tag,.protocol,
+    (.port|tostring),(.streamSettings.method // "raw"),
+    (.streamSettings.security // "none")] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r tag protocol port method security; do
         if ((stats_available)); then
           up_name="inbound>>>${tag}>>>traffic>>>uplink"
           down_name="inbound>>>${tag}>>>traffic>>>downlink"
@@ -2372,7 +2372,7 @@ show_main_inbounds() {
         else
           up="-"; down="-"; total="-"
         fi
-        print_table_cell "$number" 6; print_table_cell_clipped "$tag" 22; print_table_cell_clipped "$protocol" 10
+        print_table_cell_clipped "$tag" 22; print_table_cell_clipped "$protocol" 10
         print_table_cell "$port" 8; print_table_cell_clipped "$method" 12; print_table_cell_clipped "$security" 10
         print_table_cell "$up" 14; print_table_cell "$down" 14; printf '%s\n' "$total"
       done
