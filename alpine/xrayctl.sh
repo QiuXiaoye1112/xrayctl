@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.14-alpine"
+readonly XRAYCTL_VERSION="1.0.15-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -181,6 +181,19 @@ print_table_cell() {
   padding=$((target_width-width))
   ((padding > 0)) || padding=1
   printf '%s%*s' "$value" "$padding" ''
+}
+
+print_table_cell_clipped() {
+  local value=$1 target_width=$2 width limit clipped="" used=0 char char_width i
+  display_width width "$value"
+  if ((width < target_width)); then print_table_cell "$value" "$target_width"; return; fi
+  limit=$((target_width-4)); ((limit > 0)) || limit=1
+  for ((i=0; i<${#value}; i++)); do
+    char=${value:i:1}; display_width char_width "$char"
+    ((used+char_width <= limit)) || break
+    clipped+=$char; ((used+=char_width))
+  done
+  print_table_cell "${clipped}..." "$target_width"
 }
 
 run_menu_action() {
@@ -2339,8 +2352,8 @@ show_main_inbounds() {
   if snapshot=$(query_inbound_traffic_snapshot) && jq -e '(.stat // [])|type=="array"' <<<"$snapshot" >/dev/null 2>&1; then
     stats_available=1
   fi
-  print_table_cell "序号" 6; print_table_cell "标签" 22; print_table_cell "协议" 10
-  print_table_cell "端口" 8; print_table_cell "传输" 12; print_table_cell "安全" 10
+  print_table_cell "序号" 6; print_table_cell_clipped "标签" 22; print_table_cell_clipped "协议" 10
+  print_table_cell "端口" 8; print_table_cell_clipped "传输" 12; print_table_cell_clipped "安全" 10
   print_table_cell "上传" 14; print_table_cell "下载" 14; printf '总计\n'
   jq -r '.inbounds | to_entries[] | [(.key+1),.value.tag,.value.protocol,
     (.value.port|tostring),(.value.streamSettings.method // "raw"),
@@ -2359,8 +2372,8 @@ show_main_inbounds() {
         else
           up="-"; down="-"; total="-"
         fi
-        print_table_cell "$number" 6; print_table_cell "$tag" 22; print_table_cell "$protocol" 10
-        print_table_cell "$port" 8; print_table_cell "$method" 12; print_table_cell "$security" 10
+        print_table_cell "$number" 6; print_table_cell_clipped "$tag" 22; print_table_cell_clipped "$protocol" 10
+        print_table_cell "$port" 8; print_table_cell_clipped "$method" 12; print_table_cell_clipped "$security" 10
         print_table_cell "$up" 14; print_table_cell "$down" 14; printf '%s\n' "$total"
       done
   printf '\n'
@@ -2409,15 +2422,15 @@ list_outbound_overview() {
     info "还没有代理出站。"
     return 0
   fi
-  print_table_cell "序号" 6; print_table_cell "标签" 16; print_table_cell "协议" 10
-  print_table_cell "地址" 32; print_table_cell "用户" 18; printf '密码\n'
+  print_table_cell "序号" 6; print_table_cell_clipped "标签" 16; print_table_cell_clipped "协议" 10
+  print_table_cell_clipped "地址" 32; print_table_cell_clipped "用户" 18; printf '密码\n'
   jq -r '[.outbounds[]?|select(.protocol=="socks" or .protocol=="http")] | to_entries[] |
     [.key+1,.value.tag,.value.protocol,(.value.settings.address+":"+(.value.settings.port|tostring)),
      (if (.value.settings.user // "")=="" then "无" else .value.settings.user end),
      (if (.value.settings.pass // "")=="" then "无" else .value.settings.pass end)] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r number tag protocol address username password; do
-        print_table_cell "$number" 6; print_table_cell "$tag" 16; print_table_cell "$protocol" 10
-        print_table_cell "$address" 32; print_table_cell "$username" 18; printf '%s\n' "$password"
+        print_table_cell "$number" 6; print_table_cell_clipped "$tag" 16; print_table_cell_clipped "$protocol" 10
+        print_table_cell_clipped "$address" 32; print_table_cell_clipped "$username" 18; printf '%s\n' "$password"
       done
 }
 
