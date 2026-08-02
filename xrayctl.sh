@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.14"
+readonly XRAYCTL_VERSION="1.2.15"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
 readonly JQ_VERSION="1.8.2"
@@ -717,20 +717,26 @@ prompt_port() {
 }
 
 prompt_public_host() {
-  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} value ipv4="" ipv6="" address_choice prompt_label="客户端连接地址"
+  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} preferred=${3:-} value ipv4="" ipv6="" address_choice prompt_label="客户端连接地址"
+  local labels=() values=()
   if [[ -z $default ]]; then
     ipv4=$(detect_public_ipv4 || true)
     ipv6=$(detect_public_ipv6 || true)
-    if [[ -n $ipv4 && -n $ipv6 ]]; then
-      choose address_choice "选择客户端连接地址" "IPv4  ${ipv4}" "IPv6  ${ipv6}" "域名/其他地址"
-      case $address_choice in
-        1) printf -v "$__var" '%s' "$ipv4"; return 0;;
-        2) printf -v "$__var" '%s' "$ipv6"; return 0;;
-        3) prompt_label="客户端连接域名/IP";;
-      esac
-    elif [[ -n $ipv4 ]]; then default=$ipv4
-    elif [[ -n $ipv6 ]]; then default=$ipv6
-    else prompt_label="客户端连接域名/IP"
+    if [[ -n $preferred ]]; then labels+=("证书域名/IP  ${preferred}"); values+=("$preferred"); fi
+    if [[ -n $ipv4 && $ipv4 != "$preferred" ]]; then labels+=("IPv4  ${ipv4}"); values+=("$ipv4"); fi
+    if [[ -n $ipv6 && $ipv6 != "$preferred" ]]; then labels+=("IPv6  ${ipv6}"); values+=("$ipv6"); fi
+    if ((${#values[@]} > 1)); then
+      labels+=("域名/其他地址")
+      choose address_choice "选择客户端连接地址" "${labels[@]}"
+      if ((address_choice <= ${#values[@]})); then
+        printf -v "$__var" '%s' "${values[$((address_choice-1))]}"
+        return 0
+      fi
+      prompt_label="客户端连接域名/IP"
+    elif ((${#values[@]} == 1)); then
+      default=${values[0]}
+    else
+      prompt_label="客户端连接域名/IP"
     fi
   fi
   while true; do
@@ -743,12 +749,43 @@ prompt_public_host() {
   done
 }
 
+certificate_server_names() {
+  local cert=$1 san
+  san=$(openssl x509 -in "$cert" -noout -text 2>/dev/null \
+    | awk '/X509v3 Subject Alternative Name/ {getline; print; exit}' | tr ',' '\n' \
+    | sed -n -e 's/^[[:space:]]*DNS://p' -e 's/^[[:space:]]*IP Address://p')
+  if [[ -n $san ]]; then printf '%s\n' "$san" | awk '!seen[$0]++'; return 0; fi
+  openssl x509 -in "$cert" -noout -subject -nameopt RFC2253 2>/dev/null \
+    | sed -n 's/^subject=.*CN=\([^,]*\).*$/\1/p'
+}
+
+prompt_certificate_server_name() {
+  local __var=$1 cert=$2 answer selected default_name name
+  local names=()
+  while IFS= read -r name; do [[ -n $name ]] && names+=("$name"); done < <(certificate_server_names "$cert")
+  if ((${#names[@]} == 0)); then
+    prompt_validated_value selected "TLS serverName/SNI" "" validate_domain_or_ip "SNI 必须是证书包含的有效域名/IP。"
+  elif ((${#names[@]} == 1)); then
+    selected=${names[0]}
+  else
+    choose answer "选择 TLS serverName/SNI" "${names[@]}"
+    selected=${names[$((answer-1))]}
+  fi
+  if [[ $selected == \*.* ]]; then
+    default_name="www.${selected#*.}"
+    prompt_validated_value selected "TLS serverName/SNI" "$default_name" validate_domain "通配符证书需要填写具体子域名。"
+  fi
+  printf -v "$__var" '%s' "$selected"
+}
+
 validate_certificate_pair_files() {
   local cert=$1 key=$2 cert_pub key_pub
   [[ -r $cert ]] || { warn "证书文件不存在或不可读，请重新输入。"; return 1; }
   [[ -r $key ]] || { warn "私钥文件不存在或不可读，请重新输入。"; return 1; }
   openssl x509 -in "$cert" -noout >/dev/null 2>&1 \
     || { warn "证书格式无效，请重新输入。"; return 1; }
+  openssl x509 -in "$cert" -checkend 0 -noout >/dev/null 2>&1 \
+    || { warn "证书已经过期，请重新选择。"; return 1; }
   openssl pkey -in "$key" -noout >/dev/null 2>&1 \
     || { warn "私钥格式无效，请重新输入。"; return 1; }
   cert_pub=$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | openssl sha256)
@@ -771,19 +808,22 @@ prompt_certificate_files() {
 }
 
 prompt_tls_certificate() {
-  local __cert=$1 __key=$2 identifier cert_value key_value
+  local __cert=$1 __key=$2 __sni=$3 identifier cert_value key_value sni_value
   if (( $(managed_certificate_count) > 0 )) && confirm "使用托管证书？" Y; then
     select_managed_certificate identifier || return 1
     cert_value="${CERT_DIR}/${identifier}.crt"
     key_value="${CERT_DIR}/${identifier}.key"
     validate_certificate_pair_files "$cert_value" "$key_value" || return 1
-    printf -v "$__cert" '%s' "$cert_value"
-    printf -v "$__key" '%s' "$key_value"
-    return 0
+    info "使用托管证书：${identifier}"
+  else
+    prompt_certificate_files cert_value key_value
+    info "使用证书文件：${cert_value}"
   fi
-  prompt_certificate_files cert_value key_value
+  prompt_certificate_server_name sni_value "$cert_value"
+  info "TLS serverName/SNI：${sni_value}"
   printf -v "$__cert" '%s' "$cert_value"
   printf -v "$__key" '%s' "$key_value"
+  printf -v "$__sni" '%s' "$sni_value"
 }
 
 generate_reality_keys() {
@@ -799,31 +839,27 @@ generate_reality_keys() {
 build_stream_settings() {
   local protocol=$1 __json=$2 __public_key=$3
   local transport_choice security_choice method security path service target sni private public short_id cert key alpn json
-  choose transport_choice "选择传输方式" \
-    "RAW" "XHTTP" "WebSocket" "gRPC"
-  case $transport_choice in
-    1) method=raw ;;
-    2) method=xhttp ;;
-    3) method=websocket ;;
-    4) method=grpc ;;
+  case $protocol in
+    vless)
+      choose security_choice "选择加密方式" "REALITY" "TLS" "无"
+      case $security_choice in 1) security=reality;; 2) security=tls;; 3) security=none;; esac
+      ;;
+    trojan)
+      choose security_choice "选择加密方式" "TLS" "REALITY" "无"
+      case $security_choice in 1) security=tls;; 2) security=reality;; 3) security=none;; esac
+      ;;
+    *)
+      choose security_choice "选择加密方式" "TLS" "无"
+      case $security_choice in 1) security=tls;; 2) security=none;; esac
+      ;;
   esac
 
-  if [[ $protocol == vless ]]; then
-    if [[ $method == raw || $method == xhttp || $method == grpc ]]; then
-      choose security_choice "选择传输安全" "REALITY" "TLS" "无"
-      case $security_choice in 1) security=reality;; 2) security=tls;; 3) security=none;; esac
-    else
-      choose security_choice "选择传输安全" "TLS" "无"
-      case $security_choice in 1) security=tls;; 2) security=none;; esac
-    fi
-  elif [[ $protocol == trojan ]]; then
-    if [[ $method == raw || $method == xhttp || $method == grpc ]]; then
-      choose security_choice "选择传输安全" "TLS" "REALITY" "无"
-      case $security_choice in 1) security=tls;; 2) security=reality;; 3) security=none;; esac
-    else security=tls; info "Trojan + ${method} 使用 TLS。"; fi
+  if [[ $security == reality || ( $protocol == trojan && $security != tls ) ]]; then
+    choose transport_choice "选择传输方式" "RAW" "XHTTP" "gRPC"
+    case $transport_choice in 1) method=raw;; 2) method=xhttp;; 3) method=grpc;; esac
   else
-    choose security_choice "选择传输安全" "TLS" "无"
-    case $security_choice in 1) security=tls;; 2) security=none;; esac
+    choose transport_choice "选择传输方式" "RAW" "XHTTP" "WebSocket" "gRPC"
+    case $transport_choice in 1) method=raw;; 2) method=xhttp;; 3) method=websocket;; 4) method=grpc;; esac
   fi
 
   json=$(jq -n --arg method "$method" --arg security "$security" '{method:$method,security:$security}')
@@ -851,10 +887,10 @@ build_stream_settings() {
       printf -v "$__public_key" '%s' "$public"
       ;;
     tls)
-      prompt_tls_certificate cert key
+      prompt_tls_certificate cert key sni
       if [[ $method == websocket ]]; then alpn='["http/1.1"]'; else alpn='["h2","http/1.1"]'; fi
-      json=$(jq --arg cert "$cert" --arg key "$key" --argjson alpn "$alpn" \
-        '. + {tlsSettings:{alpn:$alpn,minVersion:"1.2",certificates:[{certificateFile:$cert,keyFile:$key}]}}' <<<"$json")
+      json=$(jq --arg cert "$cert" --arg key "$key" --arg sni "$sni" --argjson alpn "$alpn" \
+        '. + {tlsSettings:{serverName:$sni,alpn:$alpn,minVersion:"1.2",certificates:[{certificateFile:$cert,keyFile:$key}]}}' <<<"$json")
       ;;
   esac
   printf -v "$__json" '%s' "$json"
@@ -862,22 +898,25 @@ build_stream_settings() {
 
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
-  local choice protocol tag listen port public_host email uuid password method stream inbound_json user flow username generated_public_key=""
+  local choice protocol tag listen port public_host email uuid password method stream="" inbound_json user flow username generated_public_key="" suggested_host=""
   choose choice "选择入站协议" \
     "VLESS" "VMess" "Trojan" "SOCKS5" "HTTP"
   case $choice in
     1) protocol=vless;; 2) protocol=vmess;; 3) protocol=trojan;;
     4) protocol=socks;; 5) protocol=http;;
   esac
+  if [[ $protocol == vless || $protocol == vmess || $protocol == trojan ]]; then
+    build_stream_settings "$protocol" stream generated_public_key
+    suggested_host=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
+  fi
   prompt_tag tag "${protocol}-$(random_hex 2)"
   prompt_value listen "监听地址" "0.0.0.0"
   prompt_port port 443
-  prompt_public_host public_host
+  prompt_public_host public_host "" "$suggested_host"
 
   case $protocol in
     vless|vmess|trojan)
       prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol"
-      build_stream_settings "$protocol" stream generated_public_key
       case $protocol in
         vless)
           uuid=$(generate_uuid)
@@ -943,14 +982,15 @@ build_inbound() {
 
 add_inbound() {
   ensure_runtime_dependencies inbound-add; require_xray_installed; ensure_config
-  local inbound="" host="" public_key="" tag tmp listen_port
+  local inbound="" host="" public_key="" tag tmp listen_port firewall_protocol
   build_inbound inbound host public_key
   tag=$(jq -r '.tag' <<<"$inbound"); listen_port=$(jq -r '.port' <<<"$inbound")
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
   if apply_candidate "$tmp"; then
     meta_set_inbound "$tag" "$host" "$public_key" replace
-    open_firewall_for_port "$listen_port" prompt
+    firewall_protocol=$(inbound_firewall_protocol "$inbound")
+    open_firewall_for_port "$listen_port" prompt "$firewall_protocol"
     heading "入站已创建"
     show_inbound "$tag"
     print_links "$tag" "" || true
@@ -1042,7 +1082,7 @@ rename_inbound() {
 
 modify_inbound_basic() {
   ensure_runtime_dependencies inbound-modify; ensure_config
-  local tag=${1-} current listen port host tmp old_port
+  local tag=${1-} current listen port host tmp old_port firewall_protocol
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
@@ -1055,7 +1095,9 @@ modify_inbound_basic() {
     '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
   if apply_candidate "$tmp"; then
     meta_set_inbound "$tag" "$host" "" keep
-    open_firewall_for_port "$port" prompt
+    current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
+    firewall_protocol=$(inbound_firewall_protocol "$current")
+    open_firewall_for_port "$port" prompt "$firewall_protocol"
   fi
   rm -f "$tmp"
 }
@@ -1445,7 +1487,8 @@ link_query_for_stream() {
   query+="&security=$(url_encode "$security")"
   case $security in
     tls)
-      sni=$(public_host_for_tag "$tag")
+      sni=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
+      [[ -n $sni ]] || sni=$(public_host_for_tag "$tag")
       query+="&sni=$(url_encode "$sni")"
       [[ $method == websocket ]] && query+="&host=$(url_encode "$sni")"
       [[ $method == grpc ]] && query+="&authority=$(url_encode "$sni")"
@@ -1597,21 +1640,38 @@ install_firewall() {
   fi
 }
 
-open_firewall_for_port() {
-  local port=$1 mode=${2:-force}
-  validate_port "$port" || die "无效端口：$port"
-  if ! has_net_admin; then warn "当前 NAT/容器没有 NET_ADMIN 权限，请在服务商控制台放行 ${port}。"; return 0; fi
-  if [[ $mode == prompt ]] && ! confirm "是否自动放行 TCP/UDP 端口 ${port}？" Y; then return 0; fi
-  if command_exists ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
-    ufw allow "${port}/tcp" >/dev/null; ufw allow "${port}/udp" >/dev/null
-    info "UFW 已放行 TCP/UDP ${port}。"
-  elif command_exists firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null
-    firewall-cmd --permanent --add-port="${port}/udp" >/dev/null
-    firewall-cmd --reload >/dev/null; info "firewalld 已放行 TCP/UDP ${port}。"
+active_firewall_backend() {
+  if command_exists ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then printf 'ufw'; return 0; fi
+  if command_exists firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then printf 'firewalld'; return 0; fi
+  return 1
+}
+
+inbound_firewall_protocol() {
+  local inbound=$1
+  if [[ $(jq -r '.protocol' <<<"$inbound") == socks && $(jq -r '.settings.udp // false' <<<"$inbound") == true ]]; then
+    printf 'both'
   else
-    warn "未检测到启用的 UFW/firewalld。请在云安全组和系统防火墙手动放行 ${port}。"
+    printf 'tcp'
   fi
+}
+
+open_firewall_for_port() {
+  local port=$1 mode=${2:-force} protocol=${3:-both} backend label
+  validate_port "$port" || die "无效端口：$port"
+  backend=$(active_firewall_backend || true)
+  [[ -n $backend ]] || return 0
+  if ! has_net_admin; then warn "当前 NAT/容器没有 NET_ADMIN 权限，请在服务商控制台放行 ${port}。"; return 0; fi
+  case $protocol in tcp) label=TCP;; udp) label=UDP;; both) label=TCP/UDP;; *) die "未知防火墙协议：${protocol}";; esac
+  if [[ $mode == prompt ]] && ! confirm "是否自动放行 ${label} 端口 ${port}？" Y; then return 0; fi
+  if [[ $backend == ufw ]]; then
+    [[ $protocol == udp ]] || ufw allow "${port}/tcp" >/dev/null
+    [[ $protocol == tcp ]] || ufw allow "${port}/udp" >/dev/null
+  else
+    [[ $protocol == udp ]] || firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null
+    [[ $protocol == tcp ]] || firewall-cmd --permanent --add-port="${port}/udp" >/dev/null
+    firewall-cmd --reload >/dev/null
+  fi
+  info "${backend} 已放行 ${label} ${port}。"
 }
 
 close_firewall_for_port() {
@@ -1752,16 +1812,17 @@ EOF
 }
 
 update_tls_inbound_certificate() {
-  local tag=$1 cert_path=$2 key_path=$3 tmp method
+  local tag=$1 cert_path=$2 key_path=$3 sni=$4 tmp method
   inbound_exists "$tag" || { warn "入站不存在：${tag}"; return 1; }
   [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE") == tls ]] \
     || { warn "只有使用 TLS 的入站可以更换证书。"; return 1; }
   validate_certificate_pair_files "$cert_path" "$key_path" || return 1
   method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.method // "raw"' "$CONFIG_FILE")
   tmp=$(temp_file)
-  jq --arg tag "$tag" --arg cert "$cert_path" --arg key "$key_path" --arg method "$method" '
+  jq --arg tag "$tag" --arg cert "$cert_path" --arg key "$key_path" --arg sni "$sni" --arg method "$method" '
     (.inbounds[]|select(.tag==$tag)|.streamSettings) |= (
       .tlsSettings={
+        serverName:$sni,
         alpn:(if $method=="websocket" then ["http/1.1"] else ["h2","http/1.1"] end),
         minVersion:"1.2",
         certificates:[{certificateFile:$cert,keyFile:$key}]
@@ -1785,7 +1846,7 @@ issue_certificate() {
   [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。"
   validate_email_address "$email" || die "邮箱格式无效。"
   install_certbot "$mode"
-  open_firewall_for_port 80 prompt
+  open_firewall_for_port 80 prompt tcp
   service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
   local certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email")
   if [[ $mode == ip ]]; then
@@ -1862,20 +1923,24 @@ select_managed_certificate() {
 }
 
 manage_inbound_certificate_menu() {
-  local tag=$1 choice identifier cert key current_cert current_key
+  local tag=$1 choice identifier cert key sni current_cert current_key current_sni
   while inbound_exists "$tag"; do
     [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE") == tls ]] || return 0
     current_cert=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.tlsSettings.certificates[0].certificateFile // "未设置"' "$CONFIG_FILE")
     current_key=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.tlsSettings.certificates[0].keyFile // "未设置"' "$CONFIG_FILE")
+    current_sni=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.tlsSettings.serverName // "未设置"' "$CONFIG_FILE")
     clear_screen
     heading "证书管理 · ${tag}"
-    printf '证书: %s\n私钥: %s\n\n' "$current_cert" "$current_key"
+    printf '证书: %s\n私钥: %s\nSNI: %s\n\n' "$current_cert" "$current_key" "$current_sni"
     printf '1) 更换托管证书\n2) 使用证书文件\n0) 返回入站\n'
     read -r -p "请选择: " choice
     case $choice in
       1)
         if select_managed_certificate identifier; then
-          run_menu_action update_tls_inbound_certificate "$tag" "${CERT_DIR}/${identifier}.crt" "${CERT_DIR}/${identifier}.key"
+          cert="${CERT_DIR}/${identifier}.crt"; key="${CERT_DIR}/${identifier}.key"
+          info "使用托管证书：${identifier}"
+          prompt_certificate_server_name sni "$cert"
+          run_menu_action update_tls_inbound_certificate "$tag" "$cert" "$key" "$sni"
           pause
         else
           pause
@@ -1883,7 +1948,8 @@ manage_inbound_certificate_menu() {
         ;;
       2)
         prompt_certificate_files cert key "$current_cert" "$current_key"
-        run_menu_action update_tls_inbound_certificate "$tag" "$cert" "$key"
+        prompt_certificate_server_name sni "$cert"
+        run_menu_action update_tls_inbound_certificate "$tag" "$cert" "$key" "$sni"
         pause
         ;;
       0) return;; *) warn "无效选项。"; pause;;
