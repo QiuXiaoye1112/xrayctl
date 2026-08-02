@@ -2,19 +2,19 @@
 
 `xrayctl` 是一个面向 systemd Linux 服务器的单文件 Xray 管理脚本。交互界面按“先看对象、再直接操作”设计：进入节点管理就能看到全部节点，选中节点后可在同一页管理分享信息、用户、端口和传输方式。它使用 XTLS 官方安装器安装核心，使用 Xray 自带的 `run -test` 检查每次配置变更，并在服务重启失败时自动回滚配置。
 
-当前版本：`1.2.2`
+当前版本：`1.2.3`
 
 ## 功能
 
 - 安装、修复、指定版本安装、升级、保留配置卸载、彻底卸载
-- VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP 入站
+- VLESS、VMess、Trojan、SOCKS5、HTTP 入站
 - RAW、XHTTP、WebSocket、gRPC 传输
 - REALITY、TLS、无传输安全（仅建议可信私网）
 - 节点新增、修改监听信息、修改传输、安全方式、删除、JSON 高级编辑
-- 节点上传、下载和总流量统计（Xray 本次运行期间累计）
-- 多用户新增、重命名、重置凭据、删除
+- 节点上传、下载和总流量统计，以及 VLESS、VMess、Trojan 用户级流量统计（Xray 本次运行期间累计）
+- 多用户新增、重命名、更换 UUID/密码、删除；用户列表直接显示当前凭据
 - SOCKS5、HTTP 出站新增、节点绑定和删除
-- VLESS、VMess、Trojan、Shadowsocks 分享链接及 Base64 订阅内容
+- VLESS、VMess、Trojan 分享链接及 Base64 订阅内容
 - Let's Encrypt 域名/公网 IP 签发、自动续期、签发后应用到节点、已有证书导入
 - 配置校验、日志级别、systemd 服务与日志管理
 - 配置校验失败时显示 Xray 核心的原始错误，便于准确定位问题
@@ -32,7 +32,7 @@ Xray Linux 管理脚本
 │  ├─ 新增节点
 │  ├─ 管理已有节点
 │  │  ├─ 分享信息 / 客户端配置
-│  │  ├─ 用户管理（进入即显示用户）
+│  │  ├─ 用户管理（进入即显示凭据与支持协议的用户流量）
 │  │  ├─ 修改地址和端口
 │  │  ├─ 修改传输和安全方式
 │  │  ├─ 查看 JSON
@@ -147,11 +147,12 @@ xrayctl help
 - VLESS 或 Trojan 暴露在公网时不要选择“无传输安全”。这个选项只用于可信私网。
 - SOCKS5 无认证模式只应监听 `127.0.0.1`、`::1` 或受控内网。
 - SOCKS5/HTTP 出站本身不加密，只应连接可信代理；HTTP 出站仅支持 TCP。
-- 节点流量由 Xray 内存统计，从服务本次启动开始累计，重启 Xray 后重新计数。
+- 节点及用户流量由 Xray 内存统计，从服务本次启动开始累计，重启 Xray 后重新计数。
+- 用户管理页会直接显示 UUID 或密码，请避免在录屏、截图和共享终端中泄露；VLESS、VMess、Trojan 用户名会保持全局唯一，避免 Xray 合并同名用户流量。
 - 脚本不会在删除节点时自动关闭端口，避免误伤共享同一端口的其他服务；可用 `xrayctl firewall close PORT` 手动关闭。
 - 分享链接、配置和备份含有 UUID 或密码，应按密钥材料保护。
 - 云厂商安全组不受 UFW/firewalld 命令控制，需要在云控制台单独设置。
-- VMess、传统 Trojan 和 Shadowsocks 仍被支持，但当前 Xray 核心会提示这些方案不再是首选；新部署优先使用 VLESS + REALITY/TLS。
+- VMess 和传统 Trojan 仍被支持，但新部署优先使用 VLESS + REALITY/TLS。Shadowsocks 已停止新增和分享；旧节点只保留查看与删除入口。
 - 请遵守服务器所在地法律、服务商条款和网络使用政策。
 
 - 如果是纯 IPv6 出站网络，请按下方说明设置 `XRAYCTL_APT_FORCE_IPV4=0`。
