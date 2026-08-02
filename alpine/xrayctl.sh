@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.17-alpine"
+readonly XRAYCTL_VERSION="1.0.18-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -1096,13 +1096,15 @@ list_inbounds() {
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站。"; return; fi
   print_table_cell_clipped "标签" 20; printf '| '; print_table_cell_clipped "协议" 8; printf '| '
-  print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 10; printf '| '
+  print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 7; printf '| '
   print_table_cell_clipped "安全" 10; printf '| 监听\n'
   jq -r '.inbounds | to_entries[] |
-    [.value.tag,.value.protocol,(.value.port|tostring),(.value.streamSettings.method // "raw"),(.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
+    [.value.tag,.value.protocol,(.value.port|tostring),
+     (if (.value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.method // "raw") end),
+     (.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port method security listen; do
         print_table_cell_clipped "$tag" 20; printf '| '; print_table_cell_clipped "$protocol" 8; printf '| '
-        print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 10; printf '| '
+        print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 7; printf '| '
         print_table_cell_clipped "$security" 10; printf '| %s\n' "$listen"
       done
 }
@@ -2355,11 +2357,11 @@ show_main_inbounds() {
     stats_available=1
   fi
   print_table_cell_clipped "标签" 20; printf '| '; print_table_cell_clipped "协议" 8; printf '| '
-  print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 10; printf '| '
+  print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 7; printf '| '
   print_table_cell_clipped "安全" 10; printf '| '; print_table_cell "上传" 12; printf '| '
   print_table_cell "下载" 12; printf '| 总计\n'
   jq -r '.inbounds[] | [.tag,.protocol,
-    (.port|tostring),(.streamSettings.method // "raw"),
+    (.port|tostring),(if (.streamSettings.method // "raw")=="websocket" then "ws" else (.streamSettings.method // "raw") end),
     (.streamSettings.security // "none")] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port method security; do
         if ((stats_available)); then
@@ -2376,7 +2378,7 @@ show_main_inbounds() {
           up="-"; down="-"; total="-"
         fi
         print_table_cell_clipped "$tag" 20; printf '| '; print_table_cell_clipped "$protocol" 8; printf '| '
-        print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 10; printf '| '
+        print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 7; printf '| '
         print_table_cell_clipped "$security" 10; printf '| '; print_table_cell "$up" 12; printf '| '
         print_table_cell "$down" 12; printf '| %s\n' "$total"
       done
