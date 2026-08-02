@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.22"
+readonly XRAYCTL_VERSION="1.2.23"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
 readonly JQ_VERSION="1.8.2"
@@ -750,11 +750,15 @@ prompt_public_host() {
 }
 
 certificate_server_names() {
-  local cert=$1 san
+  local cert=$1 san concrete
   san=$(openssl x509 -in "$cert" -noout -text 2>/dev/null \
     | awk '/X509v3 Subject Alternative Name/ {getline; print; exit}' | tr ',' '\n' \
     | sed -n -e 's/^[[:space:]]*DNS://p' -e 's/^[[:space:]]*IP Address://p')
-  if [[ -n $san ]]; then printf '%s\n' "$san" | awk '!seen[$0]++'; return 0; fi
+  if [[ -n $san ]]; then
+    concrete=$(printf '%s\n' "$san" | awk '$0 !~ /^\*\./ && !seen[$0]++')
+    if [[ -n $concrete ]]; then printf '%s\n' "$concrete"; else printf '%s\n' "$san" | awk '!seen[$0]++'; fi
+    return 0
+  fi
   openssl x509 -in "$cert" -noout -subject -nameopt RFC2253 2>/dev/null \
     | sed -n 's/^subject=.*CN=\([^,]*\).*$/\1/p'
 }
