@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.1.4"
+readonly XRAYCTL_VERSION="1.1.5"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -319,7 +319,7 @@ validate_candidate() {
     return 1
   fi
   if xray_installed; then
-    if ! validation_output=$("$XRAY_BIN" run -test -config "$candidate" 2>&1); then
+    if ! validation_output=$("$XRAY_BIN" run -test -format json -config "$candidate" 2>&1); then
       error "Xray 核心拒绝了新配置，原始错误如下："
       [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
       return 1
@@ -525,7 +525,7 @@ port_in_use_os() {
 prompt_tag() {
   local __var=$1 default=${2:-node-$(random_hex 2)} value
   while true; do
-    prompt_value value "节点标签（字母/数字/._-）" "$default"
+    prompt_value value "节点标签" "$default"
     validate_tag "$value" || { warn "标签格式不正确。"; continue; }
     inbound_exists "$value" && { warn "标签已存在。"; continue; }
     printf -v "$__var" '%s' "$value"; return
@@ -549,26 +549,22 @@ prompt_port() {
 prompt_public_host() {
   local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} value
   if [[ -z $default ]]; then
-    if default=$(detect_public_ip); then
-      info "自动探测到公网 IP：${default}"
-    else
-      warn "未能自动探测公网 IP，请手动填写服务商提供的公网 IP 或域名。"
-    fi
+    default=$(detect_public_ip || true)
   fi
   while true; do
-    prompt_value value "客户端连接用的公网 IP 或域名（NAT 主机填写服务商提供的地址）" "$default"
+    prompt_value value "客户端地址" "$default"
     if [[ -n $value && $value != *" "* ]]; then
       printf -v "$__var" '%s' "$value"
       return
     fi
-    warn "公网地址不能为空且不能包含空格，不能填写服务器内部主机名。"
+    warn "地址无效。"
   done
 }
 
 prompt_public_port() {
   local __var=$1 default=$2 value
   while true; do
-    prompt_value value "客户端公网端口（NAT 主机填写服务商映射端口）" "$default"
+    prompt_value value "公网端口" "$default"
     validate_port "$value" || { warn "公网端口必须是 1-65535。"; continue; }
     printf -v "$__var" '%s' "$value"; return
   done
@@ -588,7 +584,7 @@ build_stream_settings() {
   local protocol=$1 __json=$2 __public_key=$3
   local transport_choice security_choice method security path service target sni private public short_id cert key alpn json
   choose transport_choice "选择传输方式" \
-    "RAW（推荐，原 TCP）" "XHTTP（新式 HTTP 传输）" "WebSocket" "gRPC"
+    "RAW" "XHTTP" "WebSocket" "gRPC"
   case $transport_choice in
     1) method=raw ;;
     2) method=xhttp ;;
@@ -598,19 +594,19 @@ build_stream_settings() {
 
   if [[ $protocol == vless ]]; then
     if [[ $method == raw || $method == xhttp || $method == grpc ]]; then
-      choose security_choice "选择传输安全" "REALITY（推荐）" "TLS 证书" "无（仅限可信私网）"
+      choose security_choice "选择传输安全" "REALITY" "TLS" "无"
       case $security_choice in 1) security=reality;; 2) security=tls;; 3) security=none;; esac
     else
-      choose security_choice "选择传输安全" "TLS 证书（推荐）" "无（仅限可信私网）"
+      choose security_choice "选择传输安全" "TLS" "无"
       case $security_choice in 1) security=tls;; 2) security=none;; esac
     fi
   elif [[ $protocol == trojan ]]; then
     if [[ $method == raw || $method == xhttp || $method == grpc ]]; then
-      choose security_choice "选择传输安全" "TLS 证书（推荐）" "REALITY" "无（仅限可信私网）"
+      choose security_choice "选择传输安全" "TLS" "REALITY" "无"
       case $security_choice in 1) security=tls;; 2) security=reality;; 3) security=none;; esac
     else security=tls; info "Trojan + ${method} 使用 TLS。"; fi
   else
-    choose security_choice "选择传输安全" "TLS 证书（推荐）" "无（VMess 自带载荷加密）"
+    choose security_choice "选择传输安全" "TLS" "无"
     case $security_choice in 1) security=tls;; 2) security=none;; esac
   fi
 
@@ -630,7 +626,7 @@ build_stream_settings() {
 
   case $security in
     reality)
-      prompt_value target "REALITY 伪装目标（域名:端口，避免使用 CDN）" "www.microsoft.com:443"
+      prompt_value target "REALITY 目标" "www.microsoft.com:443"
       prompt_value sni "REALITY serverName/SNI" "${target%%:*}"
       [[ $target == *:* && -n $sni ]] || die "REALITY 目标或 SNI 无效。"
       generate_reality_keys private public
@@ -655,7 +651,7 @@ build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
   local choice protocol tag listen port public_host email uuid password method stream inbound_json user flow auth username public_key=""
   choose choice "选择入站协议" \
-    "VLESS（推荐）" "VMess" "Trojan" "Shadowsocks" "SOCKS5" "HTTP 代理"
+    "VLESS" "VMess" "Trojan" "Shadowsocks" "SOCKS5" "HTTP"
   case $choice in
     1) protocol=vless;; 2) protocol=vmess;; 3) protocol=trojan;;
     4) protocol=shadowsocks;; 5) protocol=socks;; 6) protocol=http;;
@@ -694,14 +690,14 @@ build_inbound() {
       esac
       ;;
     shadowsocks)
-      choose method "选择加密方式" "chacha20-poly1305（推荐）" "aes-256-gcm" "aes-128-gcm"
+      choose method "选择加密方式" "chacha20-poly1305" "aes-256-gcm" "aes-128-gcm"
       case $method in 1) method=chacha20-poly1305;; 2) method=aes-256-gcm;; 3) method=aes-128-gcm;; esac
       prompt_secret password "Shadowsocks 密码" "$(random_password)"
       inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" --arg method "$method" --arg password "$password" \
         '{tag:$tag,listen:$listen,port:$port,protocol:"shadowsocks",settings:{method:$method,password:$password,network:"tcp,udp"},sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}')
       ;;
     socks)
-      choose auth "SOCKS5 认证" "用户名密码（推荐）" "无认证（仅限可信内网）"
+      choose auth "SOCKS5 认证" "用户名密码" "无认证"
       if [[ $auth == 1 ]]; then
         prompt_value username "用户名" "user"; prompt_secret password "密码" "$(random_password)"
         inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" --arg user "$username" --arg pass "$password" \
@@ -858,7 +854,7 @@ check_config() {
 set_log_level() {
   ensure_runtime_dependencies config-loglevel; ensure_config
   local choice level tmp
-  choose choice "日志级别" "warning（推荐）" "info" "error" "debug" "none"
+  choose choice "日志级别" "warning" "info" "error" "debug" "none"
   case $choice in 1) level=warning;; 2) level=info;; 3) level=error;; 4) level=debug;; 5) level=none;; esac
   tmp=$(temp_file); jq --arg level "$level" '.log.loglevel=$level' "$CONFIG_FILE" >"$tmp"
   apply_candidate "$tmp"; rm -f "$tmp"
