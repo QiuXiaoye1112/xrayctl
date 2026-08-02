@@ -2,7 +2,7 @@
 
 `xrayctl` 是一个面向 systemd Linux 服务器的单文件 Xray 管理脚本。它使用 XTLS 官方安装器安装核心，使用 Xray 自带的 `run -test` 检查每次配置变更，并在服务重启失败时自动回滚配置。
 
-当前版本：`1.1.7`
+当前版本：`1.1.8`
 
 ## 功能
 
@@ -13,10 +13,10 @@
 - 节点新增、修改监听信息、修改传输、安全方式、删除、JSON 高级编辑
 - 多用户新增、重命名、重置凭据、删除
 - VLESS、VMess、Trojan、Shadowsocks 分享链接及 Base64 订阅内容
-- Let's Encrypt 独立模式签发、自动续期部署钩子、已有证书导入
+- Let's Encrypt 域名/公网 IP 签发、自动续期、签发后应用到节点、已有证书导入
 - 配置校验、日志级别、systemd 服务与日志管理
 - 配置校验失败时显示 Xray 核心的原始错误，便于准确定位问题
-- UFW/firewalld 端口管理、BBR、系统诊断
+- UFW/firewalld 安装与端口管理、BBR 环境检测和启用、系统诊断
 - 配置/元数据/托管证书的完整备份和安全恢复
 - 安装后通过 `xrayctl` 快捷命令启动
 - 新增节点时自动探测公网 IPv4/IPv6
@@ -51,15 +51,14 @@ sudo ./xrayctl.sh install
 xrayctl
 ```
 
-推荐的新节点组合是 `VLESS -> RAW -> REALITY`。它不需要域名证书，但应认真选择 REALITY 目标；脚本会提示不要使用可能导致开放转发风险的 CDN 目标。
+推荐的新节点组合是 `VLESS -> RAW -> REALITY`。它不需要域名证书。
 
 如果使用 TLS：
 
-1. 确认域名的 A/AAAA 记录已经指向服务器。
+1. 输入域名，或留空使用自动探测的公网 IPv4/IPv6。
 2. 在云平台安全组和系统防火墙开放 TCP 80。
-3. 从“TLS 证书管理”签发证书。
-4. 新建 TLS 节点时选择生成的 `.crt` 和 `.key` 文件。
-5. 开放节点实际监听端口，通常是 TCP 443。
+3. 从“TLS 证书管理”签发证书，并选择是否应用到现有节点。
+4. IP 证书使用 Let’s Encrypt shortlived 配置，需要 Certbot 5.4+，脚本会安装并启用自动续期定时器。
 
 ## 常用命令
 
@@ -83,6 +82,7 @@ xrayctl logs 100                 # 最近 100 行日志
 xrayctl backup                   # 完整备份
 xrayctl restore /path/backup.tar.gz
 xrayctl cert issue example.com admin@example.com
+xrayctl firewall install
 xrayctl diagnose
 ```
 
