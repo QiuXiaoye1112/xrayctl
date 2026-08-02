@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.1"
+readonly XRAYCTL_VERSION="1.2.2"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -15,6 +15,7 @@ CONFIG_FILE="${XRAYCTL_CONFIG_FILE:-${CONFIG_DIR}/config.json}"
 META_FILE="${XRAYCTL_META_FILE:-${CONFIG_DIR}/xrayctl.meta.json}"
 CERT_DIR="${XRAYCTL_CERT_DIR:-${CONFIG_DIR}/certs}"
 BACKUP_DIR="${XRAYCTL_BACKUP_DIR:-/var/backups/xrayctl}"
+STATS_API_LISTEN="${XRAYCTL_STATS_API_LISTEN:-127.0.0.1:10085}"
 QUICK_COMMAND="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"
 QUICK_SYMLINK="${XRAYCTL_SYMLINK_PATH:-/usr/local/bin/xrayctl}"
 SERVICE_NAME="${XRAYCTL_SERVICE_NAME:-xray}"
@@ -76,13 +77,17 @@ confirm() {
 
 prompt_value() {
   local __var=$1 prompt=$2 default=${3-} input_value
-  if [[ -n $default ]]; then
-    read -r -p "${prompt} [${default}]: " input_value
-    input_value=${input_value:-$default}
-  else
-    read -r -p "${prompt}: " input_value
-  fi
-  printf -v "$__var" '%s' "$input_value"
+  while true; do
+    if [[ -n $default ]]; then
+      if ! read -r -p "${prompt} [${default}]: " input_value; then warn "输入已中断。"; return 1; fi
+      input_value=${input_value:-$default}
+    else
+      if ! read -r -p "${prompt}: " input_value; then warn "输入已中断。"; return 1; fi
+      if [[ -z $input_value ]]; then warn "此项不能为空，请重新输入。"; continue; fi
+    fi
+    printf -v "$__var" '%s' "$input_value"
+    return 0
+  done
 }
 
 prompt_secret() {
@@ -118,6 +123,57 @@ validate_tag() { [[ $1 =~ ^[A-Za-z0-9_.-]+$ ]]; }
 validate_domain() { [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]; }
 validate_path() { [[ $1 == /* && $1 != *" "* ]]; }
 validate_email_label() { [[ -n $1 && ${#1} -le 128 && $1 != *$'\n'* ]]; }
+validate_email_address() { [[ $1 == *@*.* && $1 != *" "* ]]; }
+validate_domain_or_ip() { validate_ip_literal "$1" || validate_domain "$1"; }
+validate_certificate_identifier() { [[ $1 =~ ^[A-Za-z0-9.-]+$ ]]; }
+validate_readable_file() { [[ -f $1 && -r $1 ]]; }
+validate_proxy_address() { [[ -n $1 && $1 != *" "* ]]; }
+
+validate_reality_target() {
+  local value=$1 host port
+  [[ $value == *:* ]] || return 1
+  host=${value%:*}; port=${value##*:}
+  [[ -n $host ]] && validate_port "$port"
+}
+
+prompt_validated_value() {
+  local __var=$1 prompt=$2 default=$3 validator=$4 invalid_message=$5 validated_candidate
+  while true; do
+    prompt_value validated_candidate "$prompt" "$default" || return 1
+    if "$validator" "$validated_candidate"; then printf -v "$__var" '%s' "$validated_candidate"; return 0; fi
+    warn "$invalid_message"
+  done
+}
+
+display_width() {
+  local __var=$1 value=$2 char code computed_width=0 i
+  for ((i=0; i<${#value}; i++)); do
+    char=${value:i:1}
+    printf -v code '%d' "'$char"
+    if ((code < 0 || code > 127)); then ((computed_width+=2)); else ((computed_width+=1)); fi
+  done
+  printf -v "$__var" '%s' "$computed_width"
+}
+
+print_table_cell() {
+  local value=$1 target_width=$2 width padding
+  display_width width "$value"
+  padding=$((target_width-width))
+  ((padding > 0)) || padding=1
+  printf '%s%*s' "$value" "$padding" ''
+}
+
+run_menu_action() {
+  local action_status
+  set +e
+  ( set -Eeuo pipefail; "$@" )
+  action_status=$?
+  set -e
+  if ((action_status != 0)); then
+    warn "操作未完成，脚本仍在运行，请检查输入后重试。"
+  fi
+  return 0
+}
 
 validate_ipv4() {
   local value=$1 a b c d extra
@@ -267,6 +323,26 @@ ensure_runtime_dependencies() {
   acquire_lock
 }
 
+ensure_system_context() {
+  require_root "$@"
+  ensure_linux_systemd
+  acquire_lock
+}
+
+run_bounded() {
+  local seconds=$1; shift
+  if command_exists timeout; then timeout --foreground "${seconds}s" "$@"; else "$@"; fi
+}
+
+has_net_admin() {
+  local cap
+  [[ -r /proc/self/status ]] || return 0
+  cap=$(awk '/^CapEff:/ {print $2; exit}' /proc/self/status)
+  [[ -n $cap ]] || return 0
+  cap=${cap: -8}
+  (( (16#$cap & 0x1000) != 0 ))
+}
+
 init_meta() {
   mkdir -p "$CONFIG_DIR"
   if [[ ! -s $META_FILE ]] || ! jq -e 'type=="object" and (.inbounds|type=="object")' "$META_FILE" >/dev/null 2>&1; then
@@ -276,6 +352,7 @@ init_meta() {
 }
 
 write_default_config() {
+  local stats_listen tmp
   mkdir -p "$CONFIG_DIR" /var/log/xray
   cat >"$CONFIG_FILE" <<'JSON'
 {
@@ -295,10 +372,26 @@ write_default_config() {
       {"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"},
       {"type": "field", "protocol": ["bittorrent"], "outboundTag": "blocked"}
     ]
+  },
+  "policy": {
+    "system": {"statsInboundUplink": true, "statsInboundDownlink": true}
+  },
+  "stats": {},
+  "api": {
+    "tag": "xrayctl-api",
+    "listen": "127.0.0.1:10085",
+    "services": ["StatsService"]
   }
 }
 JSON
-  chmod 640 "$CONFIG_FILE"
+  if select_stats_api_listen stats_listen; then
+    tmp=$(temp_file)
+    jq --arg listen "$stats_listen" '.api.listen=$listen' "$CONFIG_FILE" >"$tmp"
+    install -m 640 "$tmp" "$CONFIG_FILE"
+    rm -f "$tmp"
+  else
+    chmod 640 "$CONFIG_FILE"
+  fi
   init_meta
 }
 
@@ -618,9 +711,8 @@ build_stream_settings() {
 
   case $security in
     reality)
-      prompt_value target "REALITY 目标" "www.microsoft.com:443"
-      prompt_value sni "REALITY serverName/SNI" "${target%%:*}"
-      [[ $target == *:* && -n $sni ]] || die "REALITY 目标或 SNI 无效。"
+      prompt_validated_value target "REALITY 目标" "www.microsoft.com:443" validate_reality_target "目标格式应为 域名:端口，请重新输入。"
+      prompt_validated_value sni "REALITY serverName/SNI" "${target%%:*}" validate_domain "SNI 必须是有效域名，请重新输入。"
       generate_reality_keys private public
       short_id=$(random_hex 8)
       json=$(jq --arg target "$target" --arg sni "$sni" --arg private "$private" --arg short "$short_id" \
@@ -655,8 +747,7 @@ build_inbound() {
 
   case $protocol in
     vless|vmess|trojan)
-      prompt_value email "首个用户名称/邮箱" "user-$(random_hex 2)"
-      validate_email_label "$email" || die "用户名称无效。"
+      prompt_validated_value email "首个用户名称/邮箱" "user-$(random_hex 2)" validate_email_label "用户名称无效，请重新输入。"
       build_stream_settings "$protocol" stream generated_public_key
       case $protocol in
         vless)
@@ -733,11 +824,13 @@ list_inbounds() {
   local count
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站节点。"; return; fi
-  printf '%-4s %-24s %-14s %-10s %-14s %-12s %s\n' "序号" "标签" "协议" "端口" "传输" "安全" "监听"
+  print_table_cell "序号" 6; print_table_cell "标签" 24; print_table_cell "协议" 14
+  print_table_cell "端口" 10; print_table_cell "传输" 14; print_table_cell "安全" 12; printf '监听\n'
   jq -r '.inbounds | to_entries[] |
     [(.key+1),.value.tag,.value.protocol,(.value.port|tostring),(.value.streamSettings.method // "raw"),(.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r n tag protocol port method security listen; do
-        printf '%-4s %-22s %-12s %-8s %-12s %-10s %s\n' "$n" "$tag" "$protocol" "$port" "$method" "$security" "$listen"
+        print_table_cell "$n" 6; print_table_cell "$tag" 24; print_table_cell "$protocol" 14
+        print_table_cell "$port" 10; print_table_cell "$method" 14; print_table_cell "$security" 12; printf '%s\n' "$listen"
       done
 }
 
@@ -866,19 +959,60 @@ list_clients() {
     count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])|length' "$CONFIG_FILE")
   fi
   if ((count == 0)); then info "还没有用户。"; return; fi
-  printf '%-4s %-28s %s\n' "序号" "用户" "凭据"
+  print_table_cell "序号" 6; print_table_cell "用户" 32; printf '凭据\n'
   case $protocol in
     vless|vmess)
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
-        | while IFS=$'\t' read -r number label credential; do printf '%-4s %-28s %s\n' "$number" "$label" "$credential"; done ;;
+        | while IFS=$'\t' read -r number label credential; do print_table_cell "$number" 6; print_table_cell "$label" 32; printf '%s\n' "$credential"; done ;;
     trojan)
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-")]|@tsv' "$CONFIG_FILE" \
-        | while IFS=$'\t' read -r number label; do printf '%-4s %-28s %s\n' "$number" "$label" '********'; done ;;
+        | while IFS=$'\t' read -r number label; do print_table_cell "$number" 6; print_table_cell "$label" 32; printf '%s\n' '********'; done ;;
     socks|http)
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts // []|to_entries[]|[.key+1,.value.user]|@tsv' "$CONFIG_FILE" \
-        | while IFS=$'\t' read -r number label; do printf '%-4s %-28s %s\n' "$number" "$label" '********'; done ;;
+        | while IFS=$'\t' read -r number label; do print_table_cell "$number" 6; print_table_cell "$label" 32; printf '%s\n' '********'; done ;;
     *) die "${protocol} 不支持独立多用户管理。";;
   esac
+}
+
+select_client() {
+  local __var=$1 tag=$2 protocol answer current_label
+  local labels=()
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  if [[ $protocol == socks || $protocol == http ]]; then
+    while IFS= read -r current_label; do [[ -z $current_label ]] || labels+=("$current_label"); done < <(
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // [])[].user' "$CONFIG_FILE"
+    )
+  else
+    while IFS= read -r current_label; do [[ -z $current_label ]] || labels+=("$current_label"); done < <(
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])[].email' "$CONFIG_FILE"
+    )
+  fi
+  ((${#labels[@]} > 0)) || { warn "该节点没有可选用户。"; return 1; }
+  choose answer "选择用户" "${labels[@]}"
+  printf -v "$__var" '%s' "${labels[$((answer-1))]}"
+}
+
+client_label_exists() {
+  local tag=$1 label=$2 protocol
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  if [[ $protocol == socks || $protocol == http ]]; then
+    jq -e --arg tag "$tag" --arg label "$label" '.inbounds[]|select(.tag==$tag)|.settings.accounts[]?|select(.user==$label)' "$CONFIG_FILE" >/dev/null
+  else
+    jq -e --arg tag "$tag" --arg label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select(.email==$label)' "$CONFIG_FILE" >/dev/null
+  fi
+}
+
+prompt_client_label() {
+  local __var=$1 tag=$2 prompt=$3 default=${4-} current=${5-} label_candidate
+  while true; do
+    prompt_validated_value label_candidate "$prompt" "$default" validate_email_label "用户名称无效，请重新输入。" || return 1
+    if [[ $label_candidate != "$current" ]] && client_label_exists "$tag" "$label_candidate"; then
+      warn "用户名称已存在，请重新输入。"
+      continue
+    fi
+    printf -v "$__var" '%s' "$label_candidate"
+    return 0
+  done
 }
 
 add_client() {
@@ -886,8 +1020,7 @@ add_client() {
   local tag=${1-} protocol label id password user tmp flow method security
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
-  prompt_value label "用户名称/邮箱" "user-$(random_hex 2)"
-  validate_email_label "$label" || die "用户名称无效。"
+  prompt_client_label label "$tag" "用户名称/邮箱" "user-$(random_hex 2)"
   case $protocol in
     vless)
       id=$(generate_uuid)
@@ -914,7 +1047,7 @@ delete_client() {
   local tag=${1-} label=${2-} assume_yes=${3:-0} protocol tmp count
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
-  if [[ -z $label ]]; then list_clients "$tag"; prompt_value label "要删除的用户名称/邮箱"; fi
+  [[ -n $label ]] || select_client label "$tag" || return
   [[ $assume_yes == 1 ]] || confirm "从 ${tag} 删除用户 ${label}？" N || return 0
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
@@ -933,7 +1066,7 @@ rotate_client_credential() {
   ensure_runtime_dependencies client-rotate; ensure_config
   local tag=${1-} label=${2-} protocol value tmp
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
-  [[ -n $label ]] || { list_clients "$tag"; prompt_value label "要重置凭据的用户名称/邮箱"; }
+  [[ -n $label ]] || select_client label "$tag" || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   confirm "旧凭据会立即失效，继续吗？" N || return 0
   tmp=$(temp_file)
@@ -957,9 +1090,8 @@ rename_client() {
   ensure_runtime_dependencies client-rename; require_xray_installed; ensure_config
   local tag=${1-} old_label=${2-} new_label=${3-} protocol count tmp
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
-  [[ -n $old_label ]] || { list_clients "$tag"; prompt_value old_label "当前用户名称/邮箱"; }
-  [[ -n $new_label ]] || prompt_value new_label "新的用户名称/邮箱"
-  validate_email_label "$new_label" || die "新用户名称无效。"
+  [[ -n $old_label ]] || select_client old_label "$tag" || return
+  [[ -n $new_label ]] || prompt_client_label new_label "$tag" "新的用户名称/邮箱" "" "$old_label"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
@@ -1117,19 +1249,24 @@ print_subscription() {
 }
 
 install_firewall() {
-  ensure_runtime_dependencies firewall-install
-  local manager ssh_port=${XRAYCTL_SSH_PORT:-}
+  ensure_system_context firewall-install
+  local manager ssh_port=${XRAYCTL_SSH_PORT:-} tool_timeout=${XRAYCTL_SYSTEM_TOOL_TIMEOUT:-60}
+  if ! has_net_admin; then
+    warn "当前 NAT/容器没有 NET_ADMIN 权限，不能管理系统防火墙；请在服务商控制台放行端口。"
+    return 0
+  fi
   if ! command_exists ufw && ! command_exists firewall-cmd; then
     manager=$(pkg_manager) || { error "无法识别包管理器。"; return 0; }
+    info "安装防火墙（每个安装阶段最多等待 ${tool_timeout} 秒）。"
     case $manager in
       apt)
-        DEBIAN_FRONTEND=noninteractive apt_get_guarded update -y || true
-        DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y ufw || { error "UFW 安装失败。"; return 0; }
+        DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$tool_timeout" apt_get_guarded update -y || true
+        DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$tool_timeout" apt_get_guarded install -y ufw || { error "UFW 安装失败或超时。"; return 0; }
         ;;
-      dnf) dnf install -y firewalld || { error "firewalld 安装失败。"; return 0; } ;;
-      yum) yum install -y firewalld || { error "firewalld 安装失败。"; return 0; } ;;
-      pacman) pacman -Sy --noconfirm ufw || { error "UFW 安装失败。"; return 0; } ;;
-      zypper) zypper --non-interactive install firewalld || { error "firewalld 安装失败。"; return 0; } ;;
+      dnf) run_bounded "$tool_timeout" dnf install -y firewalld || { error "firewalld 安装失败或超时。"; return 0; } ;;
+      yum) run_bounded "$tool_timeout" yum install -y firewalld || { error "firewalld 安装失败或超时。"; return 0; } ;;
+      pacman) run_bounded "$tool_timeout" pacman -Sy --noconfirm ufw || { error "UFW 安装失败或超时。"; return 0; } ;;
+      zypper) run_bounded "$tool_timeout" zypper --non-interactive install firewalld || { error "firewalld 安装失败或超时。"; return 0; } ;;
     esac
   fi
   if command_exists ufw; then
@@ -1138,14 +1275,14 @@ install_firewall() {
     [[ -t 0 ]] && confirm "启用 UFW？" N || return 0
     [[ -n $ssh_port ]] || ssh_port=$(awk '{print $4}' <<<"${SSH_CONNECTION:-}" 2>/dev/null || true)
     validate_port "${ssh_port:-}" || ssh_port=22
-    ufw allow "${ssh_port}/tcp" >/dev/null
-    if ufw --force enable >/dev/null; then info "UFW 已启用；SSH ${ssh_port}/tcp 已放行。";
-    else error "UFW 启用失败，当前主机可能缺少 NET_ADMIN 权限。"; fi
+    run_bounded 15 ufw allow "${ssh_port}/tcp" >/dev/null
+    if run_bounded 20 ufw --force enable >/dev/null; then info "UFW 已启用；SSH ${ssh_port}/tcp 已放行。";
+    else error "UFW 启用失败或超时。"; fi
   elif command_exists firewall-cmd; then
     if firewall-cmd --state >/dev/null 2>&1; then info "firewalld 已安装并启用。"; return; fi
     info "firewalld 已安装。"
     [[ -t 0 ]] && confirm "启用 firewalld？" N || return 0
-    if systemctl enable --now firewalld; then
+    if run_bounded 30 systemctl enable --now firewalld; then
       [[ -n $ssh_port ]] || ssh_port=$(awk '{print $4}' <<<"${SSH_CONNECTION:-}" 2>/dev/null || true)
       validate_port "${ssh_port:-}" || ssh_port=22
       firewall-cmd --permanent --add-port="${ssh_port}/tcp" >/dev/null
@@ -1158,6 +1295,7 @@ install_firewall() {
 open_firewall_for_port() {
   local port=$1 mode=${2:-force}
   validate_port "$port" || die "无效端口：$port"
+  if ! has_net_admin; then warn "当前 NAT/容器没有 NET_ADMIN 权限，请在服务商控制台放行 ${port}。"; return 0; fi
   if [[ $mode == prompt ]] && ! confirm "是否自动放行 TCP/UDP 端口 ${port}？" Y; then return 0; fi
   if command_exists ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
     ufw allow "${port}/tcp" >/dev/null; ufw allow "${port}/udp" >/dev/null
@@ -1174,6 +1312,7 @@ open_firewall_for_port() {
 close_firewall_for_port() {
   local port=$1
   validate_port "$port" || die "无效端口：$port"
+  if ! has_net_admin; then warn "当前 NAT/容器没有 NET_ADMIN 权限，无法修改系统防火墙。"; return 0; fi
   confirm "关闭 TCP/UDP ${port} 的防火墙规则？请确认没有其他服务使用。" N || return
   if command_exists ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
     ufw delete allow "${port}/tcp" >/dev/null || true; ufw delete allow "${port}/udp" >/dev/null || true
@@ -1317,12 +1456,12 @@ issue_certificate() {
   local domain=${1-} email=${2-} was_active=0 paths cert_path key_path default_domain="" mode=domain
   if [[ -z $domain ]]; then
     default_domain=$(detect_public_ip || true)
-    prompt_value domain "证书域名/IP" "$default_domain"
+    prompt_validated_value domain "证书域名/IP" "$default_domain" validate_domain_or_ip "域名/IP 无效，请重新输入。"
   fi
   if validate_ip_literal "$domain"; then mode=ip;
   elif ! validate_domain "$domain"; then die "证书域名/IP 无效。"; fi
-  [[ -n $email ]] || prompt_value email "Let's Encrypt 联系邮箱"
-  [[ $email == *@*.* ]] || die "邮箱格式无效。"
+  [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。"
+  validate_email_address "$email" || die "邮箱格式无效。"
   install_certbot "$mode"
   open_firewall_for_port 80 prompt
   service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
@@ -1350,10 +1489,10 @@ issue_certificate() {
 import_certificate() {
   ensure_runtime_dependencies cert-import
   local domain=${1-} cert=${2-} key=${3-} paths
-  [[ -n $domain ]] || prompt_value domain "证书标识/域名"
+  [[ -n $domain ]] || prompt_validated_value domain "证书标识/域名" "" validate_certificate_identifier "证书标识只能包含字母、数字、点和横线。"
   [[ $domain =~ ^[A-Za-z0-9.-]+$ ]] || die "证书标识无效。"
-  [[ -n $cert ]] || prompt_value cert "证书文件路径"
-  [[ -n $key ]] || prompt_value key "私钥文件路径"
+  [[ -n $cert ]] || prompt_validated_value cert "证书文件路径" "" validate_readable_file "证书文件不存在或不可读，请重新输入。"
+  [[ -n $key ]] || prompt_validated_value key "私钥文件路径" "" validate_readable_file "私钥文件不存在或不可读，请重新输入。"
   paths=$(copy_certificate_pair "$domain" "$cert" "$key")
   info "证书已导入：$(head -n1 <<<"$paths")"
 }
@@ -1377,12 +1516,12 @@ certificate_count() {
 }
 
 select_managed_certificate() {
-  local __var=$1 cert answer identifier
+  local __var=$1 cert answer cert_identifier
   local identifiers=()
   for cert in "$CERT_DIR"/*.crt; do
     [[ -e $cert ]] || continue
-    identifier=$(basename "$cert" .crt)
-    [[ -r "${CERT_DIR}/${identifier}.key" ]] && identifiers+=("$identifier")
+    cert_identifier=$(basename "$cert" .crt)
+    [[ -r "${CERT_DIR}/${cert_identifier}.key" ]] && identifiers+=("$cert_identifier")
   done
   ((${#identifiers[@]} > 0)) || { warn "没有可用的托管证书。"; return 1; }
   if ((${#identifiers[@]} == 1)); then
@@ -1469,24 +1608,30 @@ show_logs() {
 }
 
 enable_bbr() {
-  ensure_runtime_dependencies bbr
-  local available qdisc_enabled=0 config=/etc/sysctl.d/99-xrayctl-bbr.conf
+  ensure_system_context bbr
+  local available current qdisc_enabled=0 config=/etc/sysctl.d/99-xrayctl-bbr.conf
   if [[ ! -r /proc/sys/net/ipv4/tcp_available_congestion_control || ! -e /proc/sys/net/ipv4/tcp_congestion_control ]]; then
     warn "当前内核未暴露 TCP 拥塞控制接口，无法在此容器内启用 BBR。"
     return 0
   fi
-  command_exists modprobe && modprobe tcp_bbr >/dev/null 2>&1 || true
+  current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  if [[ $current == bbr ]]; then info "BBR 已经启用，无需重复设置。"; return 0; fi
+  if ! has_net_admin; then
+    warn "当前 NAT/容器没有 NET_ADMIN 权限，无法修改内核拥塞控制。"
+    return 0
+  fi
+  command_exists modprobe && run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true
   available=$(< /proc/sys/net/ipv4/tcp_available_congestion_control)
   if [[ " $available " != *" bbr "* ]]; then
     warn "当前内核不支持 BBR：${available}"
     return 0
   fi
   if [[ -e /proc/sys/net/core/default_qdisc ]]; then
-    if sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then qdisc_enabled=1;
+    if run_bounded 5 sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then qdisc_enabled=1;
     else warn "无法设置 net.core.default_qdisc，跳过 fq。"; fi
   fi
-  if ! sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
-    error "无法写入拥塞控制参数；当前容器可能缺少内核权限。"
+  if ! run_bounded 5 sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
+    error "无法写入拥塞控制参数或操作超时。"
     return 0
   fi
   if ((qdisc_enabled)); then
@@ -1516,12 +1661,96 @@ system_diagnostics() {
   heading "最近服务日志"; journalctl -u "$SERVICE_NAME" -n 20 --no-pager 2>/dev/null || true
 }
 
+repair_quick_command() {
+  ensure_runtime_dependencies quick-command
+  install_quick_command
+}
+
 node_count_summary() {
   if command_exists jq && [[ -r $CONFIG_FILE ]]; then
     jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?'
   else
     printf '0'
   fi
+}
+
+stats_api_address() {
+  jq -r '
+    if (.api.listen // "") != "" then .api.listen
+    elif (.api.tag // "") != "" then
+      (.api.tag as $apiTag |
+       [.inbounds[]? | select(.tag==$apiTag) | "\(.listen // "127.0.0.1"):\(.port)"][0] // empty)
+    else empty end' "$CONFIG_FILE" 2>/dev/null
+}
+
+select_stats_api_listen() {
+  local __var=$1 host port max_port
+  host=${STATS_API_LISTEN%:*}; port=${STATS_API_LISTEN##*:}
+  validate_port "$port" || port=10085
+  max_port=$((port+100)); ((max_port <= 65535)) || max_port=65535
+  while port_in_use_os "$port" && ((port < max_port)); do ((port+=1)); done
+  port_in_use_os "$port" && { warn "找不到可用的本地统计端口。"; return 1; }
+  printf -v "$__var" '%s:%s' "$host" "$port"
+}
+
+traffic_stats_configured() {
+  jq -e '
+    (.stats|type)=="object" and
+    .policy.system.statsInboundUplink==true and
+    .policy.system.statsInboundDownlink==true and
+    (.api.services // [] | index("StatsService") != null)' "$CONFIG_FILE" >/dev/null 2>&1 \
+    && [[ -n $(stats_api_address) ]]
+}
+
+ensure_traffic_stats() {
+  ensure_runtime_dependencies stats; ensure_config
+  traffic_stats_configured && return 0
+  local tmp listen existing_api=0 add_listen=0
+  jq -e '.api|type=="object"' "$CONFIG_FILE" >/dev/null 2>&1 && existing_api=1
+  if ((existing_api)); then
+    listen=$(stats_api_address)
+    if [[ -z $listen ]]; then select_stats_api_listen listen || return 1; add_listen=1; fi
+  else
+    select_stats_api_listen listen || return 1
+  fi
+  tmp=$(temp_file)
+  jq --arg listen "$listen" --argjson existingApi "$existing_api" --argjson addListen "$add_listen" '
+    .stats=(.stats // {}) |
+    .policy=(.policy // {}) |
+    .policy.system=(.policy.system // {}) |
+    .policy.system.statsInboundUplink=true |
+    .policy.system.statsInboundDownlink=true |
+    if $existingApi==0 then
+      .api={tag:"xrayctl-api",listen:$listen,services:["StatsService"]}
+    else
+      .api.services=((.api.services // []) + ["StatsService"] | unique) |
+      if $addListen==1 then .api.listen=$listen else . end
+    end' "$CONFIG_FILE" >"$tmp"
+  if apply_candidate "$tmp"; then info "节点流量统计已启用；流量从本次 Xray 运行开始累计。"; fi
+  rm -f "$tmp"
+}
+
+format_bytes() {
+  local bytes=${1:-0}
+  awk -v value="$bytes" 'BEGIN {
+    if (value >= 1099511627776) printf "%.2f TB", value/1099511627776;
+    else if (value >= 1073741824) printf "%.2f GB", value/1073741824;
+    else if (value >= 1048576) printf "%.2f MB", value/1048576;
+    else if (value >= 1024) printf "%.2f KB", value/1024;
+    else printf "%d B", value;
+  }'
+}
+
+query_inbound_traffic() {
+  local tag=$1 __up=$2 __down=$3 address output parsed_up parsed_down up_name down_name
+  address=$(stats_api_address)
+  [[ -n $address && -x $XRAY_BIN ]] || return 1
+  output=$("$XRAY_BIN" api statsquery --server="$address" --timeout=2 -pattern "inbound>>>${tag}>>>traffic>>>" 2>/dev/null) || return 1
+  up_name="inbound>>>${tag}>>>traffic>>>uplink"; down_name="inbound>>>${tag}>>>traffic>>>downlink"
+  parsed_up=$(jq -r --arg name "$up_name" '[.stat[]?|select(.name==$name)|.value][0] // 0' <<<"$output")
+  parsed_down=$(jq -r --arg name "$down_name" '[.stat[]?|select(.name==$name)|.value][0] // 0' <<<"$output")
+  printf -v "$__up" '%s' "${parsed_up:-0}"
+  printf -v "$__down" '%s' "${parsed_down:-0}"
 }
 
 xray_version_summary() {
@@ -1550,7 +1779,7 @@ show_main_summary() {
 }
 
 show_node_summary() {
-  local tag=$1 protocol port method security listen
+  local tag=$1 protocol port method security listen up down total
   IFS=$'\t' read -r protocol port method security listen < <(
     jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|[
       .protocol,(.port|tostring),(.streamSettings.method // "raw"),
@@ -1558,6 +1787,148 @@ show_node_summary() {
   )
   printf '协议: %s  |  端口: %s  |  传输: %s  |  安全: %s\n监听: %s\n\n' \
     "$protocol" "$port" "$method" "$security" "$listen"
+  if query_inbound_traffic "$tag" up down; then
+    total=$((up+down))
+    printf '流量: 上传 %s  |  下载 %s  |  总计 %s\n\n' "$(format_bytes "$up")" "$(format_bytes "$down")" "$(format_bytes "$total")"
+  elif service_is_active; then
+    printf '流量: 统计服务暂不可用\n\n'
+  else
+    printf '流量: Xray 服务未运行\n\n'
+  fi
+}
+
+outbound_exists() { jq -e --arg tag "$1" '.outbounds[]?|select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
+
+list_outbound_overview() {
+  ensure_config
+  heading "节点出站规则"
+  if [[ $(jq '.inbounds|length' "$CONFIG_FILE") == 0 ]]; then
+    info "还没有节点。"
+  else
+    print_table_cell "序号" 6; print_table_cell "节点" 28; printf '出站\n'
+    jq -r '
+      (.routing.rules // []) as $rules |
+      .inbounds | to_entries[] |
+      (.key+1) as $number | .value.tag as $tag |
+      [$number,$tag,([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // "direct")] | @tsv' "$CONFIG_FILE" \
+      | while IFS=$'\t' read -r number tag outbound; do
+          print_table_cell "$number" 6; print_table_cell "$tag" 28; printf '%s\n' "$outbound"
+        done
+  fi
+
+  heading "SOCKS5 / HTTP 出站"
+  if ! jq -e '.outbounds[]?|select(.protocol=="socks" or .protocol=="http")' "$CONFIG_FILE" >/dev/null; then
+    info "还没有代理出站。"
+    return 0
+  fi
+  print_table_cell "序号" 6; print_table_cell "标签" 24; print_table_cell "协议" 12; print_table_cell "地址" 30; printf '认证\n'
+  jq -r '[.outbounds[]?|select(.protocol=="socks" or .protocol=="http")] | to_entries[] |
+    [.key+1,.value.tag,.value.protocol,(.value.settings.address+":"+(.value.settings.port|tostring)),
+     (if (.value.settings.user // "")=="" then "无" else .value.settings.user end)] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r number tag protocol address auth; do
+        print_table_cell "$number" 6; print_table_cell "$tag" 24; print_table_cell "$protocol" 12
+        print_table_cell "$address" 30; printf '%s\n' "$auth"
+      done
+}
+
+prompt_outbound_tag() {
+  local __var=$1 default=$2 tag_candidate
+  while true; do
+    prompt_validated_value tag_candidate "出站标签" "$default" validate_tag "标签只能包含字母、数字、点、下划线和横线。" || return 1
+    if outbound_exists "$tag_candidate" || inbound_exists "$tag_candidate" || [[ $tag_candidate == xrayctl-api ]]; then
+      warn "标签已存在，请重新输入。"
+      continue
+    fi
+    printf -v "$__var" '%s' "$tag_candidate"
+    return 0
+  done
+}
+
+add_outbound() {
+  ensure_runtime_dependencies outbound-add; require_xray_installed; ensure_config
+  local choice protocol tag address port auth username password settings outbound tmp
+  choose choice "选择出站协议" "SOCKS5" "HTTP"
+  if [[ $choice == 1 ]]; then protocol=socks; else protocol=http; fi
+  prompt_outbound_tag tag "${protocol}-out-$(random_hex 2)"
+  prompt_validated_value address "代理服务器地址" "" validate_proxy_address "地址不能为空或包含空格，请重新输入。"
+  prompt_validated_value port "代理服务器端口" "" validate_port "端口必须是 1-65535，请重新输入。"
+  choose auth "认证方式" "无认证" "用户名密码"
+  settings=$(jq -n --arg address "$address" --argjson port "$port" '{address:$address,port:$port}')
+  if [[ $auth == 2 ]]; then
+    prompt_value username "用户名"
+    prompt_secret password "密码" "$(random_password)"
+    settings=$(jq --arg user "$username" --arg pass "$password" '.+{user:$user,pass:$pass,level:0}' <<<"$settings")
+  fi
+  outbound=$(jq -n --arg tag "$tag" --arg protocol "$protocol" --argjson settings "$settings" \
+    '{tag:$tag,protocol:$protocol,settings:$settings}')
+  tmp=$(temp_file)
+  jq --argjson outbound "$outbound" '.outbounds += [$outbound]' "$CONFIG_FILE" >"$tmp"
+  if apply_candidate "$tmp"; then info "出站 ${tag} 已添加。"; fi
+  rm -f "$tmp"
+}
+
+select_outbound() {
+  local __var=$1 include_direct=${2:-0} candidate_tag answer
+  local tags=()
+  ((include_direct == 0)) || tags+=("direct")
+  while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || tags+=("$candidate_tag"); done < <(
+    jq -r '.outbounds[]?|select(.protocol=="socks" or .protocol=="http")|.tag' "$CONFIG_FILE"
+  )
+  ((${#tags[@]} > 0)) || { warn "没有可选出站。"; return 1; }
+  choose answer "选择出站" "${tags[@]}"
+  printf -v "$__var" '%s' "${tags[$((answer-1))]}"
+}
+
+assign_outbound() {
+  ensure_runtime_dependencies outbound-assign; ensure_config
+  local inbound=${1-} outbound=${2-} rule_tag tmp
+  [[ -n $inbound ]] || select_inbound inbound || return
+  inbound_exists "$inbound" || die "找不到节点：$inbound"
+  [[ -n $outbound ]] || select_outbound outbound 1 || return
+  outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
+  rule_tag="xrayctl-outbound:${inbound}"
+  tmp=$(temp_file)
+  jq --arg inbound "$inbound" --arg outbound "$outbound" --arg ruleTag "$rule_tag" '
+    .routing=(.routing // {domainStrategy:"IPIfNonMatch",rules:[]}) |
+    (.routing.rules // [] | map(select((.ruleTag // "")!=$ruleTag))) as $rules |
+    .routing.rules=(
+      [$rules[] | select((.outboundTag // "") == "blocked")] +
+      [{type:"field",inboundTag:[$inbound],outboundTag:$outbound,ruleTag:$ruleTag}] +
+      [$rules[] | select((.outboundTag // "") != "blocked")]
+    )' "$CONFIG_FILE" >"$tmp"
+  if apply_candidate "$tmp"; then info "节点 ${inbound} 已使用出站 ${outbound}。"; fi
+  rm -f "$tmp"
+}
+
+delete_outbound() {
+  ensure_runtime_dependencies outbound-delete; ensure_config
+  local tag=${1-} tmp assigned
+  [[ -n $tag ]] || select_outbound tag 0 || return
+  outbound_exists "$tag" || die "找不到出站：$tag"
+  assigned=$(jq -r --arg tag "$tag" '[.routing.rules[]?|select(.outboundTag==$tag)|.inboundTag[]?]|unique|join(", ")' "$CONFIG_FILE")
+  if [[ -n $assigned ]]; then warn "正在使用此出站的节点：${assigned}；删除后这些节点恢复 direct。"; fi
+  confirm "删除出站 ${tag}？" N || return 0
+  tmp=$(temp_file)
+  jq --arg tag "$tag" '
+    .outbounds |= map(select(.tag!=$tag)) |
+    .routing.rules=((.routing.rules // []) | map(select(.outboundTag!=$tag)))' "$CONFIG_FILE" >"$tmp"
+  if apply_candidate "$tmp"; then info "出站 ${tag} 已删除。"; fi
+  rm -f "$tmp"
+}
+
+outbound_menu() {
+  local choice
+  while true; do
+    clear_screen
+    heading "出站管理"
+    list_outbound_overview
+    printf '\n1) 选择节点设置出站\n2) 添加 SOCKS5/HTTP 出站\n3) 删除出站\n0) 返回\n'
+    read -r -p "请选择: " choice
+    case $choice in
+      1) run_menu_action assign_outbound; pause;; 2) run_menu_action add_outbound; pause;;
+      3) run_menu_action delete_outbound; pause;; 0) return;; *) warn "无效选项。"; pause;;
+    esac
+  done
 }
 
 client_menu_for_tag() {
@@ -1569,8 +1940,8 @@ client_menu_for_tag() {
     printf '\n1) 添加用户\n2) 重命名用户\n3) 重置用户凭据\n4) 删除用户\n0) 返回节点\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) add_client "$tag"; pause;; 2) rename_client "$tag"; pause;;
-      3) rotate_client_credential "$tag"; pause;; 4) delete_client "$tag"; pause;;
+      1) run_menu_action add_client "$tag"; pause;; 2) run_menu_action rename_client "$tag"; pause;;
+      3) run_menu_action rotate_client_credential "$tag"; pause;; 4) run_menu_action delete_client "$tag"; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -1588,17 +1959,17 @@ manage_inbound_menu() {
         printf '1) 分享信息\n2) 用户管理\n3) 修改地址/端口\n4) 修改传输/安全\n5) 查看 JSON\n6) 删除节点\n0) 返回列表\n'
         read -r -p "请选择: " choice
         case $choice in
-          1) print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_basic "$tag"; pause;;
-          4) modify_inbound_transport "$tag"; pause;; 5) show_inbound "$tag"; pause;;
-          6) delete_inbound "$tag"; pause;; 0) return;; *) warn "无效选项。"; pause;;
+          1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) run_menu_action modify_inbound_basic "$tag"; pause;;
+          4) run_menu_action modify_inbound_transport "$tag"; pause;; 5) run_menu_action show_inbound "$tag"; pause;;
+          6) run_menu_action delete_inbound "$tag"; pause;; 0) return;; *) warn "无效选项。"; pause;;
         esac
         ;;
       http)
         printf '1) 客户端配置\n2) 用户管理\n3) 修改地址/端口\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
         read -r -p "请选择: " choice
         case $choice in
-          1) print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_basic "$tag"; pause;;
-          4) show_inbound "$tag"; pause;; 5) delete_inbound "$tag"; pause;;
+          1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) run_menu_action modify_inbound_basic "$tag"; pause;;
+          4) run_menu_action show_inbound "$tag"; pause;; 5) run_menu_action delete_inbound "$tag"; pause;;
           0) return;; *) warn "无效选项。"; pause;;
         esac
         ;;
@@ -1609,16 +1980,16 @@ manage_inbound_menu() {
           printf '1) 客户端配置\n2) 用户管理\n3) 修改地址/端口\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
           read -r -p "请选择: " choice
           case $choice in
-            1) print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_basic "$tag"; pause;;
-            4) show_inbound "$tag"; pause;; 5) delete_inbound "$tag"; pause;;
+            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) run_menu_action modify_inbound_basic "$tag"; pause;;
+            4) run_menu_action show_inbound "$tag"; pause;; 5) run_menu_action delete_inbound "$tag"; pause;;
             0) return;; *) warn "无效选项。"; pause;;
           esac
         else
           printf '1) 客户端配置\n2) 修改地址/端口\n3) 查看 JSON\n4) 删除节点\n0) 返回列表\n'
           read -r -p "请选择: " choice
           case $choice in
-            1) print_links "$tag"; pause;; 2) modify_inbound_basic "$tag"; pause;;
-            3) show_inbound "$tag"; pause;; 4) delete_inbound "$tag"; pause;;
+            1) run_menu_action print_links "$tag"; pause;; 2) run_menu_action modify_inbound_basic "$tag"; pause;;
+            3) run_menu_action show_inbound "$tag"; pause;; 4) run_menu_action delete_inbound "$tag"; pause;;
             0) return;; *) warn "无效选项。"; pause;;
           esac
         fi
@@ -1627,8 +1998,8 @@ manage_inbound_menu() {
         printf '1) 分享信息\n2) 修改地址/端口\n3) 查看 JSON\n4) 删除节点\n0) 返回列表\n'
         read -r -p "请选择: " choice
         case $choice in
-          1) print_links "$tag"; pause;; 2) modify_inbound_basic "$tag"; pause;;
-          3) show_inbound "$tag"; pause;; 4) delete_inbound "$tag"; pause;;
+          1) run_menu_action print_links "$tag"; pause;; 2) run_menu_action modify_inbound_basic "$tag"; pause;;
+          3) run_menu_action show_inbound "$tag"; pause;; 4) run_menu_action delete_inbound "$tag"; pause;;
           0) return;; *) warn "无效选项。"; pause;;
         esac
         ;;
@@ -1639,6 +2010,7 @@ manage_inbound_menu() {
 
 inbound_menu() {
   local choice tag
+  if ! traffic_stats_configured; then run_menu_action ensure_traffic_stats; pause; fi
   while true; do
     clear_screen
     heading "节点管理"
@@ -1646,12 +2018,18 @@ inbound_menu() {
     printf '\n1) 新增节点\n2) 管理已有节点\n3) 输出全部节点订阅\n4) 高级编辑完整配置\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) add_inbound; pause;;
+      1) run_menu_action add_inbound; pause;;
       2) select_inbound tag && manage_inbound_menu "$tag";;
-      3) print_subscription; pause;; 4) edit_config; pause;;
+      3) run_menu_action print_subscription; pause;; 4) run_menu_action edit_config; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
+}
+
+test_certificate_renewal() {
+  ensure_runtime_dependencies cert-renew
+  install_certbot
+  certbot renew --dry-run
 }
 
 certificate_menu() {
@@ -1663,9 +2041,9 @@ certificate_menu() {
     printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 应用证书到节点\n4) 查看托管证书\n5) 测试自动续期\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) issue_certificate; pause;; 2) import_certificate; pause;; 3) apply_managed_certificate; pause;;
-      4) list_certificates; pause;;
-      5) ensure_runtime_dependencies cert-renew; install_certbot; certbot renew --dry-run; pause;;
+      1) run_menu_action issue_certificate; pause;; 2) run_menu_action import_certificate; pause;; 3) run_menu_action apply_managed_certificate; pause;;
+      4) run_menu_action list_certificates; pause;;
+      5) run_menu_action test_certificate_renewal; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -1697,9 +2075,9 @@ service_menu() {
     printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装/更新/修复 Xray\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) toggle_service_running; pause;; 2) service_action restart; pause;;
-      3) toggle_service_startup; pause;; 4) show_logs 100; pause;;
-      5) install_or_update_xray install; pause;; 0) return;; *) warn "无效选项。"; pause;;
+      1) run_menu_action toggle_service_running; pause;; 2) run_menu_action service_action restart; pause;;
+      3) run_menu_action toggle_service_startup; pause;; 4) run_menu_action show_logs 100; pause;;
+      5) run_menu_action install_or_update_xray install; pause;; 0) return;; *) warn "无效选项。"; pause;;
     esac
   done
 }
@@ -1714,8 +2092,15 @@ firewall_state_summary() {
   fi
 }
 
+manage_firewall_port() {
+  local action=$1 port
+  prompt_validated_value port "端口" "" validate_port "端口必须是 1-65535，请重新输入。"
+  ensure_system_context firewall
+  if [[ $action == open ]]; then open_firewall_for_port "$port" force; else close_firewall_for_port "$port"; fi
+}
+
 firewall_menu() {
-  local choice port
+  local choice
   while true; do
     clear_screen
     heading "防火墙"
@@ -1723,9 +2108,9 @@ firewall_menu() {
     printf '1) 安装/启用\n2) 放行端口\n3) 关闭端口\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) install_firewall; pause;;
-      2) prompt_value port "端口"; ensure_runtime_dependencies firewall; open_firewall_for_port "$port" force; pause;;
-      3) prompt_value port "端口"; ensure_runtime_dependencies firewall; close_firewall_for_port "$port"; pause;;
+      1) run_menu_action install_firewall; pause;;
+      2) run_menu_action manage_firewall_port open; pause;;
+      3) run_menu_action manage_firewall_port close; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -1748,8 +2133,8 @@ system_menu() {
     printf '1) 防火墙管理\n2) 启用 BBR\n3) 系统诊断\n4) 修复快捷命令\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) firewall_menu;; 2) enable_bbr; pause;; 3) system_diagnostics; pause;;
-      4) ensure_runtime_dependencies quick-command; install_quick_command; pause;;
+      1) firewall_menu;; 2) run_menu_action enable_bbr; pause;; 3) run_menu_action system_diagnostics; pause;;
+      4) run_menu_action repair_quick_command; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -1763,7 +2148,7 @@ uninstall_menu() {
     printf '1) 卸载 Xray（保留配置）\n2) 彻底卸载\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) uninstall_xray 0; pause;; 2) uninstall_xray 1; pause;;
+      1) run_menu_action uninstall_xray 0; pause;; 2) run_menu_action uninstall_xray 1; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -1775,11 +2160,11 @@ main_menu() {
     clear_screen
     printf '%sXray Linux 管理脚本%s  v%s\n' "$C_BOLD$C_BLUE" "$C_RESET" "$XRAYCTL_VERSION"
     show_main_summary
-    printf '1) 节点管理\n2) TLS 证书\n3) 服务管理\n4) 系统工具\n5) 卸载\n0) 退出\n'
+    printf '1) 节点管理\n2) 出站管理\n3) TLS 证书\n4) 服务管理\n5) 系统工具\n6) 卸载\n0) 退出\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) inbound_menu;; 2) certificate_menu;; 3) service_menu;;
-      4) system_menu;; 5) uninstall_menu;;
+      1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) service_menu;;
+      5) system_menu;; 6) uninstall_menu;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -1803,6 +2188,10 @@ xrayctl - Xray Linux 管理脚本
   xrayctl inbound modify <标签>   修改监听端口/地址
   xrayctl inbound transport <标签> 修改传输与安全方式
   xrayctl inbound delete <标签> [--yes]
+  xrayctl outbound list
+  xrayctl outbound add
+  xrayctl outbound assign <节点> <出站标签|direct>
+  xrayctl outbound delete <出站标签>
   xrayctl client list [标签]
   xrayctl client add [标签]
   xrayctl client rename [标签] [旧名称] [新名称]
@@ -1844,6 +2233,10 @@ dispatch() {
         modify|edit) modify_inbound_basic "${2-}";; transport|stream) modify_inbound_transport "${2-}";;
         delete|remove) delete_inbound "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
         *) die "未知 inbound 子命令：${1}";; esac;;
+    outbound)
+      case ${1:-list} in
+        list) list_outbound_overview;; add) add_outbound;; assign|set) assign_outbound "${2-}" "${3-}";;
+        delete|remove) delete_outbound "${2-}";; *) die "未知 outbound 子命令：${1}";; esac;;
     client)
       case ${1:-list} in
         list) ensure_config; list_clients "${2-}";; add) add_client "${2-}";; rename) rename_client "${2-}" "${3-}" "${4-}";;
