@@ -2,7 +2,7 @@
 
 `xrayctl` 是一个面向 systemd Linux 服务器的单文件 Xray 管理脚本。交互界面按“先看对象、再直接操作”设计：进入入站管理就能看到全部入站，选中入站后可在同一页管理分享信息、用户、端口和传输方式。它使用 XTLS 官方安装器安装核心，使用 Xray 自带的 `run -test` 检查每次配置变更，并在服务重启失败时自动回滚配置。
 
-当前版本：`1.2.12`
+当前版本：`1.2.13`
 
 > Alpine Linux 使用独立的 OpenRC 包，不会覆盖本页的 systemd 版。请查看 [Alpine/OpenRC 安装说明](alpine/README.md)。
 
@@ -28,7 +28,7 @@
 - 配置校验失败时显示 Xray 核心的原始错误，便于准确定位问题
 - UFW/firewalld 安装与端口管理、BBR 环境检测和启用、系统诊断
 - 安装后通过 `xrayctl` 快捷命令启动
-- 新增入站时自动探测公网 IPv4/IPv6
+- 新增入站时自动探测公网地址；双栈同时列出 IPv4 和 IPv6，单栈只显示可用地址
 
 ## 交互菜单
 
@@ -100,7 +100,7 @@ xrayctl
 
 如果使用 TLS：
 
-1. 输入域名，或留空使用自动探测的公网 IPv4/IPv6。
+1. 选择自动探测到的公网 IPv4/IPv6，或选择手动输入域名/IP。
 2. 在云平台安全组和系统防火墙开放 TCP 80。
 3. 从“TLS 证书”签发或导入证书。
 4. 新建 TLS 入站时选择托管证书；已有 TLS 入站可在该入站的“证书管理”中更换。
@@ -167,8 +167,6 @@ xrayctl help
 - VMess 和传统 Trojan 仍被支持，但新部署优先使用 VLESS + REALITY/TLS。Shadowsocks 已停止新增和分享；旧入站只保留查看与删除入口。
 - 请遵守服务器所在地法律、服务商条款和网络使用政策。
 
-- 如果是纯 IPv6 出站网络，请按下方说明设置 `XRAYCTL_APT_FORCE_IPV4=0`。
-
 ## 回滚与卸载
 
 新增、修改和删除不会创建永久备份。新配置通过核心检查后才会替换当前配置；如果原服务正在运行且重启失败，脚本会使用临时副本恢复旧配置，回滚完成后立即删除临时副本。
@@ -188,8 +186,4 @@ xrayctl uninstall --purge       # 删除 Xray 配置、证书和日志
 
 IP 证书会优先使用现有 Python，通过 PyPA 引导 pip，不安装 `python3-venv` 系统包。只有免 APT 方式不可用时才回退包管理器；APT 默认最多等待 60 秒，pip 默认最多等待 120 秒，可分别通过 `XRAYCTL_CERT_APT_TIMEOUT`、`XRAYCTL_CERT_PIP_TIMEOUT` 调整。
 
-仅有 IPv6 网络的服务器可以关闭 IPv4 强制模式：
-
-```bash
-curl -fsSL https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/install.sh | sudo env XRAYCTL_APT_FORCE_IPV4=0 bash
-```
+脚本会自动检测 IPv4 连通性：IPv4 可用时 APT 使用 IPv4，只有 IPv6 时自动使用 IPv6，不需要额外安装参数。
