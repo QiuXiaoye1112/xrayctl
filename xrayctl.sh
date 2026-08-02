@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.4"
+readonly XRAYCTL_VERSION="1.2.5"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -88,6 +88,12 @@ prompt_value() {
     printf -v "$__var" '%s' "$input_value"
     return 0
   done
+}
+
+prompt_optional_value() {
+  local __var=$1 prompt=$2 input_value=""
+  if ! read -r -p "${prompt}: " input_value; then warn "输入已中断。"; return 1; fi
+  printf -v "$__var" '%s' "$input_value"
 }
 
 prompt_secret() {
@@ -748,7 +754,7 @@ build_stream_settings() {
 
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
-  local choice protocol tag listen port public_host email uuid password method stream inbound_json user flow auth username generated_public_key=""
+  local choice protocol tag listen port public_host email uuid password method stream inbound_json user flow username generated_public_key=""
   choose choice "选择入站协议" \
     "VLESS" "VMess" "Trojan" "SOCKS5" "HTTP"
   case $choice in
@@ -788,11 +794,17 @@ build_inbound() {
       esac
       ;;
     socks)
-      choose auth "SOCKS5 认证" "用户名密码" "无认证"
-      if [[ $auth == 1 ]]; then
-        prompt_value username "用户名" "user"; prompt_secret password "密码" "$(random_password)"
+      prompt_optional_value username "用户名（留空表示无认证）"
+      if [[ -n $username ]]; then
+        prompt_secret password "密码" "$(random_password)"
         inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" --arg user "$username" --arg pass "$password" \
-          '{tag:$tag,listen:$listen,port:$port,protocol:"socks",settings:{auth:"password",accounts:[{user:$user,pass:$pass}],udp:true,ip:"0.0.0.0"}}')
+          '{tag:$tag,listen:$listen,port:$port,protocol:"socks",settings:{
+            auth:"password",
+            accounts:[{user:$user,pass:$pass}],
+            users:[{user:$user,pass:$pass}],
+            udp:true,
+            ip:"0.0.0.0"
+          }}')
       else
         [[ $listen == 127.0.0.1 || $listen == ::1 ]] || warn "公网监听的无认证 SOCKS5 风险极高。"
         inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
@@ -800,9 +812,20 @@ build_inbound() {
       fi
       ;;
     http)
-      prompt_value username "用户名" "user"; prompt_secret password "密码" "$(random_password)"
-      inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" --arg user "$username" --arg pass "$password" \
-        '{tag:$tag,listen:$listen,port:$port,protocol:"http",settings:{accounts:[{user:$user,pass:$pass}],allowTransparent:false}}')
+      prompt_optional_value username "用户名（留空表示无认证）"
+      if [[ -n $username ]]; then
+        prompt_secret password "密码" "$(random_password)"
+        inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" --arg user "$username" --arg pass "$password" \
+          '{tag:$tag,listen:$listen,port:$port,protocol:"http",settings:{
+            accounts:[{user:$user,pass:$pass}],
+            users:[{user:$user,pass:$pass}],
+            allowTransparent:false
+          }}')
+      else
+        [[ $listen == 127.0.0.1 || $listen == ::1 ]] || warn "公网监听的无认证 HTTP 代理风险极高。"
+        inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
+          '{tag:$tag,listen:$listen,port:$port,protocol:"http",settings:{allowTransparent:false}}')
+      fi
       ;;
   esac
   printf -v "$__inbound" '%s' "$inbound_json"
@@ -997,6 +1020,12 @@ client_array_path() {
   case $protocol in vless|vmess|trojan) printf '.settings.clients';; socks|http) printf '.settings.accounts';; *) return 1;; esac
 }
 
+http_inbound_has_auth() {
+  jq -e --arg tag "$1" '
+    [.inbounds[]|select(.tag==$tag)|((.settings.accounts // .settings.users // [])|length)][0] > 0' \
+    "$CONFIG_FILE" >/dev/null
+}
+
 query_user_traffic_snapshot() {
   local address
   address=$(stats_api_address)
@@ -1036,7 +1065,7 @@ list_clients() {
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   heading "${tag} 的用户"
   if [[ $protocol == socks || $protocol == http ]]; then
-    count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // [])|length' "$CONFIG_FILE")
+    count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|length' "$CONFIG_FILE")
   else
     count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])|length' "$CONFIG_FILE")
   fi
@@ -1058,7 +1087,7 @@ list_clients() {
       ;;
     socks|http)
       print_table_cell "序号" 5; print_table_cell "用户" 16; printf '凭据\n'
-      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts // []|to_entries[]|[.key+1,.value.user,(.value.pass // "-")]|@tsv' "$CONFIG_FILE" \
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|to_entries[]|[.key+1,.value.user,(.value.pass // "-")]|@tsv' "$CONFIG_FILE" \
         | while IFS=$'\t' read -r number label credential; do print_table_cell "$number" 5; print_table_cell "$label" 16; printf '%s\n' "$credential"; done ;;
     *) die "${protocol} 不支持独立多用户管理。";;
   esac
@@ -1070,7 +1099,7 @@ select_client() {
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   if [[ $protocol == socks || $protocol == http ]]; then
     while IFS= read -r current_label; do [[ -z $current_label ]] || labels+=("$current_label"); done < <(
-      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // [])[].user' "$CONFIG_FILE"
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[].user' "$CONFIG_FILE"
     )
   else
     while IFS= read -r current_label; do [[ -z $current_label ]] || labels+=("$current_label"); done < <(
@@ -1086,7 +1115,7 @@ client_label_exists() {
   local tag=$1 label=$2 protocol
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   if [[ $protocol == socks || $protocol == http ]]; then
-    jq -e --arg tag "$tag" --arg label "$label" '.inbounds[]|select(.tag==$tag)|.settings.accounts[]?|select(.user==$label)' "$CONFIG_FILE" >/dev/null
+    jq -e --arg tag "$tag" --arg label "$label" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]?|select(.user==$label)' "$CONFIG_FILE" >/dev/null
   else
     jq -e --arg tag "$tag" --arg label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select(.email==$label)' "$CONFIG_FILE" >/dev/null
   fi
@@ -1140,7 +1169,11 @@ add_client() {
   esac
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
-    jq --arg tag "$tag" --argjson user "$user" '(.inbounds[]|select(.tag==$tag)|.settings.accounts) += [$user]' "$CONFIG_FILE" >"$tmp"
+    jq --arg tag "$tag" --arg protocol "$protocol" --argjson user "$user" '
+      (.inbounds[]|select(.tag==$tag)|.settings) |=
+      ((.accounts // .users // [])+[$user]) as $all |
+      .accounts=$all | .users=$all |
+      if $protocol=="socks" then .auth="password" else . end' "$CONFIG_FILE" >"$tmp"
   else jq --arg tag "$tag" --argjson user "$user" '(.inbounds[]|select(.tag==$tag)|.settings.clients) += [$user]' "$CONFIG_FILE" >"$tmp"; fi
   if apply_candidate "$tmp"; then info "用户 ${label} 已添加。"; print_links "$tag" "$label" || true; fi
   rm -f "$tmp"
@@ -1155,9 +1188,11 @@ delete_client() {
   [[ $assume_yes == 1 ]] || confirm "从 ${tag} 删除用户 ${label}？" N || return 0
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
-    count=$(jq --arg tag "$tag" --arg label "$label" '[.inbounds[]|select(.tag==$tag)|.settings.accounts[]|select(.user==$label)]|length' "$CONFIG_FILE")
+    count=$(jq --arg tag "$tag" --arg label "$label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$label)]|length' "$CONFIG_FILE")
     ((count > 0)) || die "找不到用户：$label"
-    jq --arg tag "$tag" --arg label "$label" '(.inbounds[]|select(.tag==$tag)|.settings.accounts) |= map(select(.user!=$label))' "$CONFIG_FILE" >"$tmp"
+    jq --arg tag "$tag" --arg label "$label" '
+      (.inbounds[]|select(.tag==$tag)|.settings) |=
+      ((.accounts // .users // [])|map(select(.user!=$label))) as $all | .accounts=$all | .users=$all' "$CONFIG_FILE" >"$tmp"
   else
     count=$(jq --arg tag "$tag" --arg label "$label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)]|length' "$CONFIG_FILE")
     ((count > 0)) || die "找不到用户：$label"
@@ -1183,7 +1218,10 @@ rotate_client_credential() {
       jq --arg tag "$tag" --arg label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)|.password)=$value' "$CONFIG_FILE" >"$tmp" ;;
     socks|http)
       value=$(random_password)
-      jq --arg tag "$tag" --arg label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.accounts[]|select(.user==$label)|.pass)=$value' "$CONFIG_FILE" >"$tmp" ;;
+      jq --arg tag "$tag" --arg label "$label" --arg value "$value" '
+        (.inbounds[]|select(.tag==$tag)|.settings) |=
+        ((.accounts // .users // [])|map(if .user==$label then .pass=$value else . end)) as $all |
+        .accounts=$all | .users=$all' "$CONFIG_FILE" >"$tmp" ;;
     *) die "不支持此协议。";;
   esac
   apply_candidate "$tmp"; rm -f "$tmp"
@@ -1210,9 +1248,12 @@ rename_client() {
   fi
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
-    count=$(jq --arg tag "$tag" --arg label "$old_label" '[.inbounds[]|select(.tag==$tag)|.settings.accounts[]|select(.user==$label)]|length' "$CONFIG_FILE")
+    count=$(jq --arg tag "$tag" --arg label "$old_label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$label)]|length' "$CONFIG_FILE")
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
-    jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '(.inbounds[]|select(.tag==$tag)|.settings.accounts[]|select(.user==$old)|.user)=$new' "$CONFIG_FILE" >"$tmp"
+    jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '
+      (.inbounds[]|select(.tag==$tag)|.settings) |=
+      ((.accounts // .users // [])|map(if .user==$old then .user=$new else . end)) as $all |
+      .accounts=$all | .users=$all' "$CONFIG_FILE" >"$tmp"
   else
     count=$(jq --arg tag "$tag" --arg label "$old_label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)]|length' "$CONFIG_FILE")
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
@@ -1327,15 +1368,19 @@ print_links() {
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
         while IFS=$'\t' read -r label password; do
           print_share_entry "$label" "配置" "SOCKS5  ${uri_host}:${port}  用户: ${label}  密码: ${password}"
-        done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
+        done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
       else
         print_share_entry "无认证" "配置" "SOCKS5  ${uri_host}:${port}"
       fi
       ;;
     http)
-      while IFS=$'\t' read -r label password; do
-        print_share_entry "$label" "配置" "HTTP  ${uri_host}:${port}  用户: ${label}  密码: ${password}"
-      done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
+      if http_inbound_has_auth "$tag"; then
+        while IFS=$'\t' read -r label password; do
+          print_share_entry "$label" "配置" "HTTP  ${uri_host}:${port}  用户: ${label}  密码: ${password}"
+        done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
+      else
+        print_share_entry "无认证" "配置" "HTTP  ${uri_host}:${port}"
+      fi
       ;;
   esac
   share_separator
@@ -2107,13 +2152,25 @@ manage_inbound_menu() {
         esac
         ;;
       http)
-        printf '1) 客户端配置\n2) 用户管理\n3) 修改节点信息\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
-        read -r -p "请选择: " choice
-        case $choice in
-          1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
-          4) run_menu_action show_inbound "$tag"; pause;; 5) run_menu_action delete_inbound "$tag"; pause;;
-          0) return;; *) warn "无效选项。"; pause;;
-        esac
+        if http_inbound_has_auth "$tag"; then auth=password; else auth=noauth; fi
+        printf '认证: %s\n\n' "$auth"
+        if [[ $auth == password ]]; then
+          printf '1) 客户端配置\n2) 用户管理\n3) 修改节点信息\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
+          read -r -p "请选择: " choice
+          case $choice in
+            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
+            4) run_menu_action show_inbound "$tag"; pause;; 5) run_menu_action delete_inbound "$tag"; pause;;
+            0) return;; *) warn "无效选项。"; pause;;
+          esac
+        else
+          printf '1) 客户端配置\n2) 修改节点信息\n3) 查看 JSON\n4) 删除节点\n0) 返回列表\n'
+          read -r -p "请选择: " choice
+          case $choice in
+            1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol";;
+            3) run_menu_action show_inbound "$tag"; pause;; 4) run_menu_action delete_inbound "$tag"; pause;;
+            0) return;; *) warn "无效选项。"; pause;;
+          esac
+        fi
         ;;
       socks)
         auth=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth // "noauth"' "$CONFIG_FILE")
