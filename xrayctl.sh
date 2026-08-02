@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.1.7"
+readonly XRAYCTL_VERSION="1.1.8"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -731,7 +731,7 @@ list_inbounds() {
   local count
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站节点。"; return; fi
-  printf '%-4s %-22s %-12s %-8s %-12s %-10s %s\n' "序号" "标签" "协议" "端口" "传输" "安全" "监听"
+  printf '%-4s %-24s %-14s %-10s %-14s %-12s %s\n' "序号" "标签" "协议" "端口" "传输" "安全" "监听"
   jq -r '.inbounds | to_entries[] |
     [(.key+1),.value.tag,.value.protocol,(.value.port|tostring),(.value.streamSettings.method // "raw"),(.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r n tag protocol port method security listen; do
@@ -980,6 +980,14 @@ reality_public_key() {
   printf '%s' "$public"
 }
 
+share_separator() { printf '%s\n' '------------------------------------------------------------------------'; }
+
+print_share_entry() {
+  local label=$1 field=$2 value=$3
+  share_separator
+  printf '用户: %s\n%s:\n%s\n' "$label" "$field" "$value"
+}
+
 link_query_for_stream() {
   local tag=$1 protocol=$2 stream method security query="" path service sni sid pbk flow
   stream=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings // {method:"raw",security:"none"}' "$CONFIG_FILE")
@@ -1031,7 +1039,7 @@ print_links() {
         [[ -z $filter || $label == "$filter" ]] || continue
         [[ $protocol == vless ]] && link="vless://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")" \
           || link="trojan://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")"
-        printf '%s\n' "$link"
+        print_share_entry "$label" "链接" "$link"
       done < <(jq -r --arg tag "$tag" --arg protocol "$protocol" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|[.email,(if $protocol=="vless" then .id else .password end)]|@tsv' "$CONFIG_FILE")
       ;;
     vmess)
@@ -1044,21 +1052,32 @@ print_links() {
           --arg path "$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.streamSettings.wsSettings.path // .streamSettings.xhttpSettings.path // .streamSettings.grpcSettings.serviceName // "")' "$CONFIG_FILE")" \
           --arg tls "$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|if .streamSettings.security=="tls" then "tls" elif .streamSettings.security=="reality" then "reality" else "" end' "$CONFIG_FILE")" \
           '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:$net,type:$type,host:$host,path:$path,tls:$tls,sni:$add,alpn:""}')
-        printf 'vmess://%s\n' "$(printf '%s' "$payload" | base64_nowrap)"
+        link="vmess://$(printf '%s' "$payload" | base64_nowrap)"
+        print_share_entry "$label" "链接" "$link"
       done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|[.email,.id]|@tsv' "$CONFIG_FILE")
       ;;
     shadowsocks)
       method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.method' "$CONFIG_FILE")
       password=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.password' "$CONFIG_FILE")
-      printf 'ss://%s@%s:%s#%s\n' "$(printf '%s' "${method}:${password}" | base64_urlsafe)" "$uri_host" "$port" "$(url_encode "$tag")"
+      link="ss://$(printf '%s' "${method}:${password}" | base64_urlsafe)@${uri_host}:${port}#$(url_encode "$tag")"
+      print_share_entry "default" "链接" "$link"
       ;;
     socks)
-      jq -r --arg tag "$tag" --arg host "$uri_host" --arg port "$port" '.inbounds[]|select(.tag==$tag)|if .settings.auth=="password" then .settings.accounts[]|"SOCKS5  \($host):\($port)  用户: \(.user)  密码: \(.pass)" else "SOCKS5  \($host):\($port)  无认证" end' "$CONFIG_FILE"
+      if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
+        while IFS=$'\t' read -r label password; do
+          print_share_entry "$label" "配置" "SOCKS5  ${uri_host}:${port}  用户: ${label}  密码: ${password}"
+        done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
+      else
+        print_share_entry "无认证" "配置" "SOCKS5  ${uri_host}:${port}"
+      fi
       ;;
     http)
-      jq -r --arg tag "$tag" --arg host "$uri_host" --arg port "$port" '.inbounds[]|select(.tag==$tag)|.settings.accounts[]|"HTTP  \($host):\($port)  用户: \(.user)  密码: \(.pass)"' "$CONFIG_FILE"
+      while IFS=$'\t' read -r label password; do
+        print_share_entry "$label" "配置" "HTTP  ${uri_host}:${port}  用户: ${label}  密码: ${password}"
+      done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
       ;;
   esac
+  share_separator
 }
 
 print_subscription() {
@@ -1076,6 +1095,45 @@ print_subscription() {
   [[ -n $links ]] || die "没有可生成订阅的代理分享链接。"
   printf '%s' "$links" | base64_nowrap
   printf '\n'
+}
+
+install_firewall() {
+  ensure_runtime_dependencies firewall-install
+  local manager ssh_port=${XRAYCTL_SSH_PORT:-}
+  if ! command_exists ufw && ! command_exists firewall-cmd; then
+    manager=$(pkg_manager) || { error "无法识别包管理器。"; return 0; }
+    case $manager in
+      apt)
+        DEBIAN_FRONTEND=noninteractive apt_get_guarded update -y || true
+        DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y ufw || { error "UFW 安装失败。"; return 0; }
+        ;;
+      dnf) dnf install -y firewalld || { error "firewalld 安装失败。"; return 0; } ;;
+      yum) yum install -y firewalld || { error "firewalld 安装失败。"; return 0; } ;;
+      pacman) pacman -Sy --noconfirm ufw || { error "UFW 安装失败。"; return 0; } ;;
+      zypper) zypper --non-interactive install firewalld || { error "firewalld 安装失败。"; return 0; } ;;
+    esac
+  fi
+  if command_exists ufw; then
+    if ufw status 2>/dev/null | grep -q '^Status: active'; then info "UFW 已安装并启用。"; return; fi
+    info "UFW 已安装。"
+    [[ -t 0 ]] && confirm "启用 UFW？" N || return 0
+    [[ -n $ssh_port ]] || ssh_port=$(awk '{print $4}' <<<"${SSH_CONNECTION:-}" 2>/dev/null || true)
+    validate_port "${ssh_port:-}" || ssh_port=22
+    ufw allow "${ssh_port}/tcp" >/dev/null
+    if ufw --force enable >/dev/null; then info "UFW 已启用；SSH ${ssh_port}/tcp 已放行。";
+    else error "UFW 启用失败，当前主机可能缺少 NET_ADMIN 权限。"; fi
+  elif command_exists firewall-cmd; then
+    if firewall-cmd --state >/dev/null 2>&1; then info "firewalld 已安装并启用。"; return; fi
+    info "firewalld 已安装。"
+    [[ -t 0 ]] && confirm "启用 firewalld？" N || return 0
+    if systemctl enable --now firewalld; then
+      [[ -n $ssh_port ]] || ssh_port=$(awk '{print $4}' <<<"${SSH_CONNECTION:-}" 2>/dev/null || true)
+      validate_port "${ssh_port:-}" || ssh_port=22
+      firewall-cmd --permanent --add-port="${ssh_port}/tcp" >/dev/null
+      firewall-cmd --reload >/dev/null
+      info "firewalld 已启用；SSH ${ssh_port}/tcp 已放行。"
+    else error "firewalld 启用失败，当前主机可能缺少 NET_ADMIN 权限。"; fi
+  fi
 }
 
 open_firewall_for_port() {
@@ -1107,9 +1165,78 @@ close_firewall_for_port() {
   info "防火墙规则已关闭。"
 }
 
+certbot_supports_ip() {
+  command_exists certbot && certbot --help all 2>/dev/null | grep -q -- '--ip-address'
+}
+
+setup_certbot_renewal_timer() {
+  local certbot_path
+  certbot_path=$(command -v certbot) || return 1
+  cat >/etc/systemd/system/xrayctl-certbot-renew.service <<EOF
+[Unit]
+Description=Renew certificates managed by xrayctl
+
+[Service]
+Type=oneshot
+ExecStart=${certbot_path} renew --quiet
+EOF
+  cat >/etc/systemd/system/xrayctl-certbot-renew.timer <<'EOF'
+[Unit]
+Description=Renew certificates managed by xrayctl
+
+[Timer]
+OnCalendar=*-*-* 00,12:00:00
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now xrayctl-certbot-renew.timer >/dev/null
+}
+
+install_certbot_ip_support() {
+  local manager venv_dir=/opt/xrayctl/certbot
+  manager=$(pkg_manager) || die "无法安装支持 IP 证书的 Certbot。"
+  if ! command_exists python3 || ! python3 -m venv --help >/dev/null 2>&1; then
+    info "安装 Python venv。"
+    case $manager in
+      apt)
+        DEBIAN_FRONTEND=noninteractive apt_get_guarded update -y || true
+        DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y python3 python3-venv ;;
+      dnf) dnf install -y python3 python3-pip ;;
+      yum) yum install -y python3 python3-pip ;;
+      pacman) pacman -Sy --noconfirm python python-pip ;;
+      zypper) zypper --non-interactive install python3 python3-pip ;;
+    esac
+  fi
+  install -d -m 755 "$(dirname "$venv_dir")"
+  if ! python3 -m venv "$venv_dir" >/dev/null 2>&1; then
+    case $manager in
+      apt) DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y python3-venv ;;
+      dnf|yum) "$manager" install -y python3-pip ;;
+      pacman) pacman -Sy --noconfirm python-pip ;;
+      zypper) zypper --non-interactive install python3-pip ;;
+    esac
+    python3 -m venv "$venv_dir" || die "无法创建 Certbot Python 环境。"
+  fi
+  "$venv_dir/bin/pip" install --disable-pip-version-check --upgrade 'certbot>=5.4' \
+    || die "新版 Certbot 安装失败。"
+  if [[ -e /usr/local/bin/certbot && ! -L /usr/local/bin/certbot ]]; then
+    die "/usr/local/bin/certbot 已存在且不是符号链接。"
+  fi
+  ln -sfn "$venv_dir/bin/certbot" /usr/local/bin/certbot
+  hash -r
+  certbot_supports_ip || die "当前 Certbot 不支持 IP 证书。"
+  setup_certbot_renewal_timer
+}
+
 install_certbot() {
-  command_exists certbot && return 0
-  local manager; manager=$(pkg_manager) || die "无法自动安装 certbot。"
+  local mode=${1:-domain} manager
+  if command_exists certbot && { [[ $mode != ip ]] || certbot_supports_ip; }; then return 0; fi
+  if [[ $mode == ip ]]; then install_certbot_ip_support; return; fi
+  manager=$(pkg_manager) || die "无法自动安装 certbot。"
   info "安装 certbot。"
   case $manager in
     apt)
@@ -1139,24 +1266,66 @@ EOF
   chmod 750 "$hook"
 }
 
+apply_certificate_to_inbound() {
+  local identifier=$1 cert_path=$2 key_path=$3 tag tmp method
+  select_inbound tag '^(vless|vmess|trojan)$' || return
+  method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.method // "raw"' "$CONFIG_FILE")
+  tmp=$(temp_file)
+  jq --arg tag "$tag" --arg cert "$cert_path" --arg key "$key_path" --arg method "$method" '
+    (.inbounds[]|select(.tag==$tag)|.streamSettings) |= (
+      .security="tls" |
+      del(.realitySettings) |
+      .tlsSettings={
+        alpn:(if $method=="websocket" then ["http/1.1"] else ["h2","http/1.1"] end),
+        minVersion:"1.2",
+        certificates:[{certificateFile:$cert,keyFile:$key}]
+      }
+    ) |
+    if (.inbounds[]|select(.tag==$tag)|.protocol)=="vless" then
+      (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(
+        if $method=="raw" then .flow="xtls-rprx-vision" else del(.flow) end
+      )
+    else . end' "$CONFIG_FILE" >"$tmp"
+  if apply_candidate "$tmp"; then
+    meta_set_inbound "$tag" "$identifier" "" replace
+    info "证书已应用：${tag}"
+  fi
+  rm -f "$tmp"
+}
+
 issue_certificate() {
   ensure_runtime_dependencies cert-issue
-  local domain=${1-} email=${2-} was_active=0 paths
-  [[ -n $domain ]] || prompt_value domain "证书域名"
-  validate_domain "$domain" || die "域名格式无效（不支持通配符）。"
+  local domain=${1-} email=${2-} was_active=0 paths cert_path key_path default_domain="" mode=domain
+  if [[ -z $domain ]]; then
+    default_domain=$(detect_public_ip || true)
+    prompt_value domain "证书域名/IP" "$default_domain"
+  fi
+  if validate_ip_literal "$domain"; then mode=ip;
+  elif ! validate_domain "$domain"; then die "证书域名/IP 无效。"; fi
   [[ -n $email ]] || prompt_value email "Let's Encrypt 联系邮箱"
   [[ $email == *@*.* ]] || die "邮箱格式无效。"
-  install_certbot
+  install_certbot "$mode"
   open_firewall_for_port 80 prompt
   service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
-  if ! certbot certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email" -d "$domain"; then
+  local certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email")
+  if [[ $mode == ip ]]; then
+    certbot_args+=(--preferred-profile shortlived --ip-address "$domain")
+  else
+    certbot_args+=(-d "$domain")
+  fi
+  if ! certbot "${certbot_args[@]}"; then
     if ((was_active)); then systemctl start "$SERVICE_NAME" || true; CERT_STOPPED_SERVICE=0; fi
-    die "证书签发失败；确认域名解析正确且 80 端口可从公网访问。"
+    die "证书签发失败；确认 ${domain} 的 TCP 80 可从公网访问。"
   fi
   paths=$(copy_certificate_pair "$domain" "/etc/letsencrypt/live/${domain}/fullchain.pem" "/etc/letsencrypt/live/${domain}/privkey.pem")
+  cert_path=$(head -n1 <<<"$paths"); key_path=$(tail -n1 <<<"$paths")
   write_certbot_deploy_hook "$domain"
+  [[ $mode != ip ]] || setup_certbot_renewal_timer
   if ((was_active)); then systemctl start "$SERVICE_NAME"; CERT_STOPPED_SERVICE=0; fi
-  info "证书已保存：$(head -n1 <<<"$paths")"
+  info "证书已保存：${cert_path}"
+  if [[ -t 0 ]] && confirm "应用到现有节点？" N; then
+    apply_certificate_to_inbound "$domain" "$cert_path" "$key_path"
+  fi
 }
 
 import_certificate() {
@@ -1253,14 +1422,34 @@ show_logs() {
 
 enable_bbr() {
   ensure_runtime_dependencies bbr
-  sysctl -w net.core.default_qdisc=fq
-  sysctl -w net.ipv4.tcp_congestion_control=bbr
-  cat > /etc/sysctl.d/99-xrayctl-bbr.conf <<'EOF'
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-EOF
-  sysctl --system >/dev/null
-  [[ $(sysctl -n net.ipv4.tcp_congestion_control) == bbr ]] || die "当前内核未成功启用 BBR。"
+  local available qdisc_enabled=0 config=/etc/sysctl.d/99-xrayctl-bbr.conf
+  if [[ ! -r /proc/sys/net/ipv4/tcp_available_congestion_control || ! -e /proc/sys/net/ipv4/tcp_congestion_control ]]; then
+    warn "当前内核未暴露 TCP 拥塞控制接口，无法在此容器内启用 BBR。"
+    return 0
+  fi
+  command_exists modprobe && modprobe tcp_bbr >/dev/null 2>&1 || true
+  available=$(< /proc/sys/net/ipv4/tcp_available_congestion_control)
+  if [[ " $available " != *" bbr "* ]]; then
+    warn "当前内核不支持 BBR：${available}"
+    return 0
+  fi
+  if [[ -e /proc/sys/net/core/default_qdisc ]]; then
+    if sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then qdisc_enabled=1;
+    else warn "无法设置 net.core.default_qdisc，跳过 fq。"; fi
+  fi
+  if ! sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
+    error "无法写入拥塞控制参数；当前容器可能缺少内核权限。"
+    return 0
+  fi
+  if ((qdisc_enabled)); then
+    printf '%s\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' >"$config"
+  else
+    printf '%s\n' 'net.ipv4.tcp_congestion_control=bbr' >"$config"
+  fi
+  if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) != bbr ]]; then
+    error "BBR 校验失败。"
+    return 0
+  fi
   info "BBR 已启用。"
 }
 
@@ -1355,13 +1544,14 @@ system_menu() {
   local choice port
   while true; do
     heading "系统工具"
-    printf '1) 系统诊断\n2) 启用 BBR\n3) 放行防火墙端口\n4) 关闭防火墙端口\n5) 安装/修复快捷命令\n0) 返回\n'
+    printf '1) 系统诊断\n2) 启用 BBR\n3) 安装/启用防火墙\n4) 放行防火墙端口\n5) 关闭防火墙端口\n6) 安装/修复快捷命令\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
       1) system_diagnostics; pause;; 2) enable_bbr; pause;;
-      3) prompt_value port "端口"; ensure_runtime_dependencies firewall; open_firewall_for_port "$port" force; pause;;
-      4) prompt_value port "端口"; ensure_runtime_dependencies firewall; close_firewall_for_port "$port"; pause;;
-      5) ensure_runtime_dependencies quick-command; install_quick_command; pause;; 0) return;; *) warn "无效选项。";;
+      3) install_firewall; pause;;
+      4) prompt_value port "端口"; ensure_runtime_dependencies firewall; open_firewall_for_port "$port" force; pause;;
+      5) prompt_value port "端口"; ensure_runtime_dependencies firewall; close_firewall_for_port "$port"; pause;;
+      6) ensure_runtime_dependencies quick-command; install_quick_command; pause;; 0) return;; *) warn "无效选项。";;
     esac
   done
 }
@@ -1371,13 +1561,13 @@ main_menu() {
   while true; do
     clear 2>/dev/null || true
     printf '%sXray Linux 管理脚本%s  v%s\n' "$C_BOLD$C_BLUE" "$C_RESET" "$XRAYCTL_VERSION"
-    printf '1) 安装/修复 Xray\n2) 升级 Xray\n3) 节点管理\n4) 用户管理\n5) 查看分享链接\n6) TLS 证书管理\n7) 服务管理\n8) 配置与备份\n9) 系统工具\n10) 卸载 Xray（保留配置）\n11) 彻底卸载\n0) 退出\n'
+    printf '1) 安装/修复 Xray\n2) 升级 Xray\n3) 节点管理\n4) 用户管理\n5) 查看分享链接\n6) TLS 证书管理\n7) 服务管理\n8) 系统工具\n9) 卸载 Xray（保留配置）\n10) 彻底卸载\n0) 退出\n'
     read -r -p "请选择: " choice
     case $choice in
       1) install_or_update_xray install; pause;; 2) install_or_update_xray upgrade; pause;;
       3) inbound_menu;; 4) client_menu;; 5) share_menu;; 6) certificate_menu;;
-      7) service_menu;; 8) config_menu;; 9) system_menu;;
-      10) uninstall_xray 0; pause;; 11) uninstall_xray 1; pause;; 0) return;; *) warn "无效选项。"; pause;;
+      7) service_menu;; 8) system_menu;;
+      9) uninstall_xray 0; pause;; 10) uninstall_xray 1; pause;; 0) return;; *) warn "无效选项。"; pause;;
     esac
   done
 }
@@ -1413,7 +1603,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl cert list
   xrayctl cert issue [域名] [邮箱]
   xrayctl cert import [标识] [证书] [私钥]
-  xrayctl firewall open|close <端口>
+  xrayctl firewall install|open|close [端口]
   xrayctl bbr                     启用 BBR
   xrayctl diagnose                系统诊断
   xrayctl version
@@ -1455,8 +1645,7 @@ dispatch() {
     cert)
       case ${1:-list} in list) list_certificates;; issue) issue_certificate "${2-}" "${3-}";; import) import_certificate "${2-}" "${3-}" "${4-}";; renew) ensure_runtime_dependencies cert-renew; install_certbot; certbot renew;; *) die "未知 cert 子命令。";; esac;;
     firewall)
-      ensure_runtime_dependencies firewall
-      case ${1-} in open) open_firewall_for_port "${2:?请提供端口}" force;; close) close_firewall_for_port "${2:?请提供端口}";; *) die "用法: xrayctl firewall open|close <端口>";; esac;;
+      case ${1-} in install) install_firewall;; open) ensure_runtime_dependencies firewall; open_firewall_for_port "${2:?请提供端口}" force;; close) ensure_runtime_dependencies firewall; close_firewall_for_port "${2:?请提供端口}";; *) die "用法: xrayctl firewall install|open|close [端口]";; esac;;
     bbr) enable_bbr;; diagnose|doctor) system_diagnostics;; quick-command) ensure_runtime_dependencies quick-command; install_quick_command;;
     *) error "未知命令：$command"; show_help; return 2;;
   esac
