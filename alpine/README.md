@@ -2,7 +2,7 @@
 
 这是与仓库根目录 systemd 版完全分离的 Alpine Linux 包。它使用 `apk` 管理依赖、使用 OpenRC 管理 Xray 服务，不会改动根目录的 `install.sh` 和 `xrayctl.sh`。
 
-当前版本：`1.0.13-alpine`
+当前版本：`1.0.14-alpine`
 
 ## 一键安装
 
@@ -37,5 +37,6 @@ xrayctl
 - 支持删除未被 TLS 入站使用的托管证书
 - 新建 TLS 入站时选择托管证书；已有 TLS 入站在入站页面内更换证书
 - OpenRC 服务管理、用户流量、出站、证书、UFW、BBR 能力检测
+- 首页显示全部入站信息及每个入站的上传、下载和总流量
 
 Alpine LXC/NAT 主机上的防火墙和 BBR 是否可用取决于宿主机授予的内核权限。

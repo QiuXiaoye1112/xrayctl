@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.23"
+readonly XRAYCTL_VERSION="1.2.24"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
 readonly JQ_VERSION="1.8.2"
@@ -2225,6 +2225,13 @@ query_inbound_traffic() {
   printf -v "$__down" '%s' "${parsed_down:-0}"
 }
 
+query_inbound_traffic_snapshot() {
+  local address
+  address=$(stats_api_address)
+  [[ -n $address && -x $XRAY_BIN ]] || return 1
+  "$XRAY_BIN" api statsquery --server="$address" --timeout=2 -pattern 'inbound>>>' 2>/dev/null
+}
+
 xray_version_summary() {
   local output first
   xray_installed || { printf '未安装'; return; }
@@ -2246,8 +2253,49 @@ startup_state_summary() {
 }
 
 show_main_summary() {
-  printf '服务: %s  |  入站: %s  |  Xray: %s\n\n' \
+  printf '服务: %s  |  入站: %s  |  Xray: %s\n' \
     "$(service_state_summary)" "$(node_count_summary)" "$(xray_version_summary)"
+}
+
+show_main_inbounds() {
+  command_exists jq && [[ -r $CONFIG_FILE ]] || return 0
+  local count snapshot="" stats_available=0 number tag protocol port method security
+  local up down total up_name down_name
+  count=$(jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null) || return 0
+  heading "当前入站"
+  if ((count == 0)); then
+    info "还没有入站。"
+    printf '\n'
+    return 0
+  fi
+  if snapshot=$(query_inbound_traffic_snapshot) && jq -e '(.stat // [])|type=="array"' <<<"$snapshot" >/dev/null 2>&1; then
+    stats_available=1
+  fi
+  print_table_cell "序号" 6; print_table_cell "标签" 22; print_table_cell "协议" 10
+  print_table_cell "端口" 8; print_table_cell "传输" 12; print_table_cell "安全" 10
+  print_table_cell "上传" 14; print_table_cell "下载" 14; printf '总计\n'
+  jq -r '.inbounds | to_entries[] | [(.key+1),.value.tag,.value.protocol,
+    (.value.port|tostring),(.value.streamSettings.method // "raw"),
+    (.value.streamSettings.security // "none")] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r number tag protocol port method security; do
+        if ((stats_available)); then
+          up_name="inbound>>>${tag}>>>traffic>>>uplink"
+          down_name="inbound>>>${tag}>>>traffic>>>downlink"
+          IFS=$'\t' read -r up down < <(jq -r --arg up "$up_name" --arg down "$down_name" '
+            [([.stat[]?|select(.name==$up)|.value][0] // 0),
+             ([.stat[]?|select(.name==$down)|.value][0] // 0)] | @tsv' <<<"$snapshot")
+          [[ $up =~ ^[0-9]+$ ]] || up=0
+          [[ $down =~ ^[0-9]+$ ]] || down=0
+          total=$((up+down))
+          up=$(format_bytes "$up"); down=$(format_bytes "$down"); total=$(format_bytes "$total")
+        else
+          up="-"; down="-"; total="-"
+        fi
+        print_table_cell "$number" 6; print_table_cell "$tag" 22; print_table_cell "$protocol" 10
+        print_table_cell "$port" 8; print_table_cell "$method" 12; print_table_cell "$security" 10
+        print_table_cell "$up" 14; print_table_cell "$down" 14; printf '%s\n' "$total"
+      done
+  printf '\n'
 }
 
 show_node_summary() {
@@ -2686,6 +2734,7 @@ main_menu() {
     clear_screen
     printf '%sXray Linux 管理脚本%s  v%s\n' "$C_BOLD$C_BLUE" "$C_RESET" "$XRAYCTL_VERSION"
     show_main_summary
+    show_main_inbounds
     printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 服务管理\n5) 系统工具\n6) 卸载\n0) 退出\n'
     read -r -p "请选择: " choice
     case $choice in
