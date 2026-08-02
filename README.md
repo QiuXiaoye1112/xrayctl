@@ -78,11 +78,31 @@ Xray Linux 管理脚本
 
 ## 快速开始
 
-一键安装：
+安装后两个版本都使用 `xrayctl` 进入管理菜单，但安装命令不同，请根据系统选择。
+
+### Debian、Ubuntu、CentOS 等 systemd 系统
 
 ```bash
 curl -fsSL https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/install.sh | sudo bash
 ```
+
+### Alpine Linux（OpenRC）
+
+Alpine 默认自带 BusyBox `wget`，可以直接安装：
+
+```sh
+wget -qO- https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
+```
+
+如果 Alpine 已安装 `curl`，也可以使用：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
+```
+
+> systemd 版和 Alpine/OpenRC 版使用不同的服务管理方式，请勿交叉使用安装命令。
+
+### systemd 版的其他安装方式
 
 指定 Xray 版本：
 
@@ -99,7 +119,7 @@ sudo ./xrayctl.sh install
 xrayctl
 ```
 
-推荐的新入站组合是 `VLESS -> RAW -> REALITY`。它不需要域名证书。
+推荐的新入站组合是 `VLESS → REALITY → RAW`。它不需要域名证书，顺序对应脚本中的“入站协议 → 加密方式 → 传输方式”。
 
 如果使用 TLS：
 
