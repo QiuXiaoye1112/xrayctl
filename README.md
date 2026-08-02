@@ -29,19 +29,19 @@
 一键安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh | sudo bash
+curl -fsSL https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/install.sh | sudo bash
 ```
 
 指定 Xray 版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh | sudo bash -s -- 26.3.27
+curl -fsSL https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/install.sh | sudo bash -s -- 26.3.27
 ```
 
 如果希望先检查脚本再执行，可以手动下载：
 
 ```bash
-curl -fLO https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh
+curl -fLO https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/xrayctl.sh
 chmod +x xrayctl.sh
 sudo ./xrayctl.sh install
 xrayctl
@@ -145,5 +145,5 @@ xrayctl uninstall --purge       # 删除 Xray 配置、证书和日志
 仅有 IPv6 网络的服务器可以关闭 IPv4 强制模式：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh | sudo env XRAYCTL_APT_FORCE_IPV4=0 bash
+curl -fsSL https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/install.sh | sudo env XRAYCTL_APT_FORCE_IPV4=0 bash
 ```
