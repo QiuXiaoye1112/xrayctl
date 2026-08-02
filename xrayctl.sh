@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.1.2"
+readonly XRAYCTL_VERSION="1.1.3"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -19,6 +19,9 @@ QUICK_COMMAND="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"
 QUICK_SYMLINK="${XRAYCTL_SYMLINK_PATH:-/usr/local/bin/xrayctl}"
 SERVICE_NAME="${XRAYCTL_SERVICE_NAME:-xray}"
 SYSTEMD_UNIT="${SERVICE_NAME}.service"
+RUNTIME_OWNER="${XRAYCTL_RUNTIME_OWNER:-root}"
+RUNTIME_GROUP="${XRAYCTL_RUNTIME_GROUP:-xrayctl}"
+SYSTEMD_OVERRIDE_DIR="${XRAYCTL_SYSTEMD_OVERRIDE_DIR:-/etc/systemd/system/${SYSTEMD_UNIT}.d}"
 LOCK_FILE="${XRAYCTL_LOCK_FILE:-/run/lock/xrayctl.lock}"
 JQ_INSTALL_PATH="${XRAYCTL_JQ_INSTALL_PATH:-/usr/local/bin/jq}"
 CERT_STOPPED_SERVICE=0
@@ -322,10 +325,14 @@ apply_candidate() {
   validate_candidate "$candidate" || return 1
   service_is_active && old_active=1
   backup=$(backup_config_quiet)
-  install -m 640 "$candidate" "$CONFIG_FILE"
+  setup_runtime_access
+  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$CONFIG_FILE"
   if ((old_active)) && ! restart_service; then
     error "重启失败，正在回滚配置。"
-    if [[ -n $backup && -f $backup ]]; then install -m 640 "$backup" "$CONFIG_FILE"; restart_service || true; fi
+    if [[ -n $backup && -f $backup ]]; then
+      install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$backup" "$CONFIG_FILE"
+      restart_service || true
+    fi
     return 1
   fi
   info "配置已应用${backup:+；备份：$backup}。"
@@ -358,17 +365,24 @@ get_service_user() {
   printf '%s' "${user:-nobody}"
 }
 
-setup_certificate_access() {
-  local group=xrayctl
-  getent group "$group" >/dev/null 2>&1 || groupadd --system "$group"
-  install -d -m 750 -o root -g "$group" "$CERT_DIR"
-  mkdir -p "/etc/systemd/system/${SYSTEMD_UNIT}.d"
-  cat >"/etc/systemd/system/${SYSTEMD_UNIT}.d/20-xrayctl-certificates.conf" <<EOF
+setup_runtime_access() {
+  getent group "$RUNTIME_GROUP" >/dev/null 2>&1 || groupadd --system "$RUNTIME_GROUP"
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR"
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CERT_DIR"
+  if [[ -f $CONFIG_FILE ]]; then
+    chown "$RUNTIME_OWNER:$RUNTIME_GROUP" "$CONFIG_FILE"
+    chmod 640 "$CONFIG_FILE"
+  fi
+  install -d -m 755 "$SYSTEMD_OVERRIDE_DIR"
+  cat >"${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-access.conf" <<EOF
 [Service]
-SupplementaryGroups=${group}
+SupplementaryGroups=${RUNTIME_GROUP}
 EOF
+  rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
   systemctl daemon-reload
 }
+
+setup_certificate_access() { setup_runtime_access; }
 
 copy_certificate_pair() {
   local domain=$1 cert_source=$2 key_source=$3 cert_target key_target cert_pub key_pub
@@ -381,8 +395,8 @@ copy_certificate_pair() {
   [[ $cert_pub == "$key_pub" ]] || die "证书与私钥不匹配。"
   setup_certificate_access
   cert_target="${CERT_DIR}/${domain}.crt"; key_target="${CERT_DIR}/${domain}.key"
-  install -m 640 -o root -g xrayctl "$cert_source" "$cert_target"
-  install -m 640 -o root -g xrayctl "$key_source" "$key_target"
+  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$cert_source" "$cert_target"
+  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$key_source" "$key_target"
   printf '%s\n%s\n' "$cert_target" "$key_target"
 }
 
@@ -399,6 +413,7 @@ install_or_update_xray() {
   rm -f "$installer"
   [[ -x $XRAY_BIN ]] || die "Xray 安装后未找到：$XRAY_BIN"
   if ((installed_before == 0)) || [[ ! -f $CONFIG_FILE ]]; then write_default_config; else ensure_config; fi
+  setup_runtime_access
   install_quick_command
   validate_candidate "$CONFIG_FILE"
   systemctl enable "$SERVICE_NAME" >/dev/null
@@ -447,9 +462,11 @@ uninstall_xray() {
     for hook in /etc/letsencrypt/renewal-hooks/deploy/xrayctl-*; do
       [[ -e $hook ]] && rm -f "$hook"
     done
-    rm -f "/etc/systemd/system/${SYSTEMD_UNIT}.d/20-xrayctl-certificates.conf"
-    rmdir "/etc/systemd/system/${SYSTEMD_UNIT}.d" 2>/dev/null || true
-    getent group xrayctl >/dev/null 2>&1 && groupdel xrayctl 2>/dev/null || true
+    rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-access.conf" "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
+    rmdir "$SYSTEMD_OVERRIDE_DIR" 2>/dev/null || true
+    if [[ $RUNTIME_GROUP == xrayctl ]]; then
+      getent group "$RUNTIME_GROUP" >/dev/null 2>&1 && groupdel "$RUNTIME_GROUP" 2>/dev/null || true
+    fi
     systemctl daemon-reload
   fi
   if [[ -L $QUICK_SYMLINK ]] && [[ $(readlink "$QUICK_SYMLINK") == "$QUICK_COMMAND" ]]; then rm -f "$QUICK_SYMLINK"; fi
@@ -1099,8 +1116,8 @@ write_certbot_deploy_hook() {
   cat >"$hook" <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
-install -m 640 -o root -g xrayctl "/etc/letsencrypt/live/${domain}/fullchain.pem" "${CERT_DIR}/${domain}.crt"
-install -m 640 -o root -g xrayctl "/etc/letsencrypt/live/${domain}/privkey.pem" "${CERT_DIR}/${domain}.key"
+install -m 640 -o "${RUNTIME_OWNER}" -g "${RUNTIME_GROUP}" "/etc/letsencrypt/live/${domain}/fullchain.pem" "${CERT_DIR}/${domain}.crt"
+install -m 640 -o "${RUNTIME_OWNER}" -g "${RUNTIME_GROUP}" "/etc/letsencrypt/live/${domain}/privkey.pem" "${CERT_DIR}/${domain}.key"
 systemctl try-restart "${SERVICE_NAME}.service"
 EOF
   chmod 750 "$hook"
@@ -1182,7 +1199,11 @@ restore_backup() {
   cp -a "$temp/$extract_config" "$CONFIG_FILE"
   [[ ! -f "$temp/${META_FILE#/}" ]] || cp -a "$temp/${META_FILE#/}" "$META_FILE"
   if [[ -d "$temp/${CERT_DIR#/}" ]]; then setup_certificate_access; cp -a "$temp/${CERT_DIR#/}/." "$CERT_DIR/"; fi
-  if ! restart_service; then install -m 640 "$current_backup" "$CONFIG_FILE"; restart_service || true; rm -rf "$temp"; die "恢复后服务失败，已回滚配置。"; fi
+  setup_runtime_access
+  if ! restart_service; then
+    install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$current_backup" "$CONFIG_FILE"
+    restart_service || true; rm -rf "$temp"; die "恢复后服务失败，已回滚配置。"
+  fi
   rm -rf "$temp"; info "备份已恢复。"
 }
 
