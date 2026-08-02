@@ -459,22 +459,28 @@ restart_service() {
 }
 
 apply_candidate() {
-  local candidate=$1 backup="" old_active=0
+  local candidate=$1 rollback="" old_active=0
   ensure_config
   validate_candidate "$candidate" || return 1
   service_is_active && old_active=1
-  backup=$(backup_config_quiet)
   setup_runtime_access
-  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$CONFIG_FILE"
-  if ((old_active)) && ! restart_service; then
-    error "重启失败，正在回滚配置。"
-    if [[ -n $backup && -f $backup ]]; then
-      install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$backup" "$CONFIG_FILE"
-      restart_service || true
-    fi
+  rollback=$(temp_file)
+  cp -p "$CONFIG_FILE" "$rollback"
+  if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$CONFIG_FILE"; then
+    rm -f "$rollback"
     return 1
   fi
-  info "配置已应用${backup:+；备份：$backup}。"
+  if ((old_active)) && ! restart_service; then
+    error "重启失败，正在回滚配置。"
+    if [[ -f $rollback ]]; then
+      install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$rollback" "$CONFIG_FILE"
+      restart_service || true
+    fi
+    rm -f "$rollback"
+    return 1
+  fi
+  rm -f "$rollback"
+  info "配置已应用。"
 }
 
 temp_file() { mktemp "${TMPDIR:-/tmp}/xrayctl.XXXXXX"; }
@@ -1421,6 +1427,16 @@ print_subscription() {
   printf '\n'
 }
 
+print_all_share_links() {
+  ensure_config; init_meta
+  local tag found=0
+  while IFS= read -r tag; do
+    found=1
+    print_links "$tag" ""
+  done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan|socks|http)$"))|.tag' "$CONFIG_FILE")
+  ((found == 1)) || die "没有可生成订阅链接的入站。"
+}
+
 install_firewall() {
   ensure_system_context firewall-install
   local manager ssh_port=${XRAYCTL_SSH_PORT:-} tool_timeout=${XRAYCTL_SYSTEM_TOOL_TIMEOUT:-60}
@@ -2232,13 +2248,14 @@ inbound_menu() {
     clear_screen
     heading "入站管理"
     list_inbounds
-    printf '\n1) 新增入站\n2) 管理已有入站\n3) 删除入站\n4) 输出全部入站订阅\n5) 高级编辑完整配置\n0) 返回\n'
+    printf '\n完整配置: %s\n\n' "$CONFIG_FILE"
+    printf '1) 新增入站\n2) 管理已有入站\n3) 订阅链接\n4) 删除入站\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
       1) run_menu_action add_inbound; pause;;
       2) select_inbound tag && manage_inbound_menu "$tag";;
-      3) run_menu_action delete_inbound; pause;;
-      4) run_menu_action print_subscription; pause;; 5) run_menu_action edit_config; pause;;
+      3) run_menu_action print_all_share_links; pause;;
+      4) run_menu_action delete_inbound; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
