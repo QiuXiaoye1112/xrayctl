@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.1.1"
+readonly XRAYCTL_VERSION="1.1.2"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -404,9 +404,9 @@ install_or_update_xray() {
   systemctl enable "$SERVICE_NAME" >/dev/null
   restart_service
   if [[ $mode == upgrade ]]; then
-    info "Xray 已升级：$($XRAY_BIN version | head -n1)"
+    info "Xray 已升级：$($XRAY_BIN version | sed -n '1p')"
   else
-    info "Xray 已安装/修复：$($XRAY_BIN version | head -n1)"
+    info "Xray 已安装/修复：$($XRAY_BIN version | sed -n '1p')"
   fi
 }
 
@@ -1188,7 +1188,7 @@ restore_backup() {
 
 show_status() {
   heading "Xray 状态"
-  if xray_installed; then "$XRAY_BIN" version | head -n2; else printf 'Xray: 未安装\n'; fi
+  if xray_installed; then "$XRAY_BIN" version | sed -n '1,2p'; else printf 'Xray: 未安装\n'; fi
   if service_exists; then
     systemctl --no-pager --full status "$SERVICE_NAME" 2>/dev/null | sed -n '1,12p' || true
   else printf 'systemd 服务: 未安装\n'; fi
@@ -1230,7 +1230,7 @@ EOF
 system_diagnostics() {
   local os_name=unknown
   if [[ -r /etc/os-release ]]; then
-    os_name=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release | head -n1)
+    os_name=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release)
     os_name=${os_name#\"}; os_name=${os_name%\"}
   fi
   heading "系统诊断"
