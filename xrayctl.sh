@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.1.6"
+readonly XRAYCTL_VERSION="1.1.7"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -1053,10 +1053,10 @@ print_links() {
       printf 'ss://%s@%s:%s#%s\n' "$(printf '%s' "${method}:${password}" | base64_urlsafe)" "$uri_host" "$port" "$(url_encode "$tag")"
       ;;
     socks)
-      jq -r --arg tag "$tag" --arg host "$host" --arg port "$port" '.inbounds[]|select(.tag==$tag)|if .settings.auth=="password" then .settings.accounts[]|"SOCKS5  \($host):\($port)  用户: \(.user)  密码: \(.pass)" else "SOCKS5  \($host):\($port)  无认证" end' "$CONFIG_FILE"
+      jq -r --arg tag "$tag" --arg host "$uri_host" --arg port "$port" '.inbounds[]|select(.tag==$tag)|if .settings.auth=="password" then .settings.accounts[]|"SOCKS5  \($host):\($port)  用户: \(.user)  密码: \(.pass)" else "SOCKS5  \($host):\($port)  无认证" end' "$CONFIG_FILE"
       ;;
     http)
-      jq -r --arg tag "$tag" --arg host "$host" --arg port "$port" '.inbounds[]|select(.tag==$tag)|.settings.accounts[]|"HTTP  \($host):\($port)  用户: \(.user)  密码: \(.pass)"' "$CONFIG_FILE"
+      jq -r --arg tag "$tag" --arg host "$uri_host" --arg port "$port" '.inbounds[]|select(.tag==$tag)|.settings.accounts[]|"HTTP  \($host):\($port)  用户: \(.user)  密码: \(.pass)"' "$CONFIG_FILE"
       ;;
   esac
 }
