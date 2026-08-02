@@ -1,8 +1,8 @@
 # xrayctl
 
-`xrayctl` 是一个面向 systemd Linux 服务器的单文件 Xray 管理脚本。它使用 XTLS 官方安装器安装核心，使用 Xray 自带的 `run -test` 检查每次配置变更，并在服务重启失败时自动回滚配置。
+`xrayctl` 是一个面向 systemd Linux 服务器的单文件 Xray 管理脚本。交互界面按“先看对象、再直接操作”设计：进入节点管理就能看到全部节点，选中节点后可在同一页管理分享信息、用户、端口和传输方式。它使用 XTLS 官方安装器安装核心，使用 Xray 自带的 `run -test` 检查每次配置变更，并在服务重启失败时自动回滚配置。
 
-当前版本：`1.1.8`
+当前版本：`1.2.0`
 
 ## 功能
 
@@ -17,9 +17,37 @@
 - 配置校验、日志级别、systemd 服务与日志管理
 - 配置校验失败时显示 Xray 核心的原始错误，便于准确定位问题
 - UFW/firewalld 安装与端口管理、BBR 环境检测和启用、系统诊断
-- 配置/元数据/托管证书的完整备份和安全恢复
 - 安装后通过 `xrayctl` 快捷命令启动
 - 新增节点时自动探测公网 IPv4/IPv6
+
+## 交互菜单
+
+主菜单只保留日常管理需要的五个入口。节点列表、服务状态、证书数量、BBR 和防火墙状态会直接显示，不再为“查看状态”单独占用一个选项。
+
+```text
+Xray Linux 管理脚本
+├─ 节点管理（进入即显示节点列表）
+│  ├─ 新增节点
+│  ├─ 管理已有节点
+│  │  ├─ 分享信息 / 客户端配置
+│  │  ├─ 用户管理（进入即显示用户）
+│  │  ├─ 修改地址和端口
+│  │  ├─ 修改传输和安全方式
+│  │  ├─ 查看 JSON
+│  │  └─ 删除节点
+│  ├─ 输出全部节点订阅
+│  └─ 高级编辑完整配置
+├─ TLS 证书（签发、导入、应用、查看、续期测试）
+├─ 服务管理（启停、重启、自启、日志、更新修复）
+├─ 系统工具
+│  ├─ 防火墙（安装、放行、关闭端口）
+│  ├─ BBR
+│  ├─ 系统诊断
+│  └─ 修复快捷命令
+└─ 卸载
+```
+
+只有一个节点或一张证书时会自动选中；有多个时才显示选择列表。
 
 ## 支持环境
 
@@ -79,8 +107,6 @@ xrayctl link TAG                 # 分享链接
 xrayctl subscription             # 全部节点 Base64 订阅内容
 xrayctl config check             # JSON + Xray 核心检查
 xrayctl logs 100                 # 最近 100 行日志
-xrayctl backup                   # 完整备份
-xrayctl restore /path/backup.tar.gz
 xrayctl cert issue example.com admin@example.com
 xrayctl firewall install
 xrayctl diagnose
