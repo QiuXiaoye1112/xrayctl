@@ -2,7 +2,7 @@
 
 这是与仓库根目录 systemd 版完全分离的 Alpine Linux 包。它使用 `apk` 管理依赖、使用 OpenRC 管理 Xray 服务，不会改动根目录的 `install.sh` 和 `xrayctl.sh`。
 
-当前版本：`1.0.9-alpine`
+当前版本：`1.0.10-alpine`
 
 ## 一键安装
 
@@ -32,7 +32,7 @@ xrayctl
 - RAW、XHTTP、WebSocket、gRPC、TLS、REALITY
 - 自动识别 IPv4/IPv6；双栈创建入站时同时列出两个公网地址
 - 入站创建顺序调整为协议、加密、传输，再填写其他参数
-- TLS 从证书读取 SNI；IP 证书自动固定客户端连接地址；未启用防火墙时不再询问放行端口
+- TLS 从证书读取 SNI，并直接作为客户端连接地址；未启用防火墙时不再询问放行端口
 - 支持删除未被 TLS 入站使用的托管证书
 - 新建 TLS 入站时选择托管证书；已有 TLS 入站在入站页面内更换证书
 - OpenRC 服务管理、用户流量、出站、证书、UFW、BBR 能力检测

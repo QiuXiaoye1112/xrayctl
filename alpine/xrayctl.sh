@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.9-alpine"
+readonly XRAYCTL_VERSION="1.0.10-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -982,7 +982,7 @@ build_inbound() {
   prompt_tag tag "${protocol}-$(random_hex 2)"
   prompt_value listen "监听地址" "0.0.0.0"
   prompt_port port 443
-  if [[ -n $suggested_host ]] && validate_ip_literal "$suggested_host"; then
+  if [[ -n $suggested_host ]]; then
     public_host=$suggested_host
     info "客户端连接地址：${public_host}"
   else
