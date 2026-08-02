@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.7-alpine"
+readonly XRAYCTL_VERSION="1.0.8-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -1783,13 +1783,14 @@ bootstrap_certbot_venv_without_apt() {
   local venv_dir=$1 bootstrap pip_timeout=${XRAYCTL_CERT_PIP_TIMEOUT:-120}
   command_exists python3 || return 1
   install -d -m 755 "$(dirname "$venv_dir")"
-  if [[ ! -x $venv_dir/bin/python ]]; then
+  if [[ ! -x $venv_dir/bin/python || ! -x $venv_dir/bin/pip ]]; then
     info "正在准备 Certbot 环境。"
+  fi
+  if [[ ! -x $venv_dir/bin/python ]]; then
     python3 -m venv --without-pip "$venv_dir" >/dev/null 2>&1 || return 1
   fi
   if [[ ! -x $venv_dir/bin/pip ]]; then
     bootstrap=$(temp_file)
-    info "正在准备 Certbot 依赖。"
     if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 2 \
       --connect-timeout 15 --max-time 60 https://bootstrap.pypa.io/get-pip.py -o "$bootstrap"; then
       rm -f "$bootstrap"

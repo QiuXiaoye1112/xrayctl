@@ -2,7 +2,7 @@
 
 `xrayctl` 是一个面向 systemd Linux 服务器的单文件 Xray 管理脚本。交互界面按“先看对象、再直接操作”设计：进入入站管理就能看到全部入站，选中入站后可在同一页管理分享信息、用户、端口和传输方式。它使用 XTLS 官方安装器安装核心，使用 Xray 自带的 `run -test` 检查每次配置变更，并在服务重启失败时自动回滚配置。
 
-当前版本：`1.2.17`
+当前版本：`1.2.18`
 
 > Alpine Linux 使用独立的 OpenRC 包，不会覆盖本页的 systemd 版。请查看 [Alpine/OpenRC 安装说明](alpine/README.md)。
 
