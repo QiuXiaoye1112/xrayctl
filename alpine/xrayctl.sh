@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.18-alpine"
+readonly XRAYCTL_VERSION="1.0.19-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -2407,6 +2407,8 @@ show_node_summary() {
 outbound_exists() { jq -e --arg tag "$1" '.outbounds[]?|select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
 
 list_outbound_overview() {
+  local rows number tag protocol address username password width
+  local number_width=4 tag_width=4 protocol_width=4 address_width=4 username_width=4
   ensure_config
   heading "入站与出站规则"
   if [[ $(jq '.inbounds|length' "$CONFIG_FILE") == 0 ]]; then
@@ -2428,16 +2430,27 @@ list_outbound_overview() {
     info "还没有代理出站。"
     return 0
   fi
-  print_table_cell "序号" 6; print_table_cell_clipped "标签" 16; print_table_cell_clipped "协议" 10
-  print_table_cell_clipped "地址" 32; print_table_cell_clipped "用户" 18; printf '密码\n'
-  jq -r '[.outbounds[]?|select(.protocol=="socks" or .protocol=="http")] | to_entries[] |
-    [.key+1,.value.tag,.value.protocol,(.value.settings.address+":"+(.value.settings.port|tostring)),
+  rows=$(jq -r '[.outbounds[]?|select(.protocol=="socks" or .protocol=="http")] | to_entries[] |
+    [.key+1,.value.tag,.value.protocol,
+     ((if (.value.settings.address|contains(":")) then "["+.value.settings.address+"]" else .value.settings.address end)+":"+(.value.settings.port|tostring)),
      (if (.value.settings.user // "")=="" then "无" else .value.settings.user end),
-     (if (.value.settings.pass // "")=="" then "无" else .value.settings.pass end)] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r number tag protocol address username password; do
-        print_table_cell "$number" 6; print_table_cell_clipped "$tag" 16; print_table_cell_clipped "$protocol" 10
-        print_table_cell_clipped "$address" 32; print_table_cell_clipped "$username" 18; printf '%s\n' "$password"
-      done
+     (if (.value.settings.pass // "")=="" then "无" else .value.settings.pass end)] | @tsv' "$CONFIG_FILE")
+  while IFS=$'\t' read -r number tag protocol address username password; do
+    display_width width "$number"; if ((width > number_width)); then number_width=$width; fi
+    display_width width "$tag"; if ((width > tag_width)); then tag_width=$width; fi
+    display_width width "$protocol"; if ((width > protocol_width)); then protocol_width=$width; fi
+    display_width width "$address"; if ((width > address_width)); then address_width=$width; fi
+    display_width width "$username"; if ((width > username_width)); then username_width=$width; fi
+  done <<<"$rows"
+  ((number_width+=2, tag_width+=2, protocol_width+=2, address_width+=2, username_width+=2))
+  print_table_cell "序号" "$number_width"; printf '| '; print_table_cell "标签" "$tag_width"; printf '| '
+  print_table_cell "协议" "$protocol_width"; printf '| '; print_table_cell "地址" "$address_width"; printf '| '
+  print_table_cell "用户" "$username_width"; printf '| 密码\n'
+  while IFS=$'\t' read -r number tag protocol address username password; do
+    print_table_cell "$number" "$number_width"; printf '| '; print_table_cell "$tag" "$tag_width"; printf '| '
+    print_table_cell "$protocol" "$protocol_width"; printf '| '; print_table_cell "$address" "$address_width"; printf '| '
+    print_table_cell "$username" "$username_width"; printf '| %s\n' "$password"
+  done <<<"$rows"
 }
 
 prompt_outbound_tag() {
