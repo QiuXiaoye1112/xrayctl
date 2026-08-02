@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.1.8"
+readonly XRAYCTL_VERSION="1.2.0"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -38,6 +38,7 @@ warn()    { printf '%s[警告]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 error()   { printf '%s[错误]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 die()     { error "$*"; exit 1; }
 heading() { printf '\n%s%s%s\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"; }
+clear_screen() { clear 2>/dev/null || true; }
 
 on_error() {
   local exit_code=$? line=${BASH_LINENO[0]:-?}
@@ -339,8 +340,9 @@ backup_config_quiet() {
   printf '%s' "$target"
 }
 
-service_exists() { systemctl list-unit-files "$SYSTEMD_UNIT" --no-legend 2>/dev/null | grep -q "$SYSTEMD_UNIT"; }
-service_is_active() { systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; }
+service_exists() { command_exists systemctl && systemctl list-unit-files "$SYSTEMD_UNIT" --no-legend 2>/dev/null | grep -q "$SYSTEMD_UNIT"; }
+service_is_active() { command_exists systemctl && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; }
+service_is_enabled() { command_exists systemctl && systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; }
 
 restart_service() {
   if service_exists; then
@@ -755,6 +757,10 @@ select_inbound() {
   count=$(grep -c . <<<"$entries" || true)
   ((count > 0)) || { warn "没有可选节点。"; return 1; }
   while IFS= read -r selected_tag; do [[ -z $selected_tag ]] || tags+=("$selected_tag"); done <<<"$entries"
+  if ((count == 1)); then
+    printf -v "$__var" '%s' "${tags[0]}"
+    return 0
+  fi
   choose answer "选择节点" "${tags[@]}"
   selected_tag=${tags[$((answer-1))]}
   printf -v "$__var" '%s' "$selected_tag"
@@ -850,14 +856,27 @@ client_array_path() {
 
 list_clients() {
   ensure_config
-  local tag=${1-} protocol
+  local tag=${1-} protocol count
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   heading "${tag} 的用户"
+  if [[ $protocol == socks || $protocol == http ]]; then
+    count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // [])|length' "$CONFIG_FILE")
+  else
+    count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])|length' "$CONFIG_FILE")
+  fi
+  if ((count == 0)); then info "还没有用户。"; return; fi
+  printf '%-4s %-28s %s\n' "序号" "用户" "凭据"
   case $protocol in
-    vless|vmess) jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|"\(.key+1)\t\(.value.email // "-")\t\(.value.id)"' "$CONFIG_FILE" ;;
-    trojan) jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|"\(.key+1)\t\(.value.email // "-")\t********"' "$CONFIG_FILE" ;;
-    socks|http) jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts // []|to_entries[]|"\(.key+1)\t\(.value.user)\t********"' "$CONFIG_FILE" ;;
+    vless|vmess)
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
+        | while IFS=$'\t' read -r number label credential; do printf '%-4s %-28s %s\n' "$number" "$label" "$credential"; done ;;
+    trojan)
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-")]|@tsv' "$CONFIG_FILE" \
+        | while IFS=$'\t' read -r number label; do printf '%-4s %-28s %s\n' "$number" "$label" '********'; done ;;
+    socks|http)
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts // []|to_entries[]|[.key+1,.value.user]|@tsv' "$CONFIG_FILE" \
+        | while IFS=$'\t' read -r number label; do printf '%-4s %-28s %s\n' "$number" "$label" '********'; done ;;
     *) die "${protocol} 不支持独立多用户管理。";;
   esac
 }
@@ -1351,6 +1370,35 @@ list_certificates() {
   ((found)) || info "还没有托管证书。"
 }
 
+certificate_count() {
+  local cert count=0
+  for cert in "$CERT_DIR"/*.crt; do [[ -e $cert ]] && ((count+=1)); done
+  printf '%s' "$count"
+}
+
+select_managed_certificate() {
+  local __var=$1 cert answer identifier
+  local identifiers=()
+  for cert in "$CERT_DIR"/*.crt; do
+    [[ -e $cert ]] || continue
+    identifier=$(basename "$cert" .crt)
+    [[ -r "${CERT_DIR}/${identifier}.key" ]] && identifiers+=("$identifier")
+  done
+  ((${#identifiers[@]} > 0)) || { warn "没有可用的托管证书。"; return 1; }
+  if ((${#identifiers[@]} == 1)); then
+    printf -v "$__var" '%s' "${identifiers[0]}"
+    return 0
+  fi
+  choose answer "选择证书" "${identifiers[@]}"
+  printf -v "$__var" '%s' "${identifiers[$((answer-1))]}"
+}
+
+apply_managed_certificate() {
+  local identifier
+  select_managed_certificate identifier || return
+  apply_certificate_to_inbound "$identifier" "${CERT_DIR}/${identifier}.crt" "${CERT_DIR}/${identifier}.key"
+}
+
 backup_all() {
   require_root backup; ensure_config
   local target=${1:-${BACKUP_DIR}/xrayctl-$(timestamp).tar.gz}
@@ -1468,40 +1516,140 @@ system_diagnostics() {
   heading "最近服务日志"; journalctl -u "$SERVICE_NAME" -n 20 --no-pager 2>/dev/null || true
 }
 
-inbound_menu() {
-  local choice tag
-  while true; do
-    heading "节点管理"
-    printf '1) 列出节点\n2) 新增节点\n3) 修改监听/公网地址\n4) 修改传输/安全方式\n5) 查看节点 JSON\n6) 删除节点\n7) 高级编辑完整配置\n0) 返回\n'
+node_count_summary() {
+  if command_exists jq && [[ -r $CONFIG_FILE ]]; then
+    jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?'
+  else
+    printf '0'
+  fi
+}
+
+xray_version_summary() {
+  local output first
+  xray_installed || { printf '未安装'; return; }
+  output=$("$XRAY_BIN" version 2>/dev/null || true)
+  first=${output%%$'\n'*}
+  if [[ $first =~ ^Xray[[:space:]]+([^[:space:]]+) ]]; then printf '%s' "${BASH_REMATCH[1]}"; else printf '已安装'; fi
+}
+
+service_state_summary() {
+  if ! service_exists; then printf '未安装';
+  elif service_is_active; then printf '运行中';
+  else printf '已停止'; fi
+}
+
+startup_state_summary() {
+  if ! service_exists; then printf '未安装';
+  elif service_is_enabled; then printf '已开启';
+  else printf '已关闭'; fi
+}
+
+show_main_summary() {
+  printf '服务: %s  |  节点: %s  |  Xray: %s\n\n' \
+    "$(service_state_summary)" "$(node_count_summary)" "$(xray_version_summary)"
+}
+
+show_node_summary() {
+  local tag=$1 protocol port method security listen
+  IFS=$'\t' read -r protocol port method security listen < <(
+    jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|[
+      .protocol,(.port|tostring),(.streamSettings.method // "raw"),
+      (.streamSettings.security // "none"),(.listen // "0.0.0.0")]|@tsv' "$CONFIG_FILE"
+  )
+  printf '协议: %s  |  端口: %s  |  传输: %s  |  安全: %s\n监听: %s\n\n' \
+    "$protocol" "$port" "$method" "$security" "$listen"
+}
+
+client_menu_for_tag() {
+  local tag=$1 choice
+  while inbound_exists "$tag"; do
+    clear_screen
+    heading "用户管理 · ${tag}"
+    list_clients "$tag"
+    printf '\n1) 添加用户\n2) 重命名用户\n3) 重置用户凭据\n4) 删除用户\n0) 返回节点\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) list_inbounds; pause;; 2) add_inbound; pause;; 3) modify_inbound_basic; pause;;
-      4) modify_inbound_transport; pause;; 5) select_inbound tag && show_inbound "$tag"; pause;;
-      6) delete_inbound; pause;; 7) edit_config; pause;; 0) return;; *) warn "无效选项。";;
+      1) add_client "$tag"; pause;; 2) rename_client "$tag"; pause;;
+      3) rotate_client_credential "$tag"; pause;; 4) delete_client "$tag"; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
     esac
   done
 }
 
-client_menu() {
-  local choice
-  while true; do
-    heading "用户管理"
-    printf '1) 列出用户\n2) 添加用户\n3) 重命名用户\n4) 重置用户凭据\n5) 删除用户\n0) 返回\n'
-    read -r -p "请选择: " choice
-    case $choice in 1) list_clients; pause;; 2) add_client; pause;; 3) rename_client; pause;; 4) rotate_client_credential; pause;; 5) delete_client; pause;; 0) return;; *) warn "无效选项。";; esac
+manage_inbound_menu() {
+  local tag=$1 choice protocol auth
+  while inbound_exists "$tag"; do
+    clear_screen
+    protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+    heading "节点 · ${tag}"
+    show_node_summary "$tag"
+    case $protocol in
+      vless|vmess|trojan)
+        printf '1) 分享信息\n2) 用户管理\n3) 修改地址/端口\n4) 修改传输/安全\n5) 查看 JSON\n6) 删除节点\n0) 返回列表\n'
+        read -r -p "请选择: " choice
+        case $choice in
+          1) print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_basic "$tag"; pause;;
+          4) modify_inbound_transport "$tag"; pause;; 5) show_inbound "$tag"; pause;;
+          6) delete_inbound "$tag"; pause;; 0) return;; *) warn "无效选项。"; pause;;
+        esac
+        ;;
+      http)
+        printf '1) 客户端配置\n2) 用户管理\n3) 修改地址/端口\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
+        read -r -p "请选择: " choice
+        case $choice in
+          1) print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_basic "$tag"; pause;;
+          4) show_inbound "$tag"; pause;; 5) delete_inbound "$tag"; pause;;
+          0) return;; *) warn "无效选项。"; pause;;
+        esac
+        ;;
+      socks)
+        auth=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth // "noauth"' "$CONFIG_FILE")
+        printf '认证: %s\n\n' "$auth"
+        if [[ $auth == password ]]; then
+          printf '1) 客户端配置\n2) 用户管理\n3) 修改地址/端口\n4) 查看 JSON\n5) 删除节点\n0) 返回列表\n'
+          read -r -p "请选择: " choice
+          case $choice in
+            1) print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_basic "$tag"; pause;;
+            4) show_inbound "$tag"; pause;; 5) delete_inbound "$tag"; pause;;
+            0) return;; *) warn "无效选项。"; pause;;
+          esac
+        else
+          printf '1) 客户端配置\n2) 修改地址/端口\n3) 查看 JSON\n4) 删除节点\n0) 返回列表\n'
+          read -r -p "请选择: " choice
+          case $choice in
+            1) print_links "$tag"; pause;; 2) modify_inbound_basic "$tag"; pause;;
+            3) show_inbound "$tag"; pause;; 4) delete_inbound "$tag"; pause;;
+            0) return;; *) warn "无效选项。"; pause;;
+          esac
+        fi
+        ;;
+      shadowsocks)
+        printf '1) 分享信息\n2) 修改地址/端口\n3) 查看 JSON\n4) 删除节点\n0) 返回列表\n'
+        read -r -p "请选择: " choice
+        case $choice in
+          1) print_links "$tag"; pause;; 2) modify_inbound_basic "$tag"; pause;;
+          3) show_inbound "$tag"; pause;; 4) delete_inbound "$tag"; pause;;
+          0) return;; *) warn "无效选项。"; pause;;
+        esac
+        ;;
+      *) warn "不支持的节点协议：${protocol}"; return;;
+    esac
   done
 }
 
-share_menu() {
+inbound_menu() {
   local choice tag
   while true; do
-    heading "分享与订阅"
-    printf '1) 输出单个节点分享信息\n2) 输出全部节点 Base64 订阅内容\n3) 输出单个节点 Base64 订阅内容\n0) 返回\n'
+    clear_screen
+    heading "节点管理"
+    list_inbounds
+    printf '\n1) 新增节点\n2) 管理已有节点\n3) 输出全部节点订阅\n4) 高级编辑完整配置\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) print_links; pause;; 2) print_subscription; pause;;
-      3) select_inbound tag '^(vless|vmess|trojan|shadowsocks)$' && print_subscription "$tag"; pause;;
-      0) return;; *) warn "无效选项。";;
+      1) add_inbound; pause;;
+      2) select_inbound tag && manage_inbound_menu "$tag";;
+      3) print_subscription; pause;; 4) edit_config; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
     esac
   done
 }
@@ -1509,49 +1657,114 @@ share_menu() {
 certificate_menu() {
   local choice
   while true; do
-    heading "TLS 证书管理"
-    printf '1) 列出托管证书\n2) Let\x27s Encrypt 自动签发\n3) 导入已有证书\n4) 测试自动续期\n0) 返回\n'
+    clear_screen
+    heading "TLS 证书"
+    printf '托管证书: %s\n\n' "$(certificate_count)"
+    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 应用证书到节点\n4) 查看托管证书\n5) 测试自动续期\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) list_certificates; pause;; 2) issue_certificate; pause;; 3) import_certificate; pause;;
-      4) ensure_runtime_dependencies cert-renew; install_certbot; certbot renew --dry-run; pause;;
-      0) return;; *) warn "无效选项。";;
+      1) issue_certificate; pause;; 2) import_certificate; pause;; 3) apply_managed_certificate; pause;;
+      4) list_certificates; pause;;
+      5) ensure_runtime_dependencies cert-renew; install_certbot; certbot renew --dry-run; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
     esac
   done
+}
+
+toggle_service_running() {
+  if service_is_active; then service_action stop; else service_action start; fi
+}
+
+toggle_service_startup() {
+  ensure_runtime_dependencies service
+  service_exists || die "Xray systemd 服务不存在。"
+  if service_is_enabled; then
+    systemctl disable "$SERVICE_NAME" >/dev/null
+    info "开机自启已关闭；当前服务运行状态未改变。"
+  else
+    systemctl enable "$SERVICE_NAME" >/dev/null
+    info "开机自启已开启。"
+  fi
 }
 
 service_menu() {
   local choice
   while true; do
+    clear_screen
     heading "服务管理"
-    printf '1) 状态\n2) 启动\n3) 停止\n4) 重启\n5) 开机自启\n6) 关闭自启并停止\n7) 查看日志\n0) 返回\n'
+    printf '状态: %s  |  开机自启: %s  |  Xray: %s\n\n' \
+      "$(service_state_summary)" "$(startup_state_summary)" "$(xray_version_summary)"
+    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装/更新/修复 Xray\n0) 返回\n'
     read -r -p "请选择: " choice
-    case $choice in 1) show_status; pause;; 2) service_action start;; 3) service_action stop;; 4) service_action restart;; 5) service_action enable;; 6) service_action disable;; 7) show_logs 100; pause;; 0) return;; *) warn "无效选项。";; esac
+    case $choice in
+      1) toggle_service_running; pause;; 2) service_action restart; pause;;
+      3) toggle_service_startup; pause;; 4) show_logs 100; pause;;
+      5) install_or_update_xray install; pause;; 0) return;; *) warn "无效选项。"; pause;;
+    esac
   done
 }
 
-config_menu() {
-  local choice
+firewall_state_summary() {
+  if command_exists ufw; then
+    if ufw status 2>/dev/null | grep -q '^Status: active'; then printf 'UFW 运行中'; else printf 'UFW 未启用'; fi
+  elif command_exists firewall-cmd; then
+    if firewall-cmd --state >/dev/null 2>&1; then printf 'firewalld 运行中'; else printf 'firewalld 未启用'; fi
+  else
+    printf '未安装'
+  fi
+}
+
+firewall_menu() {
+  local choice port
   while true; do
-    heading "配置与备份"
-    printf '1) 检查配置\n2) 格式化查看配置\n3) 高级编辑配置\n4) 设置日志级别\n5) 创建完整备份\n6) 恢复备份\n0) 返回\n'
+    clear_screen
+    heading "防火墙"
+    printf '状态: %s\n\n' "$(firewall_state_summary)"
+    printf '1) 安装/启用\n2) 放行端口\n3) 关闭端口\n0) 返回\n'
     read -r -p "请选择: " choice
-    case $choice in 1) check_config; pause;; 2) ensure_config; jq . "$CONFIG_FILE"; pause;; 3) edit_config; pause;; 4) set_log_level; pause;; 5) backup_all; pause;; 6) restore_backup; pause;; 0) return;; *) warn "无效选项。";; esac
+    case $choice in
+      1) install_firewall; pause;;
+      2) prompt_value port "端口"; ensure_runtime_dependencies firewall; open_firewall_for_port "$port" force; pause;;
+      3) prompt_value port "端口"; ensure_runtime_dependencies firewall; close_firewall_for_port "$port"; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
+    esac
   done
+}
+
+bbr_state_summary() {
+  if [[ -r /proc/sys/net/ipv4/tcp_congestion_control ]]; then
+    if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) == bbr ]]; then printf '已启用'; else printf '未启用'; fi
+  else
+    printf '不可用'
+  fi
 }
 
 system_menu() {
-  local choice port
+  local choice
   while true; do
+    clear_screen
     heading "系统工具"
-    printf '1) 系统诊断\n2) 启用 BBR\n3) 安装/启用防火墙\n4) 放行防火墙端口\n5) 关闭防火墙端口\n6) 安装/修复快捷命令\n0) 返回\n'
+    printf 'BBR: %s  |  防火墙: %s\n\n' "$(bbr_state_summary)" "$(firewall_state_summary)"
+    printf '1) 防火墙管理\n2) 启用 BBR\n3) 系统诊断\n4) 修复快捷命令\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) system_diagnostics; pause;; 2) enable_bbr; pause;;
-      3) install_firewall; pause;;
-      4) prompt_value port "端口"; ensure_runtime_dependencies firewall; open_firewall_for_port "$port" force; pause;;
-      5) prompt_value port "端口"; ensure_runtime_dependencies firewall; close_firewall_for_port "$port"; pause;;
-      6) ensure_runtime_dependencies quick-command; install_quick_command; pause;; 0) return;; *) warn "无效选项。";;
+      1) firewall_menu;; 2) enable_bbr; pause;; 3) system_diagnostics; pause;;
+      4) ensure_runtime_dependencies quick-command; install_quick_command; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
+    esac
+  done
+}
+
+uninstall_menu() {
+  local choice
+  while true; do
+    clear_screen
+    heading "卸载"
+    printf '1) 卸载 Xray（保留配置）\n2) 彻底卸载\n0) 返回\n'
+    read -r -p "请选择: " choice
+    case $choice in
+      1) uninstall_xray 0; pause;; 2) uninstall_xray 1; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
     esac
   done
 }
@@ -1559,15 +1772,15 @@ system_menu() {
 main_menu() {
   local choice
   while true; do
-    clear 2>/dev/null || true
+    clear_screen
     printf '%sXray Linux 管理脚本%s  v%s\n' "$C_BOLD$C_BLUE" "$C_RESET" "$XRAYCTL_VERSION"
-    printf '1) 安装/修复 Xray\n2) 升级 Xray\n3) 节点管理\n4) 用户管理\n5) 查看分享链接\n6) TLS 证书管理\n7) 服务管理\n8) 系统工具\n9) 卸载 Xray（保留配置）\n10) 彻底卸载\n0) 退出\n'
+    show_main_summary
+    printf '1) 节点管理\n2) TLS 证书\n3) 服务管理\n4) 系统工具\n5) 卸载\n0) 退出\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) install_or_update_xray install; pause;; 2) install_or_update_xray upgrade; pause;;
-      3) inbound_menu;; 4) client_menu;; 5) share_menu;; 6) certificate_menu;;
-      7) service_menu;; 8) system_menu;;
-      9) uninstall_xray 0; pause;; 10) uninstall_xray 1; pause;; 0) return;; *) warn "无效选项。"; pause;;
+      1) inbound_menu;; 2) certificate_menu;; 3) service_menu;;
+      4) system_menu;; 5) uninstall_menu;;
+      0) return;; *) warn "无效选项。"; pause;;
     esac
   done
 }
