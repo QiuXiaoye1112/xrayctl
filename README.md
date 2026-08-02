@@ -4,6 +4,8 @@
 
 当前版本：`1.2.10`
 
+> Alpine Linux 使用独立的 OpenRC 包，不会覆盖本页的 systemd 版。请查看 [Alpine/OpenRC 安装说明](alpine/README.md)。
+
 ## 功能
 
 - 安装、修复、指定版本安装、升级、保留配置卸载、彻底卸载
