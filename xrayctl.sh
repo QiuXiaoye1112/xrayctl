@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.1.3"
+readonly XRAYCTL_VERSION="1.1.4"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -117,6 +117,34 @@ validate_tag() { [[ $1 =~ ^[A-Za-z0-9_.-]+$ ]]; }
 validate_domain() { [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]; }
 validate_path() { [[ $1 == /* && $1 != *" "* ]]; }
 validate_email_label() { [[ -n $1 && ${#1} -le 128 && $1 != *$'\n'* ]]; }
+
+validate_ipv4() {
+  local value=$1 a b c d extra
+  IFS=. read -r a b c d extra <<<"$value"
+  [[ -z ${extra:-} && $a =~ ^[0-9]{1,3}$ && $b =~ ^[0-9]{1,3}$ && $c =~ ^[0-9]{1,3}$ && $d =~ ^[0-9]{1,3}$ ]] \
+    && ((10#$a <= 255 && 10#$b <= 255 && 10#$c <= 255 && 10#$d <= 255))
+}
+
+validate_ip_literal() {
+  validate_ipv4 "$1" || [[ $1 == *:* && $1 =~ ^[0-9A-Fa-f:]+$ && ${#1} -le 45 ]]
+}
+
+detect_public_ip() {
+  local response raw
+  response=$({ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 4 --max-time 8 https://api64.ipify.org 2>/dev/null || true; } | tr -d '[:space:]')
+  if validate_ip_literal "$response"; then printf '%s' "$response"; return 0; fi
+
+  response=$({ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 4 --max-time 8 https://checkip.amazonaws.com 2>/dev/null || true; } | tr -d '[:space:]')
+  if validate_ip_literal "$response"; then printf '%s' "$response"; return 0; fi
+
+  raw=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 4 --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+  response=$(awk -F= '$1=="ip" {print $2; exit}' <<<"$raw" | tr -d '[:space:]')
+  if validate_ip_literal "$response"; then printf '%s' "$response"; return 0; fi
+  return 1
+}
 
 json_quote() { jq -Rn --arg value "$1" '$value'; }
 url_encode() { jq -rn --arg value "$1" '$value|@uri'; }
@@ -284,12 +312,18 @@ xray_installed() { [[ -x $XRAY_BIN ]]; }
 require_xray_installed() { xray_installed || die "Xray 尚未安装，请先运行：sudo xrayctl install"; }
 
 validate_candidate() {
-  local candidate=$1
-  jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' "$candidate" >/dev/null \
-    || { error "JSON 结构检查失败。"; return 1; }
+  local candidate=$1 validation_output
+  if ! validation_output=$(jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' "$candidate" 2>&1); then
+    error "JSON 结构检查失败。"
+    [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+    return 1
+  fi
   if xray_installed; then
-    "$XRAY_BIN" run -test -config "$candidate" >/dev/null \
-      || { error "Xray 核心拒绝了新配置。"; return 1; }
+    if ! validation_output=$("$XRAY_BIN" run -test -config "$candidate" 2>&1); then
+      error "Xray 核心拒绝了新配置，原始错误如下："
+      [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+      return 1
+    fi
   fi
 }
 
@@ -513,10 +547,22 @@ prompt_port() {
 }
 
 prompt_public_host() {
-  local __var=$1 default=${2:-$(hostname -f 2>/dev/null || hostname)} value
-  prompt_value value "客户端连接用的域名或公网 IP" "$default"
-  [[ -n $value && $value != *" "* ]] || die "连接地址不能为空且不能包含空格。"
-  printf -v "$__var" '%s' "$value"
+  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} value
+  if [[ -z $default ]]; then
+    if default=$(detect_public_ip); then
+      info "自动探测到公网 IP：${default}"
+    else
+      warn "未能自动探测公网 IP，请手动填写服务商提供的公网 IP 或域名。"
+    fi
+  fi
+  while true; do
+    prompt_value value "客户端连接用的公网 IP 或域名（NAT 主机填写服务商提供的地址）" "$default"
+    if [[ -n $value && $value != *" "* ]]; then
+      printf -v "$__var" '%s' "$value"
+      return
+    fi
+    warn "公网地址不能为空且不能包含空格，不能填写服务器内部主机名。"
+  done
 }
 
 prompt_public_port() {
