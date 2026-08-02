@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.2"
+readonly XRAYCTL_VERSION="1.2.3"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly JQ_VERSION="1.8.2"
 
@@ -122,7 +122,9 @@ validate_port() { [[ $1 =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 validate_tag() { [[ $1 =~ ^[A-Za-z0-9_.-]+$ ]]; }
 validate_domain() { [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]; }
 validate_path() { [[ $1 == /* && $1 != *" "* ]]; }
-validate_email_label() { [[ -n $1 && ${#1} -le 128 && $1 != *$'\n'* ]]; }
+validate_email_label() {
+  [[ -n $1 && ${#1} -le 128 && $1 != *$'\n'* && $1 != *$'\r'* && $1 != *$'\t'* && $1 != *'>>>'* ]]
+}
 validate_email_address() { [[ $1 == *@*.* && $1 != *" "* ]]; }
 validate_domain_or_ip() { validate_ip_literal "$1" || validate_domain "$1"; }
 validate_certificate_identifier() { [[ $1 =~ ^[A-Za-z0-9.-]+$ ]]; }
@@ -206,7 +208,6 @@ detect_public_ip() {
 json_quote() { jq -Rn --arg value "$1" '$value'; }
 url_encode() { jq -rn --arg value "$1" '$value|@uri'; }
 base64_nowrap() { base64 | tr -d '\n'; }
-base64_urlsafe() { base64_nowrap | tr '+/' '-_' | tr -d '='; }
 
 random_hex() { openssl rand -hex "${1:-8}"; }
 random_password() { openssl rand -base64 24 | tr -d '\n=+/' | cut -c1-24; }
@@ -374,7 +375,10 @@ write_default_config() {
     ]
   },
   "policy": {
-    "system": {"statsInboundUplink": true, "statsInboundDownlink": true}
+    "system": {"statsInboundUplink": true, "statsInboundDownlink": true},
+    "levels": {
+      "0": {"statsUserUplink": true, "statsUserDownlink": true}
+    }
   },
   "stats": {},
   "api": {
@@ -735,10 +739,10 @@ build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
   local choice protocol tag listen port public_host email uuid password method stream inbound_json user flow auth username generated_public_key=""
   choose choice "选择入站协议" \
-    "VLESS" "VMess" "Trojan" "Shadowsocks" "SOCKS5" "HTTP"
+    "VLESS" "VMess" "Trojan" "SOCKS5" "HTTP"
   case $choice in
     1) protocol=vless;; 2) protocol=vmess;; 3) protocol=trojan;;
-    4) protocol=shadowsocks;; 5) protocol=socks;; 6) protocol=http;;
+    4) protocol=socks;; 5) protocol=http;;
   esac
   prompt_tag tag "${protocol}-$(random_hex 2)"
   prompt_value listen "监听地址" "0.0.0.0"
@@ -747,7 +751,7 @@ build_inbound() {
 
   case $protocol in
     vless|vmess|trojan)
-      prompt_validated_value email "首个用户名称/邮箱" "user-$(random_hex 2)" validate_email_label "用户名称无效，请重新输入。"
+      prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol"
       build_stream_settings "$protocol" stream generated_public_key
       case $protocol in
         vless)
@@ -771,13 +775,6 @@ build_inbound() {
             '{tag:$tag,listen:$listen,port:$port,protocol:"trojan",settings:{clients:[$user]},streamSettings:$stream,sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}')
           ;;
       esac
-      ;;
-    shadowsocks)
-      choose method "选择加密方式" "chacha20-poly1305" "aes-256-gcm" "aes-128-gcm"
-      case $method in 1) method=chacha20-poly1305;; 2) method=aes-256-gcm;; 3) method=aes-128-gcm;; esac
-      prompt_secret password "Shadowsocks 密码" "$(random_password)"
-      inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" --arg method "$method" --arg password "$password" \
-        '{tag:$tag,listen:$listen,port:$port,protocol:"shadowsocks",settings:{method:$method,password:$password,network:"tcp,udp"},sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}')
       ;;
     socks)
       choose auth "SOCKS5 认证" "用户名密码" "无认证"
@@ -947,9 +944,41 @@ client_array_path() {
   case $protocol in vless|vmess|trojan) printf '.settings.clients';; socks|http) printf '.settings.accounts';; *) return 1;; esac
 }
 
+query_user_traffic_snapshot() {
+  local address
+  address=$(stats_api_address)
+  [[ -n $address && -x $XRAY_BIN ]] || return 1
+  "$XRAY_BIN" api statsquery --server="$address" --timeout=2 -pattern 'user>>>' 2>/dev/null
+}
+
+print_client_traffic_row() {
+  local number=$1 label=$2 credential=$3 snapshot_file=$4 snapshot_available=$5
+  local parsed_up=0 parsed_down=0 total=0
+  if ((snapshot_available)); then
+    IFS=$'\t' read -r parsed_up parsed_down < <(
+      jq -r --arg label "$label" '
+        ("user>>>"+$label+">>>traffic>>>uplink") as $upName |
+        ("user>>>"+$label+">>>traffic>>>downlink") as $downName |
+        [([.stat[]?|select(.name==$upName)|.value][0] // 0),
+         ([.stat[]?|select(.name==$downName)|.value][0] // 0)] | @tsv' "$snapshot_file"
+    )
+    [[ $parsed_up =~ ^[0-9]+$ ]] || parsed_up=0
+    [[ $parsed_down =~ ^[0-9]+$ ]] || parsed_down=0
+    total=$((parsed_up+parsed_down))
+  fi
+  print_table_cell "$number" 6; print_table_cell "$label" 28; print_table_cell "$credential" 40
+  if ((snapshot_available)); then
+    print_table_cell "$(format_bytes "$parsed_up")" 14
+    print_table_cell "$(format_bytes "$parsed_down")" 14
+    printf '%s\n' "$(format_bytes "$total")"
+  else
+    print_table_cell "-" 14; print_table_cell "-" 14; printf '%s\n' '-'
+  fi
+}
+
 list_clients() {
   ensure_config
-  local tag=${1-} protocol count
+  local tag=${1-} protocol count stats_file="" stats_available=0
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   heading "${tag} 的用户"
@@ -959,17 +988,25 @@ list_clients() {
     count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])|length' "$CONFIG_FILE")
   fi
   if ((count == 0)); then info "还没有用户。"; return; fi
-  print_table_cell "序号" 6; print_table_cell "用户" 32; printf '凭据\n'
   case $protocol in
-    vless|vmess)
-      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
-        | while IFS=$'\t' read -r number label credential; do print_table_cell "$number" 6; print_table_cell "$label" 32; printf '%s\n' "$credential"; done ;;
-    trojan)
-      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-")]|@tsv' "$CONFIG_FILE" \
-        | while IFS=$'\t' read -r number label; do print_table_cell "$number" 6; print_table_cell "$label" 32; printf '%s\n' '********'; done ;;
+    vless|vmess|trojan)
+      stats_file=$(temp_file)
+      if query_user_traffic_snapshot >"$stats_file"; then stats_available=1; fi
+      print_table_cell "序号" 6; print_table_cell "用户" 28; print_table_cell "凭据" 40
+      print_table_cell "上传" 14; print_table_cell "下载" 14; printf '总计\n'
+      if [[ $protocol == vless || $protocol == vmess ]]; then
+        jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE"
+      else
+        jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),(.value.password // "-")]|@tsv' "$CONFIG_FILE"
+      fi | while IFS=$'\t' read -r number label credential; do
+        print_client_traffic_row "$number" "$label" "$credential" "$stats_file" "$stats_available"
+      done
+      rm -f "$stats_file"
+      ;;
     socks|http)
-      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts // []|to_entries[]|[.key+1,.value.user]|@tsv' "$CONFIG_FILE" \
-        | while IFS=$'\t' read -r number label; do print_table_cell "$number" 6; print_table_cell "$label" 32; printf '%s\n' '********'; done ;;
+      print_table_cell "序号" 6; print_table_cell "用户" 32; printf '凭据\n'
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.accounts // []|to_entries[]|[.key+1,.value.user,(.value.pass // "-")]|@tsv' "$CONFIG_FILE" \
+        | while IFS=$'\t' read -r number label credential; do print_table_cell "$number" 6; print_table_cell "$label" 32; printf '%s\n' "$credential"; done ;;
     *) die "${protocol} 不支持独立多用户管理。";;
   esac
 }
@@ -1002,13 +1039,27 @@ client_label_exists() {
   fi
 }
 
+stats_client_label_exists() {
+  jq -e --arg label "$1" '
+    .inbounds[]? | select(.protocol=="vless" or .protocol=="vmess" or .protocol=="trojan") |
+    .settings.clients[]? | select((.email // "")==$label)' "$CONFIG_FILE" >/dev/null
+}
+
 prompt_client_label() {
-  local __var=$1 tag=$2 prompt=$3 default=${4-} current=${5-} label_candidate
+  local __var=$1 tag=$2 prompt=$3 default=${4-} current=${5-} protocol=${6-} label_candidate
+  [[ -n $protocol ]] || protocol=$(jq -r --arg tag "$tag" '.inbounds[]?|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   while true; do
     prompt_validated_value label_candidate "$prompt" "$default" validate_email_label "用户名称无效，请重新输入。" || return 1
-    if [[ $label_candidate != "$current" ]] && client_label_exists "$tag" "$label_candidate"; then
-      warn "用户名称已存在，请重新输入。"
-      continue
+    if [[ $label_candidate != "$current" ]]; then
+      if [[ $protocol == vless || $protocol == vmess || $protocol == trojan ]]; then
+        if stats_client_label_exists "$label_candidate"; then
+          warn "该用户名称已被其他节点使用，会导致流量合并，请重新输入。"
+          continue
+        fi
+      elif client_label_exists "$tag" "$label_candidate"; then
+        warn "用户名称已存在，请重新输入。"
+        continue
+      fi
     fi
     printf -v "$__var" '%s' "$label_candidate"
     return 0
@@ -1091,8 +1142,19 @@ rename_client() {
   local tag=${1-} old_label=${2-} new_label=${3-} protocol count tmp
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
   [[ -n $old_label ]] || select_client old_label "$tag" || return
-  [[ -n $new_label ]] || prompt_client_label new_label "$tag" "新的用户名称/邮箱" "" "$old_label"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  if [[ -z $new_label ]]; then
+    prompt_client_label new_label "$tag" "新的用户名称/邮箱" "" "$old_label" "$protocol"
+  else
+    validate_email_label "$new_label" || die "新用户名称无效。"
+    if [[ $new_label != "$old_label" ]]; then
+      if [[ $protocol == vless || $protocol == vmess || $protocol == trojan ]]; then
+        if stats_client_label_exists "$new_label"; then die "该用户名称已被其他节点使用，会导致流量合并。"; fi
+      else
+        if client_label_exists "$tag" "$new_label"; then die "用户名称已存在。"; fi
+      fi
+    fi
+  fi
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
     count=$(jq --arg tag "$tag" --arg label "$old_label" '[.inbounds[]|select(.tag==$tag)|.settings.accounts[]|select(.user==$label)]|length' "$CONFIG_FILE")
@@ -1207,12 +1269,7 @@ print_links() {
         print_share_entry "$label" "链接" "$link"
       done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|[.email,.id]|@tsv' "$CONFIG_FILE")
       ;;
-    shadowsocks)
-      method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.method' "$CONFIG_FILE")
-      password=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.password' "$CONFIG_FILE")
-      link="ss://$(printf '%s' "${method}:${password}" | base64_urlsafe)@${uri_host}:${port}#$(url_encode "$tag")"
-      print_share_entry "default" "链接" "$link"
-      ;;
+    shadowsocks) die "Shadowsocks 已停止支持；请迁移或删除节点。" ;;
     socks)
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
         while IFS=$'\t' read -r label password; do
@@ -1235,12 +1292,12 @@ print_subscription() {
   ensure_config; init_meta
   local tag=${1-} links current_tag
   if [[ -n $tag ]]; then
-    links=$(print_links "$tag" "" | grep -E '^(vless|vmess|trojan|ss)://' || true)
+    links=$(print_links "$tag" "" | grep -E '^(vless|vmess|trojan)://' || true)
   else
     links=""
     while IFS= read -r current_tag; do
-      links+="$(print_links "$current_tag" "" | grep -E '^(vless|vmess|trojan|ss)://' || true)"$'\n'
-    done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan|shadowsocks)$"))|.tag' "$CONFIG_FILE")
+      links+="$(print_links "$current_tag" "" | grep -E '^(vless|vmess|trojan)://' || true)"$'\n'
+    done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan)$"))|.tag' "$CONFIG_FILE")
     links=${links%$'\n'}
   fi
   [[ -n $links ]] || die "没有可生成订阅的代理分享链接。"
@@ -1698,6 +1755,8 @@ traffic_stats_configured() {
     (.stats|type)=="object" and
     .policy.system.statsInboundUplink==true and
     .policy.system.statsInboundDownlink==true and
+    .policy.levels["0"].statsUserUplink==true and
+    .policy.levels["0"].statsUserDownlink==true and
     (.api.services // [] | index("StatsService") != null)' "$CONFIG_FILE" >/dev/null 2>&1 \
     && [[ -n $(stats_api_address) ]]
 }
@@ -1720,6 +1779,10 @@ ensure_traffic_stats() {
     .policy.system=(.policy.system // {}) |
     .policy.system.statsInboundUplink=true |
     .policy.system.statsInboundDownlink=true |
+    .policy.levels=(.policy.levels // {}) |
+    .policy.levels["0"]=(.policy.levels["0"] // {}) |
+    .policy.levels["0"].statsUserUplink=true |
+    .policy.levels["0"].statsUserDownlink=true |
     if $existingApi==0 then
       .api={tag:"xrayctl-api",listen:$listen,services:["StatsService"]}
     else
@@ -1937,7 +2000,7 @@ client_menu_for_tag() {
     clear_screen
     heading "用户管理 · ${tag}"
     list_clients "$tag"
-    printf '\n1) 添加用户\n2) 重命名用户\n3) 重置用户凭据\n4) 删除用户\n0) 返回节点\n'
+    printf '\n1) 添加用户\n2) 重命名用户\n3) 更换 UUID/密码\n4) 删除用户\n0) 返回节点\n'
     read -r -p "请选择: " choice
     case $choice in
       1) run_menu_action add_client "$tag"; pause;; 2) run_menu_action rename_client "$tag"; pause;;
@@ -1995,11 +2058,11 @@ manage_inbound_menu() {
         fi
         ;;
       shadowsocks)
-        printf '1) 分享信息\n2) 修改地址/端口\n3) 查看 JSON\n4) 删除节点\n0) 返回列表\n'
+        warn "此节点使用已停止支持的 Shadowsocks，仅保留查看和删除入口。"
+        printf '1) 查看 JSON\n2) 删除节点\n0) 返回列表\n'
         read -r -p "请选择: " choice
         case $choice in
-          1) run_menu_action print_links "$tag"; pause;; 2) run_menu_action modify_inbound_basic "$tag"; pause;;
-          3) run_menu_action show_inbound "$tag"; pause;; 4) run_menu_action delete_inbound "$tag"; pause;;
+          1) run_menu_action show_inbound "$tag"; pause;; 2) run_menu_action delete_inbound "$tag"; pause;;
           0) return;; *) warn "无效选项。"; pause;;
         esac
         ;;
@@ -2210,7 +2273,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl diagnose                系统诊断
   xrayctl version
 
-支持协议: VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP
+支持协议: VLESS、VMess、Trojan、SOCKS5、HTTP
 支持传输: RAW、XHTTP、WebSocket、gRPC；支持 TLS 和 REALITY。
 EOF
 }
