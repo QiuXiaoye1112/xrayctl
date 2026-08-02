@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.0.5-alpine"
+readonly XRAYCTL_VERSION="1.0.6-alpine"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
@@ -1276,9 +1276,9 @@ print_client_traffic_row() {
   local parsed_up=0 parsed_down=0 total=0
   if ((snapshot_available)); then
     IFS=$'\t' read -r parsed_up parsed_down < <(
-      jq -r --arg label "$label" '
-        ("user>>>"+$label+">>>traffic>>>uplink") as $upName |
-        ("user>>>"+$label+">>>traffic>>>downlink") as $downName |
+      jq -r --arg client_label "$label" '
+        ("user>>>"+$client_label+">>>traffic>>>uplink") as $upName |
+        ("user>>>"+$client_label+">>>traffic>>>downlink") as $downName |
         [([.stat[]?|select(.name==$upName)|.value][0] // 0),
          ([.stat[]?|select(.name==$downName)|.value][0] // 0)] | @tsv' "$snapshot_file"
     )
@@ -1353,16 +1353,16 @@ client_label_exists() {
   local tag=$1 label=$2 protocol
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   if [[ $protocol == socks || $protocol == http ]]; then
-    jq -e --arg tag "$tag" --arg label "$label" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]?|select(.user==$label)' "$CONFIG_FILE" >/dev/null
+    jq -e --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]?|select(.user==$client_label)' "$CONFIG_FILE" >/dev/null
   else
-    jq -e --arg tag "$tag" --arg label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select(.email==$label)' "$CONFIG_FILE" >/dev/null
+    jq -e --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select(.email==$client_label)' "$CONFIG_FILE" >/dev/null
   fi
 }
 
 stats_client_label_exists() {
-  jq -e --arg label "$1" '
+  jq -e --arg client_label "$1" '
     .inbounds[]? | select(.protocol=="vless" or .protocol=="vmess" or .protocol=="trojan") |
-    .settings.clients[]? | select((.email // "")==$label)' "$CONFIG_FILE" >/dev/null
+    .settings.clients[]? | select((.email // "")==$client_label)' "$CONFIG_FILE" >/dev/null
 }
 
 prompt_client_label() {
@@ -1428,18 +1428,18 @@ delete_client() {
   [[ $assume_yes == 1 ]] || confirm "从 ${tag} 删除用户 ${label}？" N || return 0
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
-    count=$(jq --arg tag "$tag" --arg label "$label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$label)]|length' "$CONFIG_FILE")
+    count=$(jq --arg tag "$tag" --arg client_label "$label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || die "找不到用户：$label"
-    jq --arg tag "$tag" --arg label "$label" '
+    jq --arg tag "$tag" --arg client_label "$label" '
       (.inbounds[]|select(.tag==$tag)|.settings) |= (
-        ((.accounts // .users // [])|map(select(.user!=$label))) as $all |
+        ((.accounts // .users // [])|map(select(.user!=$client_label))) as $all |
         .accounts=$all | .users=$all
       ) |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else
-    count=$(jq --arg tag "$tag" --arg label "$label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)]|length' "$CONFIG_FILE")
+    count=$(jq --arg tag "$tag" --arg client_label "$label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || die "找不到用户：$label"
-    jq --arg tag "$tag" --arg label "$label" '(.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(select(.email!=$label))' "$CONFIG_FILE" >"$tmp"
+    jq --arg tag "$tag" --arg client_label "$label" '(.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(select(.email!=$client_label))' "$CONFIG_FILE" >"$tmp"
   fi
   apply_candidate "$tmp"; rm -f "$tmp"
 }
@@ -1456,15 +1456,15 @@ rotate_client_credential() {
     vless|vmess)
       generated=$(generate_uuid)
       prompt_validated_value value "新 UUID" "$generated" validate_uuid "UUID 格式无效，请重新输入。" || { rm -f "$tmp"; return 1; }
-      jq --arg tag "$tag" --arg label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
+      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
     trojan)
       prompt_secret value "新密码" "$(random_password)" || { rm -f "$tmp"; return 1; }
-      jq --arg tag "$tag" --arg label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)|.password)=$value' "$CONFIG_FILE" >"$tmp" ;;
+      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)|.password)=$value' "$CONFIG_FILE" >"$tmp" ;;
     socks|http)
       prompt_secret value "新密码" "$(random_password)" || { rm -f "$tmp"; return 1; }
-      jq --arg tag "$tag" --arg label "$label" --arg value "$value" '
+      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '
         (.inbounds[]|select(.tag==$tag)|.settings) |= (
-          ((.accounts // .users // [])|map(if .user==$label then .pass=$value else . end)) as $all |
+          ((.accounts // .users // [])|map(if .user==$client_label then .pass=$value else . end)) as $all |
           .accounts=$all | .users=$all
         ) |
         del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp" ;;
@@ -1494,7 +1494,7 @@ rename_client() {
   fi
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
-    count=$(jq --arg tag "$tag" --arg label "$old_label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$label)]|length' "$CONFIG_FILE")
+    count=$(jq --arg tag "$tag" --arg client_label "$old_label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
     jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '
       (.inbounds[]|select(.tag==$tag)|.settings) |= (
@@ -1503,7 +1503,7 @@ rename_client() {
       ) |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else
-    count=$(jq --arg tag "$tag" --arg label "$old_label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$label)]|length' "$CONFIG_FILE")
+    count=$(jq --arg tag "$tag" --arg client_label "$old_label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
     jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$old)|.email)=$new' "$CONFIG_FILE" >"$tmp"
   fi
