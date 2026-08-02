@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.21"
+readonly XRAYCTL_VERSION="1.2.22"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
 readonly JQ_VERSION="1.8.2"
@@ -2289,13 +2289,15 @@ list_outbound_overview() {
     info "还没有代理出站。"
     return 0
   fi
-  print_table_cell "序号" 6; print_table_cell "标签" 24; print_table_cell "协议" 12; print_table_cell "地址" 30; printf '认证\n'
+  print_table_cell "序号" 6; print_table_cell "标签" 16; print_table_cell "协议" 10
+  print_table_cell "地址" 32; print_table_cell "用户" 18; printf '密码\n'
   jq -r '[.outbounds[]?|select(.protocol=="socks" or .protocol=="http")] | to_entries[] |
     [.key+1,.value.tag,.value.protocol,(.value.settings.address+":"+(.value.settings.port|tostring)),
-     (if (.value.settings.user // "")=="" then "无" else .value.settings.user end)] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r number tag protocol address auth; do
-        print_table_cell "$number" 6; print_table_cell "$tag" 24; print_table_cell "$protocol" 12
-        print_table_cell "$address" 30; printf '%s\n' "$auth"
+     (if (.value.settings.user // "")=="" then "无" else .value.settings.user end),
+     (if (.value.settings.pass // "")=="" then "无" else .value.settings.pass end)] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r number tag protocol address username password; do
+        print_table_cell "$number" 6; print_table_cell "$tag" 16; print_table_cell "$protocol" 10
+        print_table_cell "$address" 32; print_table_cell "$username" 18; printf '%s\n' "$password"
       done
 }
 
