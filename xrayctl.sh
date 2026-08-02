@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.12"
+readonly XRAYCTL_VERSION="1.2.13"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
 readonly JQ_VERSION="1.8.2"
@@ -27,6 +27,7 @@ SYSTEMD_OVERRIDE_DIR="${XRAYCTL_SYSTEMD_OVERRIDE_DIR:-/etc/systemd/system/${SYST
 LOCK_FILE="${XRAYCTL_LOCK_FILE:-/run/lock/xrayctl.lock}"
 JQ_INSTALL_PATH="${XRAYCTL_JQ_INSTALL_PATH:-/usr/local/bin/jq}"
 CERT_STOPPED_SERVICE=0
+APT_IPV4_AVAILABLE_CACHE=""
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
@@ -197,26 +198,39 @@ validate_ip_literal() {
   validate_ipv4 "$1" || [[ $1 == *:* && $1 =~ ^[0-9A-Fa-f:]+$ && ${#1} -le 45 ]]
 }
 
-detect_public_ip() {
+detect_public_ipv4() {
   local response raw
-  response=$({ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 4 --max-time 8 https://api.ipify.org 2>/dev/null || true; } | tr -d '[:space:]')
+  command_exists curl || return 1
+  response=$({ curl -4 --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 3 --max-time 5 https://api.ipify.org 2>/dev/null || true; } | tr -d '[:space:]')
   if validate_ipv4 "$response"; then printf '%s' "$response"; return 0; fi
 
-  response=$({ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 4 --max-time 8 https://checkip.amazonaws.com 2>/dev/null || true; } | tr -d '[:space:]')
+  response=$({ curl -4 --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 3 --max-time 5 https://checkip.amazonaws.com 2>/dev/null || true; } | tr -d '[:space:]')
   if validate_ipv4 "$response"; then printf '%s' "$response"; return 0; fi
 
-  raw=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 4 --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+  raw=$(curl -4 --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
   response=$(awk -F= '$1=="ip" {print $2; exit}' <<<"$raw" | tr -d '[:space:]')
   if validate_ipv4 "$response"; then printf '%s' "$response"; return 0; fi
-
-  response=$({ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 4 --max-time 8 https://api64.ipify.org 2>/dev/null || true; } | tr -d '[:space:]')
-  if validate_ip_literal "$response"; then printf '%s' "$response"; return 0; fi
   return 1
 }
+
+detect_public_ipv6() {
+  local response raw
+  command_exists curl || return 1
+  response=$({ curl -6 --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 3 --max-time 5 https://api6.ipify.org 2>/dev/null || true; } | tr -d '[:space:]')
+  if validate_ip_literal "$response" && ! validate_ipv4 "$response"; then printf '%s' "$response"; return 0; fi
+
+  raw=$(curl -6 --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+  response=$(awk -F= '$1=="ip" {print $2; exit}' <<<"$raw" | tr -d '[:space:]')
+  if validate_ip_literal "$response" && ! validate_ipv4 "$response"; then printf '%s' "$response"; return 0; fi
+  return 1
+}
+
+detect_public_ip() { detect_public_ipv4 || detect_public_ipv6; }
 
 json_quote() { jq -Rn --arg value "$1" '$value'; }
 url_encode() { jq -rn --arg value "$1" '$value|@uri'; }
@@ -253,7 +267,16 @@ apt_get_guarded() {
     -o Acquire::https::Timeout=15
     -o Dpkg::Use-Pty=0
   )
-  [[ ${XRAYCTL_APT_FORCE_IPV4:-1} == 0 ]] || apt_options+=(-o Acquire::ForceIPv4=true)
+  case ${XRAYCTL_APT_FORCE_IPV4:-auto} in
+    1|true|yes) apt_options+=(-o Acquire::ForceIPv4=true) ;;
+    0|false|no) ;;
+    *)
+      if [[ -z $APT_IPV4_AVAILABLE_CACHE ]]; then
+        if detect_public_ipv4 >/dev/null; then APT_IPV4_AVAILABLE_CACHE=1; else APT_IPV4_AVAILABLE_CACHE=0; fi
+      fi
+      [[ $APT_IPV4_AVAILABLE_CACHE == 0 ]] || apt_options+=(-o Acquire::ForceIPv4=true)
+      ;;
+  esac
   if command_exists timeout; then
     timeout --foreground "${total_timeout}s" apt-get "${apt_options[@]}" "$@"
   else
@@ -694,9 +717,19 @@ prompt_port() {
 }
 
 prompt_public_host() {
-  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} value
+  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} value ipv4="" ipv6="" address_choice
   if [[ -z $default ]]; then
-    default=$(detect_public_ip || true)
+    ipv4=$(detect_public_ipv4 || true)
+    ipv6=$(detect_public_ipv6 || true)
+    if [[ -n $ipv4 && -n $ipv6 ]]; then
+      choose address_choice "选择客户端连接地址" "IPv4  ${ipv4}" "IPv6  ${ipv6}" "手动输入"
+      case $address_choice in
+        1) printf -v "$__var" '%s' "$ipv4"; return 0;;
+        2) printf -v "$__var" '%s' "$ipv6"; return 0;;
+      esac
+    elif [[ -n $ipv4 ]]; then default=$ipv4
+    elif [[ -n $ipv6 ]]; then default=$ipv6
+    fi
   fi
   while true; do
     prompt_value value "客户端连接地址" "$default"
