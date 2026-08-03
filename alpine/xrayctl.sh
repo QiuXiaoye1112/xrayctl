@@ -1076,15 +1076,13 @@ build_inbound() {
 
 add_inbound() {
   ensure_runtime_dependencies inbound-add; require_xray_installed; ensure_config
-  local inbound="" host="" public_key="" tag tmp listen_port firewall_protocol
+  local inbound="" host="" public_key="" tag tmp listen_port
   build_inbound inbound host public_key
   tag=$(jq -r '.tag' <<<"$inbound"); listen_port=$(jq -r '.port' <<<"$inbound")
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
   if apply_candidate "$tmp"; then
     meta_set_inbound "$tag" "$host" "$public_key" replace
-    firewall_protocol=$(inbound_firewall_protocol "$inbound")
-    open_firewall_for_port "$listen_port" prompt "$firewall_protocol"
     heading "入站已创建"
     show_inbound "$tag"
     print_links "$tag" "" || true
@@ -1180,7 +1178,7 @@ rename_inbound() {
 
 modify_inbound_basic() {
   ensure_runtime_dependencies inbound-modify; ensure_config
-  local tag=${1-} current listen port host tmp old_port firewall_protocol
+  local tag=${1-} current listen port host tmp old_port
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
@@ -1194,8 +1192,6 @@ modify_inbound_basic() {
   if apply_candidate "$tmp"; then
     meta_set_inbound "$tag" "$host" "" keep
     current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
-    firewall_protocol=$(inbound_firewall_protocol "$current")
-    open_firewall_for_port "$port" prompt "$firewall_protocol"
   fi
   rm -f "$tmp"
 }
@@ -1692,212 +1688,7 @@ print_all_share_links() {
   ((found == 1)) || die "没有可生成订阅链接的入站。"
 }
 
-install_firewall() {
-  ensure_system_context firewall-install
-  local manager ssh_port=${XRAYCTL_SSH_PORT:-} tool_timeout=${XRAYCTL_SYSTEM_TOOL_TIMEOUT:-20}
-  if ! has_net_admin; then
-    warn "当前 NAT/容器没有 NET_ADMIN 权限，不能管理系统防火墙；请在服务商控制台放行端口。"
-    return 0
-  fi
-  if ! command_exists ufw && ! command_exists firewall-cmd; then
-    manager=$(pkg_manager) || { error "无法识别包管理器。"; return 0; }
-    case $manager in
-      apk) run_bounded "$tool_timeout" apk add --no-cache ufw || { error "UFW 安装失败或超时。"; return 0; } ;;
-      apt)
-        if ! apt_package_index_available; then
-          DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$tool_timeout" apt_get_guarded update -y \
-            || { error "APT 软件索引更新失败或超时。"; return 0; }
-        fi
-        DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$tool_timeout" \
-          apt_get_guarded install -y --no-install-recommends ufw \
-          || { error "UFW 安装失败或超时。"; return 0; }
-        ;;
-      dnf) run_bounded "$tool_timeout" dnf install -y firewalld || { error "firewalld 安装失败或超时。"; return 0; } ;;
-      yum) run_bounded "$tool_timeout" yum install -y firewalld || { error "firewalld 安装失败或超时。"; return 0; } ;;
-      pacman) run_bounded "$tool_timeout" pacman -Sy --noconfirm ufw || { error "UFW 安装失败或超时。"; return 0; } ;;
-      zypper) run_bounded "$tool_timeout" zypper --non-interactive install firewalld || { error "firewalld 安装失败或超时。"; return 0; } ;;
-    esac
-  fi
-  if command_exists ufw; then
-    if ufw status 2>/dev/null | grep -q '^Status: active'; then info "UFW 已安装并启用。"; return; fi
-    [[ -t 0 ]] && confirm "启用 UFW？" N || return 0
-    [[ -n $ssh_port ]] || ssh_port=$(awk '{print $4}' <<<"${SSH_CONNECTION:-}" 2>/dev/null || true)
-    validate_port "${ssh_port:-}" || ssh_port=22
-    # 自动放行所有当前监听端口，避免锁死现有服务
-    local listening_ports
-    listening_ports=$(ss -lntup 2>/dev/null | awk 'NR>1{a[$5]} END{for(p in a){sub(/.*:/,"",p); print int(p)}}' | sort -nu)
-    info "检测到当前监听端口: ${listening_ports:-无}"
-    for port in $listening_ports; do
-      if validate_port "$port" 2>/dev/null && [[ $port != "$ssh_port" ]]; then
-        run_bounded 15 ufw allow "${port}/tcp" >/dev/null 2>&1 || true
-        run_bounded 15 ufw allow "${port}/udp" >/dev/null 2>&1 || true
-        info "UFW 已预放行 ${port}。"
-      fi
-    done
-    run_bounded 15 ufw allow "${ssh_port}/tcp" >/dev/null
-    if run_bounded 20 ufw --force enable >/dev/null; then
-      rc-update add ufw default >/dev/null 2>&1 || true
-      rc-service ufw start >/dev/null 2>&1 || true
-      info "UFW 已启用；SSH ${ssh_port}/tcp 已放行。";
-    else error "UFW 启用失败或超时。"; fi
-  elif command_exists firewall-cmd; then
-    if firewall-cmd --state >/dev/null 2>&1; then info "firewalld 已安装并启用。"; return; fi
-    [[ -t 0 ]] && confirm "启用 firewalld？" N || return 0
-    if rc-update add firewalld default >/dev/null 2>&1 && run_bounded 30 rc-service firewalld start; then
-      [[ -n $ssh_port ]] || ssh_port=$(awk '{print $4}' <<<"${SSH_CONNECTION:-}" 2>/dev/null || true)
-      validate_port "${ssh_port:-}" || ssh_port=22
-      firewall-cmd --permanent --add-port="${ssh_port}/tcp" >/dev/null
-      firewall-cmd --reload >/dev/null
-      info "firewalld 已启用；SSH ${ssh_port}/tcp 已放行。"
-    else error "firewalld 启用失败，当前主机可能缺少 NET_ADMIN 权限。"; fi
-  fi
-}
 
-active_firewall_backend() {
-  if command_exists ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then printf 'ufw'; return 0; fi
-  if command_exists firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then printf 'firewalld'; return 0; fi
-  return 1
-}
-
-inbound_firewall_protocol() {
-  local inbound=$1
-  if [[ $(jq -r '.protocol' <<<"$inbound") == socks && $(jq -r '.settings.udp // false' <<<"$inbound") == true ]]; then
-    printf 'both'
-  else
-    printf 'tcp'
-  fi
-}
-
-open_firewall_for_port() {
-  local port=$1 mode=${2:-force} protocol=${3:-both} backend label
-  validate_port "$port" || die "无效端口：$port"
-  backend=$(active_firewall_backend || true)
-  [[ -n $backend ]] || return 0
-  if ! has_net_admin; then warn "当前 NAT/容器没有 NET_ADMIN 权限，请在服务商控制台放行 ${port}。"; return 0; fi
-  case $protocol in tcp) label=TCP;; udp) label=UDP;; both) label=TCP/UDP;; *) die "未知防火墙协议：${protocol}";; esac
-  if [[ $mode == prompt ]] && ! confirm "是否自动放行 ${label} 端口 ${port}？" Y; then return 0; fi
-  if [[ $backend == ufw ]]; then
-    [[ $protocol == udp ]] || ufw allow "${port}/tcp" >/dev/null
-    [[ $protocol == tcp ]] || ufw allow "${port}/udp" >/dev/null
-  else
-    [[ $protocol == udp ]] || firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null
-    [[ $protocol == tcp ]] || firewall-cmd --permanent --add-port="${port}/udp" >/dev/null
-    firewall-cmd --reload >/dev/null
-  fi
-  info "${backend} 已放行 ${label} ${port}。"
-}
-
-close_firewall_for_port() {
-  local port=$1
-  validate_port "$port" || die "无效端口：$port"
-  if ! has_net_admin; then warn "当前 NAT/容器没有 NET_ADMIN 权限，无法修改系统防火墙。"; return 0; fi
-  confirm "关闭 TCP/UDP ${port} 的防火墙规则？请确认没有其他服务使用。" N || return
-  if command_exists ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
-    ufw delete allow "${port}/tcp" >/dev/null || true; ufw delete allow "${port}/udp" >/dev/null || true
-  elif command_exists firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd --permanent --remove-port="${port}/tcp" >/dev/null || true
-    firewall-cmd --permanent --remove-port="${port}/udp" >/dev/null || true; firewall-cmd --reload >/dev/null
-  else warn "未检测到启用的 UFW/firewalld。"; return; fi
-  info "防火墙规则已关闭。"
-}
-
-
-show_firewall_rules() {
-	local backend
-	backend=$(active_firewall_backend || true)
-	if [[ -z $backend ]]; then warn "未检测到启用的 UFW/firewalld。"; return 0; fi
-	echo
-	if [[ $backend == ufw ]]; then
-		heading "当前 UFW 规则"
-		ufw status numbered 2>/dev/null || ufw status 2>/dev/null
-	else
-		heading "当前 firewalld 规则"
-		firewall-cmd --list-all 2>/dev/null || true
-	fi
-	echo
-}
-delete_firewall_rule() {
-  local backend rule_lines choice line_count
-  if ! has_net_admin; then warn "当前 NAT/容器没有 NET_ADMIN 权限，无法修改系统防火墙。"; return 0; fi
-  backend=$(active_firewall_backend || true)
-  if [[ -z $backend ]]; then warn "未检测到启用的 UFW/firewalld。"; return 0; fi
-	show_firewall_rules
-  if [[ $backend == ufw ]]; then
-    rule_lines=$(ufw status numbered 2>/dev/null | grep -E '^\[[ 0-9]+\]' || true)
-    if [[ -z $rule_lines ]]; then info "UFW 当前没有编号规则。"; return 0; fi
-    echo; heading "当前 UFW 规则"
-    printf '%s\n' "$rule_lines"
-    echo
-    line_count=$(wc -l <<<"$rule_lines")
-    confirm "输入要删除的规则编号进行删除？" N || return 0
-    read -r -p "请输入规则编号（多个用空格分隔）: " choice
-    for num in $choice; do
-      if [[ $num =~ ^[0-9]+$ ]] && ((num >= 1 && num <= line_count)); then
-        run_bounded 10 ufw --force delete "$num" >/dev/null && info "UFW 规则 ${num} 已删除。" || error "UFW 规则 ${num} 删除失败。"
-      else
-        warn "跳过无效编号: ${num}"
-      fi
-    done
-  else
-    local zone
-    zone=$(firewall-cmd --get-default-zone 2>/dev/null || printf 'public')
-    heading "当前 firewalld 规则 (zone: ${zone})"
-    firewall-cmd --zone="$zone" --list-services 2>/dev/null || true
-    firewall-cmd --zone="$zone" --list-ports 2>/dev/null || true
-    echo
-    confirm "手动删除端口或服务规则？" N || return 0
-    read -r -p "输入要删除的端口号 (如 8080): " choice
-    if [[ -n $choice ]] && validate_port "$choice"; then
-      firewall-cmd --permanent --zone="$zone" --remove-port="${choice}/tcp" 2>/dev/null || true
-      firewall-cmd --permanent --zone="$zone" --remove-port="${choice}/udp" 2>/dev/null || true
-      firewall-cmd --reload >/dev/null
-      info "firewalld 端口 ${choice} 规则已删除。"
-    fi
-  fi
-}
-
-
-uninstall_firewall() {
-	local backend manager pkg
-	if ! has_net_admin; then warn "当前 NAT/容器没有 NET_ADMIN 权限，无法卸载系统防火墙。"; return 0; fi
-	backend=$(active_firewall_backend || true)
-	if [[ -z $backend ]]; then
-		warn "未检测到启用的 UFW/firewalld。"
-		if command_exists ufw; then backend=ufw;
-		elif command_exists firewall-cmd; then backend=firewalld;
-		else warn "未安装 UFW 或 firewalld。"; return 0; fi
-	fi
-	confirm "确认卸载 ${backend}？此操作会先停用防火墙并删除软件包。" N || return 0
-	manager=$(pkg_manager) || { error "无法识别包管理器。"; return 0; }
-	if [[ $backend == ufw ]]; then
-		run_bounded 10 ufw disable >/dev/null 2>&1 || true
-		run_bounded 5 rc-update del ufw default >/dev/null 2>&1 || true
-		case $manager in
-			apk) pkg=ufw ;;
-			apt) pkg=ufw ;;
-			pacman) pkg=ufw ;;
-			*)    pkg=ufw ;;
-		esac
-	else
-		run_bounded 10 rc-service firewalld stop >/dev/null 2>&1 || true
-		run_bounded 5 rc-update del firewalld default >/dev/null 2>&1 || true
-		case $manager in
-			dnf)  pkg=firewalld ;;
-			yum)  pkg=firewalld ;;
-			zypper) pkg=firewalld ;;
-			*)    pkg=firewalld ;;
-		esac
-	fi
-	case $manager in
-		apk)   run_bounded 30 apk del "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
-		apt)   DEBIAN_FRONTEND=noninteractive run_bounded 30 apt-get purge -y "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
-		dnf)   run_bounded 30 dnf remove -y "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
-		yum)   run_bounded 30 yum remove -y "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
-		pacman) run_bounded 30 pacman -Rs --noconfirm "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
-		zypper) run_bounded 30 zypper --non-interactive remove "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
-		*)     error "不支持的包管理器。" ;;
-	esac
-}
 certbot_supports_ip() {
   command_exists certbot && certbot --help all 2>/dev/null | grep -q -- '--ip-address'
 }
@@ -2049,7 +1840,6 @@ issue_certificate() {
   [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。"
   validate_email_address "$email" || die "邮箱格式无效。"
   install_certbot "$mode"
-  open_firewall_for_port 80 prompt tcp
   service_is_active && { was_active=1; rc-service "$SERVICE_NAME" stop; CERT_STOPPED_SERVICE=1; }
   local certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email")
   if [[ $mode == ip ]]; then
@@ -2936,42 +2726,6 @@ service_menu() {
   done
 }
 
-firewall_state_summary() {
-  if command_exists ufw; then
-    if ufw status 2>/dev/null | grep -q '^Status: active'; then printf 'UFW 运行中'; else printf 'UFW 未启用'; fi
-  elif command_exists firewall-cmd; then
-    if firewall-cmd --state >/dev/null 2>&1; then printf 'firewalld 运行中'; else printf 'firewalld 未启用'; fi
-  else
-    printf '未安装'
-  fi
-}
-
-manage_firewall_port() {
-  local action=$1 port
-  prompt_validated_value port "端口" "" validate_port "端口必须是 1-65535，请重新输入。"
-  ensure_system_context firewall
-  if [[ $action == open ]]; then open_firewall_for_port "$port" force; else close_firewall_for_port "$port"; fi
-}
-
-firewall_menu() {
-  local choice
-  while true; do
-    clear_screen
-    heading "防火墙"
-    printf '状态: %s\n\n' "$(firewall_state_summary)"
-    printf '1) 安装/启用\n2) 查看规则\n3) 放行端口\n4) 关闭端口\n5) 删除规则\n6) 卸载\n0) 返回\n'
-    read -r -p "请选择: " choice
-    case $choice in
-      1) run_menu_action install_firewall; pause;;
-      2) run_menu_action show_firewall_rules; pause;;
-      3) run_menu_action manage_firewall_port open; pause;;
-      4) run_menu_action manage_firewall_port close; pause;;
-      5) run_menu_action delete_firewall_rule; pause;;
-      6) run_menu_action uninstall_firewall; pause;;
-      0) return;; *) warn "无效选项。"; pause;;
-    esac
-  done
-}
 
 bbr_state_summary() {
   if [[ -r /proc/sys/net/ipv4/tcp_congestion_control ]]; then
@@ -2986,12 +2740,12 @@ system_menu() {
   while true; do
     clear_screen
     heading "系统工具"
-    printf 'BBR: %s  |  防火墙: %s\n\n' "$(bbr_state_summary)" "$(firewall_state_summary)"
-    printf '1) 防火墙管理\n2) BBR 管理\n3) 系统诊断\n4) 修复快捷命令\n0) 返回\n'
+    printf 'BBR: %s\n\n' "$(bbr_state_summary)"
+    printf '1) BBR 管理\n2) 系统诊断\n3) 修复快捷命令\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) firewall_menu;; 2) run_menu_action manage_bbr; pause;; 3) run_menu_action system_diagnostics; pause;;
-      4) run_menu_action repair_quick_command; pause;;
+      1) run_menu_action manage_bbr; pause;; 2) run_menu_action system_diagnostics; pause;;
+      3) run_menu_action repair_quick_command; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -3064,7 +2818,6 @@ xrayctl - Xray Alpine Linux 管理脚本
   xrayctl cert list
   xrayctl cert issue [域名] [邮箱]
   xrayctl cert import [标识] [证书] [私钥]
-  xrayctl firewall install|open|close [端口]
   xrayctl bbr                     管理 BBR（交互式开启/关闭）
   xrayctl diagnose                系统诊断
   xrayctl version
@@ -3110,8 +2863,7 @@ dispatch() {
     backup) backup_all "${1-}";; restore) restore_backup "${1-}";;
     cert)
       case ${1:-list} in list) list_certificates;; issue) issue_certificate "${2-}" "${3-}";; import) import_certificate "${2-}" "${3-}" "${4-}";; delete|remove) delete_managed_certificate "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";; renew) ensure_runtime_dependencies cert-renew; install_certbot; certbot renew;; *) die "未知 cert 子命令。";; esac;;
-    firewall)
-      case ${1-} in install) install_firewall;; open) ensure_runtime_dependencies firewall; open_firewall_for_port "${2:?请提供端口}" force;; close) ensure_runtime_dependencies firewall; close_firewall_for_port "${2:?请提供端口}";; *) die "用法: xrayctl firewall install|open|close [端口]";; esac;;
+
     bbr) manage_bbr;; diagnose|doctor) system_diagnostics;; quick-command) ensure_runtime_dependencies quick-command; install_quick_command;;
     *) error "未知命令：$command"; show_help; return 2;;
   esac
