@@ -1,0 +1,91 @@
+name: Agent certbot comment runner
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  patch:
+    if: github.event.issue.pull_request && github.event.issue.number == 32 && github.event.comment.user.login == 'QiuXiaoye1112' && github.event.comment.body == '/agent-fix-certbot-account'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-certbot-account
+          fetch-depth: 0
+      - name: Patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          helper = r'''select_certbot_account() {
+            local __var=$1 accounts_dir="/etc/letsencrypt/accounts/acme-v02.api.letsencrypt.org/directory"
+            local configured=${XRAYCTL_CERTBOT_ACCOUNT:-} path account_id contact answer
+            local ids=() labels=()
+            if [[ -n $configured ]]; then
+              [[ -d "${accounts_dir}/${configured}" ]] || { warn "指定的 Let's Encrypt 账户不存在：${configured}"; return 1; }
+              printf -v "$__var" '%s' "$configured"
+              return 0
+            fi
+            if [[ -d $accounts_dir ]]; then
+              for path in "$accounts_dir"/*; do
+                [[ -d $path ]] || continue
+                account_id=$(basename "$path")
+                ids+=("$account_id")
+                contact=$(jq -r '.body.contact[0] // .contact[0] // empty' "$path/regr.json" 2>/dev/null || true)
+                contact=${contact#mailto:}
+                labels+=("${contact:-未设置邮箱} (${account_id:0:8})")
+              done
+            fi
+            case ${#ids[@]} in
+              0) printf -v "$__var" '%s' "" ;;
+              1)
+                printf -v "$__var" '%s' "${ids[0]}"
+                info "使用已有 Let's Encrypt 账户：${labels[0]}"
+                ;;
+              *)
+                if [[ ! -t 0 ]]; then
+                  warn "检测到多个 Let's Encrypt 账户，非交互模式无法自动选择。"
+                  warn "请设置 XRAYCTL_CERTBOT_ACCOUNT=<完整账户ID> 后重试。"
+                  return 1
+                fi
+                choose answer "检测到多个 Let's Encrypt 账户，请选择" "${labels[@]}"
+                printf -v "$__var" '%s' "${ids[$((answer-1))]}"
+                info "使用 Let's Encrypt 账户：${labels[$((answer-1))]}"
+                ;;
+            esac
+          }'''
+          for p in (Path('xrayctl.sh'), Path('alpine/xrayctl.sh')):
+            t=p.read_text()
+            if 'select_certbot_account() {' not in t:
+              t=t.replace('\nissue_certificate() {\n','\n'+helper+'\n\nissue_certificate() {\n',1)
+            old='local domain=${1-} email=${2-} was_active=0 paths cert_path default_domain="" mode=domain'
+            new='local domain=${1-} email=${2-} was_active=0 paths cert_path default_domain="" mode=domain account_id=""'
+            if old in t: t=t.replace(old,new,1)
+            old='local certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email")'
+            new='''local certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email")
+  select_certbot_account account_id || die "无法确定 Let's Encrypt 账户。"
+  [[ -z $account_id ]] || certbot_args+=(--account "$account_id")'''
+            if old in t: t=t.replace(old,new,1)
+            t=t.replace('die "证书签发失败；确认 ${domain} 的 TCP 80 可从公网访问。"','die "证书签发失败。请查看上方 Certbot 输出；若为 HTTP-01 验证失败，再检查 ${domain} 的 TCP 80 与 DNS/IP。"',1)
+            p.write_text(t)
+          Path('.agent-certbot-account-trigger').unlink(missing_ok=True)
+          PY
+      - name: Validate
+        run: |
+          bash -n xrayctl.sh
+          bash -n alpine/xrayctl.sh
+          grep -F 'certbot_args+=(--account "$account_id")' xrayctl.sh
+          grep -F 'certbot_args+=(--account "$account_id")' alpine/xrayctl.sh
+      - name: Commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A xrayctl.sh alpine/xrayctl.sh .agent-certbot-account-trigger
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix certbot multi-account selection'
+          git push origin HEAD:agent/fix-certbot-account
