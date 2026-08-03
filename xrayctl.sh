@@ -2212,7 +2212,7 @@ list_outbound_overview() {
       | while IFS=$'\t' read -r number tag outbound; do
           local display="$outbound"
           if [[ $outbound == direct ]]; then
-            display="系统默认"
+            display="direct"
           elif [[ $outbound =~ ^local- ]]; then
             local ip; ip=$(jq -r --arg tag "$outbound" '.outbounds[]?|select(.tag==$tag)|.sendThrough // empty' "$CONFIG_FILE" 2>/dev/null || true)
             display="${ip:-$outbound}"
