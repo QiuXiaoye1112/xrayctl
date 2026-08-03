@@ -26,6 +26,11 @@ jobs:
           from pathlib import Path
           import re
 
+          marker = Path('.agent-state-safety-trigger')
+          if not marker.exists():
+              print('state-safety patch already applied')
+              raise SystemExit(0)
+
           paths = [Path('xrayctl.sh'), Path('alpine/xrayctl.sh')]
 
           def replace_once(text, old, new, label, path):
@@ -139,7 +144,7 @@ jobs:
 
               path.write_text(text)
 
-          Path('.agent-state-safety-trigger').unlink(missing_ok=True)
+          marker.unlink()
           PY
 
       - name: Validate
@@ -160,6 +165,9 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A xrayctl.sh alpine/xrayctl.sh .agent-state-safety-trigger
-          git diff --cached --quiet && { echo 'No changes staged'; exit 1; }
+          if git diff --cached --quiet; then
+            echo 'No changes staged; patch already applied'
+            exit 0
+          fi
           git commit -m 'fix state safety and share metadata'
           git push origin HEAD:agent/fix-state-safety
