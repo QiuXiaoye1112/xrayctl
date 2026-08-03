@@ -199,7 +199,11 @@ print_table_cell_clipped() {
 run_menu_action() {
   local action_status
   set +e
-  ( set -Eeuo pipefail; "$@" )
+  (
+    set -Eeuo pipefail
+    trap cleanup_on_exit EXIT
+    "$@"
+  )
   action_status=$?
   set -e
   if ((action_status != 0)); then
@@ -537,13 +541,11 @@ apply_candidate() {
 temp_file() { mktemp "${TMPDIR:-/tmp}/xrayctl.XXXXXX"; }
 
 meta_set_inbound() {
-  local tag=$1 host=$2 public_key=${3-} key_mode=${4:-keep} tmp
+  local tag=$1 host=$2 tmp
   init_meta; tmp=$(temp_file)
-  jq --arg tag "$tag" --arg host "$host" --arg publicKey "$public_key" --arg keyMode "$key_mode" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+  jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now}) |
-     if $publicKey != "" then .inbounds[$tag].realityPublicKey=$publicKey
-     elif $keyMode == "replace" then del(.inbounds[$tag].realityPublicKey)
-     else . end' \
+     del(.inbounds[$tag].realityPublicKey)' \
     "$META_FILE" >"$tmp"
   install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
 }
@@ -1550,13 +1552,10 @@ public_host_for_tag() {
 
 reality_public_key() {
   local tag=$1 private output public
-  public=$(jq -r --arg tag "$tag" '.inbounds[$tag].realityPublicKey // empty' "$META_FILE" 2>/dev/null || true)
-  if [[ -z $public ]]; then
-    private=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE")
-    [[ -n $private ]] || return 1
-    output=$("$XRAY_BIN" x25519 -i "$private" 2>/dev/null)
-    public=$(awk -F': *' 'tolower($1) ~ /(public|password)/ {print $2; exit}' <<<"$output")
-  fi
+  private=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE")
+  [[ -n $private ]] || return 1
+  output=$("$XRAY_BIN" x25519 -i "$private" 2>/dev/null) || return 1
+  public=$(awk -F': *' 'tolower($1) ~ /(public|password)/ {print $2; exit}' <<<"$output")
   [[ -n $public ]] || return 1
   printf '%s' "$public"
 }
@@ -1606,7 +1605,7 @@ link_query_for_stream() {
 
 print_links() {
   ensure_config; init_meta
-  local tag=${1-} filter=${2-} protocol host uri_host port query label id password method vmess_net payload link
+  local tag=${1-} filter=${2-} protocol host uri_host port query label id password method vmess_net vmess_sni payload link
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
@@ -1627,13 +1626,16 @@ print_links() {
     vmess)
       method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.method // "raw"' "$CONFIG_FILE")
       case $method in raw) vmess_net=tcp;; websocket) vmess_net=ws;; *) vmess_net=$method;; esac
+      vmess_sni=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.tlsSettings.serverName // empty' "$CONFIG_FILE")
+      [[ -n $vmess_sni ]] || vmess_sni=$host
       while IFS=$'\t' read -r label id; do
         [[ -z $filter || $label == "$filter" ]] || continue
         payload=$(jq -nc --arg ps "${tag}-${label}" --arg add "$host" --arg port "$port" --arg id "$id" --arg net "$vmess_net" \
           --arg type "none" --arg host "$([[ $method == websocket ]] && printf '%s' "$host" || true)" \
           --arg path "$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.streamSettings.wsSettings.path // .streamSettings.xhttpSettings.path // .streamSettings.grpcSettings.serviceName // "")' "$CONFIG_FILE")" \
           --arg tls "$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|if .streamSettings.security=="tls" then "tls" elif .streamSettings.security=="reality" then "reality" else "" end' "$CONFIG_FILE")" \
-          '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:$net,type:$type,host:$host,path:$path,tls:$tls,sni:$add,alpn:""}')
+          --arg sni "$vmess_sni" \
+          '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:$net,type:$type,host:$host,path:$path,tls:$tls,sni:$sni,alpn:""}')
         link="vmess://$(printf '%s' "$payload" | base64_nowrap)"
         print_share_entry "$label" "链接" "$link"
       done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|[.email,.id]|@tsv' "$CONFIG_FILE")
@@ -2101,7 +2103,7 @@ backup_all() {
 
 restore_backup() {
   ensure_runtime_dependencies restore; ensure_config
-  local archive=${1-} temp extract_config current_backup
+  local archive=${1-} temp extract_config snapshot had_meta=0 had_certs=0
   [[ -n $archive ]] || prompt_value archive "备份文件路径"
   [[ -r $archive ]] || die "无法读取备份：$archive"
   tar -tzf "$archive" >/dev/null || die "不是有效的 tar.gz 备份。"
@@ -2116,14 +2118,34 @@ restore_backup() {
   [[ -f "$temp/$extract_config" ]] || { rm -rf "$temp"; die "备份配置不是普通文件。"; }
   validate_candidate "$temp/$extract_config" || { rm -rf "$temp"; die "备份配置验证失败。"; }
   confirm "恢复会覆盖当前配置和托管证书，继续吗？" N || { rm -rf "$temp"; return; }
-  current_backup=$(backup_config_quiet)
+
+  backup_config_quiet >/dev/null || true
+  snapshot="$temp/.current"
+  mkdir -p "$snapshot"
+  cp -a "$CONFIG_FILE" "$snapshot/config.json"
+  if [[ -f $META_FILE ]]; then cp -a "$META_FILE" "$snapshot/meta.json"; had_meta=1; fi
+  if [[ -d $CERT_DIR ]]; then cp -a "$CERT_DIR" "$snapshot/certs"; had_certs=1; fi
+
   cp -a "$temp/$extract_config" "$CONFIG_FILE"
-  [[ ! -f "$temp/${META_FILE#/}" ]] || cp -a "$temp/${META_FILE#/}" "$META_FILE"
-  if [[ -d "$temp/${CERT_DIR#/}" ]]; then setup_certificate_access; cp -a "$temp/${CERT_DIR#/}/." "$CERT_DIR/"; fi
+  if [[ -f "$temp/${META_FILE#/}" ]]; then cp -a "$temp/${META_FILE#/}" "$META_FILE"; else rm -f "$META_FILE"; fi
+  rm -rf "$CERT_DIR"
+  setup_certificate_access
+  if [[ -d "$temp/${CERT_DIR#/}" ]]; then cp -a "$temp/${CERT_DIR#/}/." "$CERT_DIR/"; fi
+  init_meta
   setup_runtime_access
+
   if ! restart_service; then
-    install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$current_backup" "$CONFIG_FILE"
-    restart_service || true; rm -rf "$temp"; die "恢复后服务失败，已回滚配置。"
+    error "恢复后服务失败，正在回滚配置、元数据和证书。"
+    cp -a "$snapshot/config.json" "$CONFIG_FILE"
+    if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE"; else rm -f "$META_FILE"; fi
+    rm -rf "$CERT_DIR"
+    setup_certificate_access
+    if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/"; fi
+    init_meta
+    setup_runtime_access
+    restart_service || true
+    rm -rf "$temp"
+    die "恢复后服务失败，已回滚配置、元数据和证书。"
   fi
   rm -rf "$temp"; info "备份已恢复。"
 }
