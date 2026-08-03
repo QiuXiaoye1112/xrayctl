@@ -1025,7 +1025,7 @@ build_inbound() {
             ip:"0.0.0.0"
           }}')
       else
-        [[ $listen == 127.0.0.1 || $listen == ::1 ]] || die "公网监听的无认证 SOCKS5 不允许创建，请设置用户名密码或改为 127.0.0.1。"
+        [[ $listen == 127.0.0.1 || $listen == ::1 ]] || warn "公网监听的无认证 SOCKS5 风险极高。"
         inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
           '{tag:$tag,listen:$listen,port:$port,protocol:"socks",settings:{auth:"noauth",udp:true,ip:"0.0.0.0"}}')
       fi
@@ -1041,7 +1041,7 @@ build_inbound() {
             allowTransparent:false
           }}')
       else
-        [[ $listen == 127.0.0.1 || $listen == ::1 ]] || die "公网监听的无认证 HTTP 代理不允许创建，请设置用户名密码或改为 127.0.0.1。"
+        [[ $listen == 127.0.0.1 || $listen == ::1 ]] || warn "公网监听的无认证 HTTP 代理风险极高。"
         inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
           '{tag:$tag,listen:$listen,port:$port,protocol:"http",settings:{allowTransparent:false}}')
       fi
