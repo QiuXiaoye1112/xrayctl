@@ -2210,7 +2210,14 @@ list_outbound_overview() {
       (.key+1) as $number | .value.tag as $tag |
       [$number,$tag,([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // "direct")] | @tsv' "$CONFIG_FILE" \
       | while IFS=$'\t' read -r number tag outbound; do
-          print_table_cell "$number" 6; print_table_cell "$tag" 28; printf '%s\n' "$outbound"
+          local display="$outbound"
+          if [[ $outbound == direct ]]; then
+            display="系统默认"
+          elif [[ $outbound =~ ^local- ]]; then
+            local ip; ip=$(jq -r --arg tag "$outbound" '.outbounds[]?|select(.tag==$tag)|.sendThrough // empty' "$CONFIG_FILE" 2>/dev/null || true)
+            display="${ip:-$outbound}"
+          fi
+          print_table_cell "$number" 6; print_table_cell "$tag" 28; printf '%s\n' "$display"
         done
   fi
 
@@ -2241,17 +2248,6 @@ list_outbound_overview() {
     info "还没有代理出站。"
   fi
 
-  heading "本地出口"
-  if jq -e '.outbounds[]?|select(.protocol=="freedom" and (.sendThrough // "")!="")' "$CONFIG_FILE" >/dev/null; then
-    printf '%-4s  %-24s  %-18s\n' "序号" "标签" "IP"
-    local count=0
-    while IFS=$'\t' read -r tag ip; do
-      count=$((count+1))
-      printf '%-4s  %-24s  %-18s\n' "$count" "$tag" "$ip"
-    done < <(jq -r '.outbounds[]?|select(.protocol=="freedom" and (.sendThrough // "")!="")|[.tag,.sendThrough]|@tsv' "$CONFIG_FILE")
-  else
-    info "还没有本地出口。"
-  fi
   printf '\n'
 }
 
