@@ -261,7 +261,7 @@ detect_local_ips() {
       [[ $iface =~ ^(docker|br-|veth|virbr|lo|lxc|cali|flannel|cilium) ]] && continue
       validate_ipv4 "$ip" || continue
       [[ $ip =~ ^127\. ]] && continue
-      printf '%s (%s · IPv4)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
+      printf '%s (IPv4)\t%s\t%s\n' "$ip" "$ip" "$iface"
     done < <(ip -o -4 addr show 2>/dev/null)
     while IFS= read -r line; do
       iface=$(awk '{print $2}' <<<"$line")
@@ -269,7 +269,7 @@ detect_local_ips() {
       ip=${ip%%%*}
       [[ $iface =~ ^(docker|br-|veth|virbr|lo|lxc|cali|flannel|cilium) ]] && continue
       [[ -z $ip || $ip == ::1 || $ip == fe80:* ]] && continue
-      printf '%s (%s · IPv6)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
+      printf '%s (IPv6)\t%s\t%s\n' "$ip" "$ip" "$iface"
     done < <(ip -o -6 addr show 2>/dev/null)
   elif command_exists ifconfig; then
     while IFS= read -r line; do
@@ -277,14 +277,14 @@ detect_local_ips() {
       ip=$(awk '{print $2}' <<<"$line")
       validate_ipv4 "$ip" || continue
       [[ $ip =~ ^127\. ]] && continue
-      printf '%s (%s · IPv4)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
+      printf '%s (IPv4)\t%s\t%s\n' "$ip" "$ip" "$iface"
     done < <(ifconfig 2>/dev/null | grep 'inet ' | grep -v '127\.')
     while IFS= read -r line; do
       iface=$(awk '{print $1}' <<<"$line" | sed 's/:$//')
       ip=$(awk '{print $2}' <<<"$line")
       ip=${ip%%%*}
       [[ -z $ip || $ip == ::1 || $ip == fe80:* ]] && continue
-      printf '%s (%s · IPv6)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
+      printf '%s (IPv6)\t%s\t%s\n' "$ip" "$ip" "$iface"
     done < <(ifconfig 2>/dev/null | grep 'inet6 ' | grep -v '::1\|fe80:')
   fi
 }
@@ -2243,12 +2243,11 @@ list_outbound_overview() {
 
   heading "本地出口"
   if jq -e '.outbounds[]?|select(.protocol=="freedom" and (.sendThrough // "")!="")' "$CONFIG_FILE" >/dev/null; then
-    printf '%-4s  %-24s  %-18s  %s\n' "序号" "标签" "IP" "网卡"
+    printf '%-4s  %-24s  %-18s\n' "序号" "标签" "IP"
     local count=0
     while IFS=$'\t' read -r tag ip; do
       ((count++))
-      local iface; iface=$(ip -o addr show 2>/dev/null | grep -F "$ip" | awk '{print $2}' | head -1 || printf '-')
-      printf '%-4s  %-24s  %-18s  %s\n' "$count" "$tag" "$ip" "$iface"
+      printf '%-4s  %-24s  %-18s\n' "$count" "$tag" "$ip"
     done < <(jq -r '.outbounds[]?|select(.protocol=="freedom" and (.sendThrough // "")!="")|[.tag,.sendThrough]|@tsv' "$CONFIG_FILE")
   else
     info "还没有本地出口。"
