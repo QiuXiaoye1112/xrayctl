@@ -2,7 +2,7 @@ name: Agent certbot source fix
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize]
+    types: [opened, synchronize]
     branches: [main]
 
 permissions:
@@ -11,13 +11,13 @@ permissions:
 
 jobs:
   patch:
-    if: github.event.pull_request.number == 32 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/fix-certbot-account'
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/fix-certbot-account-direct'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fix branch
         uses: actions/checkout@v4
         with:
-          ref: agent/fix-certbot-account
+          ref: agent/fix-certbot-account-direct
           fetch-depth: 0
 
       - name: Modify source
@@ -49,9 +49,7 @@ jobs:
             fi
 
             case ${#ids[@]} in
-              0)
-                printf -v "$__var" '%s' ""
-                ;;
+              0) printf -v "$__var" '%s' "" ;;
               1)
                 printf -v "$__var" '%s' "${ids[0]}"
                 info "使用已有 Let's Encrypt 账户：${labels[0]}"
@@ -71,7 +69,6 @@ jobs:
 
           for path in (Path('xrayctl.sh'), Path('alpine/xrayctl.sh')):
               text = path.read_text()
-
               marker = '\nissue_certificate() {\n'
               if 'select_certbot_account() {' not in text:
                   if text.count(marker) != 1:
@@ -113,8 +110,6 @@ jobs:
           grep -F 'select_certbot_account() {' alpine/xrayctl.sh
           grep -F 'certbot_args+=(--account "$account_id")' xrayctl.sh
           grep -F 'certbot_args+=(--account "$account_id")' alpine/xrayctl.sh
-          grep -F 'XRAYCTL_CERTBOT_ACCOUNT' xrayctl.sh
-          grep -F 'XRAYCTL_CERTBOT_ACCOUNT' alpine/xrayctl.sh
 
       - name: Commit source fix
         shell: bash
@@ -124,4 +119,4 @@ jobs:
           git add -A xrayctl.sh alpine/xrayctl.sh .agent-certbot-account-trigger
           git diff --cached --quiet && exit 0
           git commit -m 'fix certbot multi-account selection'
-          git push origin HEAD:agent/fix-certbot-account
+          git push origin HEAD:agent/fix-certbot-account-direct
