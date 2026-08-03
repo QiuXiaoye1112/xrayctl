@@ -307,7 +307,7 @@ _ensure_freedom_outbound() {
   jq --arg tag "$tag" --arg ip "$ip" \
     '.outbounds += [{tag:$tag,protocol:"freedom",sendThrough:$ip,settings:{domainStrategy:"UseIP"}}]' \
     "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then
+  if apply_candidate "$tmp" >&2; then
     printf '%s' "$tag"
   else
     rm -f "$tmp"
