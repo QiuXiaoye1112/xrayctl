@@ -2304,7 +2304,7 @@ list_outbound_overview() {
     printf '%-4s  %-24s  %-18s\n' "序号" "标签" "IP"
     local count=0
     while IFS=$'\t' read -r tag ip; do
-      ((count++))
+      count=$((count+1))
       printf '%-4s  %-24s  %-18s\n' "$count" "$tag" "$ip"
     done < <(jq -r '.outbounds[]?|select(.protocol=="freedom" and (.sendThrough // "")!="")|[.tag,.sendThrough]|@tsv' "$CONFIG_FILE")
   else
