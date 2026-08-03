@@ -257,6 +257,67 @@ detect_public_ipv6() {
 
 detect_public_ip() { detect_public_ipv4 || detect_public_ipv6; }
 
+detect_local_ips() {
+  local iface ip line
+  if command_exists ip; then
+    while IFS= read -r line; do
+      ip=$(awk '{print $2}' <<<"$line"); ip=${ip%/*}
+      iface=$(awk '{print $NF}' <<<"$line")
+      if validate_ipv4 "$ip" && [[ ! $ip =~ ^127\. ]]; then
+        [[ $iface =~ ^(docker|br-|veth|virbr|lo|lxc|cali|flannel|cilium) ]] && continue
+        printf '%s (%s · IPv4)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
+      fi
+    done < <(ip -4 addr show 2>/dev/null | grep 'inet ')
+    while IFS= read -r line; do
+      ip=$(awk '{print $2}' <<<"$line"); ip=${ip%/*}
+      iface=$(awk '{print $NF}' <<<"$line")
+      if [[ -n $ip && $ip != ::1 && $ip != fe80:* ]]; then
+        [[ $iface =~ ^(docker|br-|veth|virbr|lo|lxc|cali|flannel|cilium) ]] && continue
+        ip=${ip%%%*}
+        printf '%s (%s · IPv6)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
+      fi
+    done < <(ip -6 addr show 2>/dev/null | grep 'inet6 ')
+  elif command_exists ifconfig; then
+    while IFS= read -r line; do
+      ip=$(awk '{print $2}' <<<"$line")
+      if validate_ipv4 "$ip" && [[ ! $ip =~ ^127\. ]]; then
+        iface=$(awk '{print $NF}' <<<"$line")
+        printf '%s (%s · IPv4)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
+      fi
+    done < <(ifconfig 2>/dev/null | grep 'inet ' | grep -v '127\.')
+    while IFS= read -r line; do
+      ip=$(awk '{print $2}' <<<"$line")
+      if [[ -n $ip && $ip != ::1 && $ip != fe80:* ]]; then
+        iface=$(awk '{print $NF}' <<<"$line")
+        ip=${ip%%%*}
+        printf '%s (%s · IPv6)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
+      fi
+    done < <(ifconfig 2>/dev/null | grep 'inet6 ' | grep -v '::1\|fe80:')
+  fi
+}
+
+_freedom_tag_for_ip() {
+  local ip=$1
+  printf 'local-%s' "$(printf '%s' "$ip" | tr ':.' '--')"
+}
+
+_ensure_freedom_outbound() {
+  local ip=$1 tag tmp
+  tag=$(_freedom_tag_for_ip "$ip")
+  outbound_exists "$tag" && { printf '%s' "$tag"; return 0; }
+  tmp=$(temp_file)
+  jq --arg tag "$tag" --arg ip "$ip" \
+    '.outbounds += [{tag:$tag,protocol:"freedom",sendThrough:$ip,settings:{domainStrategy:"UseIP"}}]' \
+    "$CONFIG_FILE" >"$tmp"
+  if apply_candidate "$tmp"; then
+    printf '%s' "$tag"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
 json_quote() { jq -Rn --arg value "$1" '$value'; }
 url_encode() { jq -rn --arg value "$1" '$value|@uri'; }
 base64_nowrap() { base64 | tr -d '\n'; }
@@ -2213,32 +2274,46 @@ list_outbound_overview() {
         done
   fi
 
-  heading "SOCKS5 / HTTP 出站"
-  if ! jq -e '.outbounds[]?|select(.protocol=="socks" or .protocol=="http")' "$CONFIG_FILE" >/dev/null; then
+  heading "代理出站"
+  if jq -e '.outbounds[]?|select(.protocol=="socks" or .protocol=="http")' "$CONFIG_FILE" >/dev/null; then
+    rows=$(jq -r '[.outbounds[]?|select(.protocol=="socks" or .protocol=="http")] | to_entries[] |
+      [.key+1,.value.tag,.value.protocol,
+       ((if (.value.settings.address|contains(":")) then "["+.value.settings.address+"]" else .value.settings.address end)+":"+(.value.settings.port|tostring)),
+       (if (.value.settings.user // "")=="" then "无" else .value.settings.user end),
+       (if (.value.settings.pass // "")=="" then "无" else .value.settings.pass end)] | @tsv' "$CONFIG_FILE")
+    while IFS=$'\t' read -r number tag protocol address username password; do
+      display_width width "$number"; if ((width > number_width)); then number_width=$width; fi
+      display_width width "$tag"; if ((width > tag_width)); then tag_width=$width; fi
+      display_width width "$protocol"; if ((width > protocol_width)); then protocol_width=$width; fi
+      display_width width "$address"; if ((width > address_width)); then address_width=$width; fi
+      display_width width "$username"; if ((width > username_width)); then username_width=$width; fi
+    done <<<"$rows"
+    ((number_width+=2, tag_width+=2, protocol_width+=2, address_width+=2, username_width+=2))
+    print_table_cell "序号" "$number_width"; printf '| '; print_table_cell "标签" "$tag_width"; printf '| '
+    print_table_cell "协议" "$protocol_width"; printf '| '; print_table_cell "地址" "$address_width"; printf '| '
+    print_table_cell "用户" "$username_width"; printf '| 密码\n'
+    while IFS=$'\t' read -r number tag protocol address username password; do
+      print_table_cell "$number" "$number_width"; printf '| '; print_table_cell "$tag" "$tag_width"; printf '| '
+      print_table_cell "$protocol" "$protocol_width"; printf '| '; print_table_cell "$address" "$address_width"; printf '| '
+      print_table_cell "$username" "$username_width"; printf '| %s\n' "$password"
+    done <<<"$rows"
+  else
     info "还没有代理出站。"
-    return 0
   fi
-  rows=$(jq -r '[.outbounds[]?|select(.protocol=="socks" or .protocol=="http")] | to_entries[] |
-    [.key+1,.value.tag,.value.protocol,
-     ((if (.value.settings.address|contains(":")) then "["+.value.settings.address+"]" else .value.settings.address end)+":"+(.value.settings.port|tostring)),
-     (if (.value.settings.user // "")=="" then "无" else .value.settings.user end),
-     (if (.value.settings.pass // "")=="" then "无" else .value.settings.pass end)] | @tsv' "$CONFIG_FILE")
-  while IFS=$'\t' read -r number tag protocol address username password; do
-    display_width width "$number"; if ((width > number_width)); then number_width=$width; fi
-    display_width width "$tag"; if ((width > tag_width)); then tag_width=$width; fi
-    display_width width "$protocol"; if ((width > protocol_width)); then protocol_width=$width; fi
-    display_width width "$address"; if ((width > address_width)); then address_width=$width; fi
-    display_width width "$username"; if ((width > username_width)); then username_width=$width; fi
-  done <<<"$rows"
-  ((number_width+=2, tag_width+=2, protocol_width+=2, address_width+=2, username_width+=2))
-  print_table_cell "序号" "$number_width"; printf '| '; print_table_cell "标签" "$tag_width"; printf '| '
-  print_table_cell "协议" "$protocol_width"; printf '| '; print_table_cell "地址" "$address_width"; printf '| '
-  print_table_cell "用户" "$username_width"; printf '| 密码\n'
-  while IFS=$'\t' read -r number tag protocol address username password; do
-    print_table_cell "$number" "$number_width"; printf '| '; print_table_cell "$tag" "$tag_width"; printf '| '
-    print_table_cell "$protocol" "$protocol_width"; printf '| '; print_table_cell "$address" "$address_width"; printf '| '
-    print_table_cell "$username" "$username_width"; printf '| %s\n' "$password"
-  done <<<"$rows"
+
+  heading "本地出口"
+  if jq -e '.outbounds[]?|select(.protocol=="freedom" and (.sendThrough // "")!="")' "$CONFIG_FILE" >/dev/null; then
+    printf '%-4s  %-24s  %-18s  %s\n' "序号" "标签" "IP" "网卡"
+    local count=0
+    while IFS=$'\t' read -r tag ip; do
+      ((count++))
+      local iface; iface=$(ip -o addr show 2>/dev/null | grep -F "$ip" | awk '{print $2}' | head -1 || printf '-')
+      printf '%-4s  %-24s  %-18s  %s\n' "$count" "$tag" "$ip" "$iface"
+    done < <(jq -r '.outbounds[]?|select(.protocol=="freedom" and (.sendThrough // "")!="")|[.tag,.sendThrough]|@tsv' "$CONFIG_FILE")
+  else
+    info "还没有本地出口。"
+  fi
+  printf '\n'
 }
 
 prompt_outbound_tag() {
@@ -2279,14 +2354,43 @@ add_outbound() {
 
 select_outbound() {
   local __var=$1 include_direct=${2:-0} candidate_tag answer
-  local tags=()
+  local tags=() local_ips=() local_ip_tags=()
   ((include_direct == 0)) || tags+=("direct")
   while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || tags+=("$candidate_tag"); done < <(
-    jq -r '.outbounds[]?|select(.protocol=="socks" or .protocol=="http")|.tag' "$CONFIG_FILE"
+    jq -r '.outbounds[]?|select(.protocol=="socks" or .protocol=="http" or .protocol=="freedom")|.tag' "$CONFIG_FILE"
   )
+  while IFS=$'\t' read -r label ip iface; do
+    local tag; tag=$(_freedom_tag_for_ip "$ip")
+    local_ip_tags+=("$tag")
+    local found=0
+    for t in "${tags[@]}"; do [[ $t == "$tag" ]] && { found=1; break; }; done
+    if ((!found)); then tags+=("$tag"); fi
+    local_ips+=("$label")
+  done < <(ensure_config 2>/dev/null || true; detect_local_ips 2>/dev/null)
   ((${#tags[@]} > 0)) || { warn "没有可选出站。"; return 1; }
-  choose answer "选择出站" "${tags[@]}"
-  printf -v "$__var" '%s' "${tags[$((answer-1))]}"
+  local display_labels=()
+  for t in "${tags[@]}"; do
+    if [[ $t == direct ]]; then
+      display_labels+=("direct (系统默认)")
+    elif [[ $t =~ ^local- ]]; then
+      local dlabel="" found=0 i
+      for ((i=0; i<${#local_ip_tags[@]}; i++)); do
+        [[ ${local_ip_tags[$i]} == "$t" ]] && { dlabel="${local_ips[$i]}"; found=1; break; }
+      done
+      if ((found)); then display_labels+=("${dlabel}"); else display_labels+=("$t (本地)"); fi
+    else
+      local proto; proto=$(jq -r --arg tag "$t" '.outbounds[]?|select(.tag==$tag)|.protocol' "$CONFIG_FILE" 2>/dev/null || printf '?')
+      local addr; addr=$(jq -r --arg tag "$t" '.outbounds[]?|select(.tag==$tag)|"\(.settings.address // "?"):\(.settings.port // "?")"' "$CONFIG_FILE" 2>/dev/null || printf '?:?')
+      display_labels+=("$t ($proto · $addr)")
+    fi
+  done
+  choose answer "选择出站" "${display_labels[@]}"
+  local chosen="${tags[$((answer-1))]}"
+  if [[ $chosen =~ ^local- ]]; then
+    local ip; ip=$(printf '%s' "$chosen" | sed 's/^local-//; s/--/:/g; s/-/./g')
+    chosen=$(_ensure_freedom_outbound "$ip") || { error "无法创建本地出口。"; return 1; }
+  fi
+  printf -v "$__var" '%s' "$chosen"
 }
 
 assign_outbound() {
@@ -2332,7 +2436,7 @@ outbound_menu() {
     clear_screen
     heading "出站管理"
     list_outbound_overview
-    printf '\n1) 选择入站设置出站\n2) 添加 SOCKS5/HTTP 出站\n3) 删除出站\n0) 返回\n'
+    printf '\n1) 选择入站设置出站\n2) 添加代理出站 (SOCKS5/HTTP)\n3) 删除出站\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
       1) run_menu_action assign_outbound; pause;; 2) run_menu_action add_outbound; pause;;
