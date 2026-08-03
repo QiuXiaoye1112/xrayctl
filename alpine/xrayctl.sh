@@ -405,7 +405,7 @@ init_meta() {
 }
 
 write_default_config() {
-  local stats_listen tmp
+  local tmp
   mkdir -p "$CONFIG_DIR" "$LOG_DIR"
   cat >"$CONFIG_FILE" <<'JSON'
 {
@@ -426,32 +426,13 @@ write_default_config() {
       {"type": "field", "protocol": ["bittorrent"], "outboundTag": "blocked"}
     ]
   },
-  "policy": {
-    "system": {"statsInboundUplink": true, "statsInboundDownlink": true},
-    "levels": {
-      "0": {"statsUserUplink": true, "statsUserDownlink": true}
-    }
-  },
-  "stats": {},
-  "api": {
-    "tag": "xrayctl-api",
-    "listen": "127.0.0.1:10085",
-    "services": ["StatsService"]
-  }
 }
 JSON
   tmp=$(temp_file)
   jq --arg logDir "$LOG_DIR" '.log.access=($logDir+"/access.log") | .log.error=($logDir+"/error.log")' "$CONFIG_FILE" >"$tmp"
   install -m 640 "$tmp" "$CONFIG_FILE"
   rm -f "$tmp"
-  if select_stats_api_listen stats_listen; then
-    tmp=$(temp_file)
-    jq --arg listen "$stats_listen" '.api.listen=$listen' "$CONFIG_FILE" >"$tmp"
-    install -m 640 "$tmp" "$CONFIG_FILE"
-    rm -f "$tmp"
-  else
-    chmod 640 "$CONFIG_FILE"
-  fi
+  chmod 640 "$CONFIG_FILE"
   init_meta
 }
 
@@ -1138,7 +1119,7 @@ prompt_renamed_inbound_tag() {
   local __var=$1 old_tag=$2 candidate
   while true; do
     prompt_validated_value candidate "新的入站名称" "$old_tag" validate_tag "名称只能包含字母、数字、点、下划线和横线。" || return 1
-    if [[ $candidate != "$old_tag" ]] && { inbound_exists "$candidate" || outbound_exists "$candidate" || [[ $candidate == xrayctl-api ]]; }; then
+    if [[ $candidate != "$old_tag" ]] && { inbound_exists "$candidate" || outbound_exists "$candidate"; }; then
       warn "名称已被入站或出站使用，请重新输入。"
       continue
     fi
@@ -1155,7 +1136,7 @@ rename_inbound() {
   [[ -n $new_tag ]] || prompt_renamed_inbound_tag new_tag "$old_tag"
   validate_tag "$new_tag" || die "入站名称格式无效。"
   if [[ $new_tag == "$old_tag" ]]; then info "入站名称未更改。"; return 0; fi
-  if inbound_exists "$new_tag" || outbound_exists "$new_tag" || [[ $new_tag == xrayctl-api ]]; then
+  if inbound_exists "$new_tag" || outbound_exists "$new_tag"; then
     die "名称已被入站或出站使用：$new_tag"
   fi
   tmp=$(temp_file)
@@ -1288,41 +1269,10 @@ http_inbound_has_auth() {
     "$CONFIG_FILE" >/dev/null
 }
 
-query_user_traffic_snapshot() {
-  local address
-  address=$(stats_api_address)
-  [[ -n $address && -x $XRAY_BIN ]] || return 1
-  "$XRAY_BIN" api statsquery --server="$address" --timeout=2 -pattern 'user>>>' 2>/dev/null
-}
-
-print_client_traffic_row() {
-  local number=$1 label=$2 credential=$3 snapshot_file=$4 snapshot_available=$5
-  local parsed_up=0 parsed_down=0 total=0
-  if ((snapshot_available)); then
-    IFS=$'\t' read -r parsed_up parsed_down < <(
-      jq -r --arg client_label "$label" '
-        ("user>>>"+$client_label+">>>traffic>>>uplink") as $upName |
-        ("user>>>"+$client_label+">>>traffic>>>downlink") as $downName |
-        [([.stat[]?|select(.name==$upName)|.value][0] // 0),
-         ([.stat[]?|select(.name==$downName)|.value][0] // 0)] | @tsv' "$snapshot_file"
-    )
-    [[ $parsed_up =~ ^[0-9]+$ ]] || parsed_up=0
-    [[ $parsed_down =~ ^[0-9]+$ ]] || parsed_down=0
-    total=$((parsed_up+parsed_down))
-  fi
-  print_table_cell "$number" 5; print_table_cell "$label" 16; print_table_cell "$credential" 40
-  if ((snapshot_available)); then
-    print_table_cell "$(format_bytes "$parsed_up")" 14
-    print_table_cell "$(format_bytes "$parsed_down")" 14
-    printf '%s\n' "$(format_bytes "$total")"
-  else
-    print_table_cell "-" 14; print_table_cell "-" 14; printf '%s\n' '-'
-  fi
-}
 
 list_clients() {
   ensure_config
-  local tag=${1-} protocol count stats_file="" stats_available=0
+  local tag=${1-} protocol count
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   heading "${tag} 的用户"
@@ -1334,18 +1284,14 @@ list_clients() {
   if ((count == 0)); then info "还没有用户。"; return; fi
   case $protocol in
     vless|vmess|trojan)
-      stats_file=$(temp_file)
-      if query_user_traffic_snapshot >"$stats_file"; then stats_available=1; fi
-      print_table_cell "序号" 5; print_table_cell "用户" 16; print_table_cell "凭据" 40
-      print_table_cell "上传" 14; print_table_cell "下载" 14; printf '总计\n'
+      print_table_cell "序号" 5; print_table_cell "用户" 16; print_table_cell "凭据" 40; printf '\n'
       if [[ $protocol == vless || $protocol == vmess ]]; then
         jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE"
       else
         jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),(.value.password // "-")]|@tsv' "$CONFIG_FILE"
       fi | while IFS=$'\t' read -r number label credential; do
-        print_client_traffic_row "$number" "$label" "$credential" "$stats_file" "$stats_available"
+        print_table_cell "$number" 5; print_table_cell "$label" 16; print_table_cell "$credential" 40; printf '\n'
       done
-      rm -f "$stats_file"
       ;;
     socks|http)
       print_table_cell "序号" 5; print_table_cell "用户" 16; printf '凭据\n'
@@ -1383,11 +1329,6 @@ client_label_exists() {
   fi
 }
 
-stats_client_label_exists() {
-  jq -e --arg client_label "$1" '
-    .inbounds[]? | select(.protocol=="vless" or .protocol=="vmess" or .protocol=="trojan") |
-    .settings.clients[]? | select((.email // "")==$client_label)' "$CONFIG_FILE" >/dev/null
-}
 
 prompt_client_label() {
   local __var=$1 tag=$2 prompt=$3 default=${4-} current=${5-} protocol=${6-} label_candidate
@@ -1395,12 +1336,7 @@ prompt_client_label() {
   while true; do
     prompt_validated_value label_candidate "$prompt" "$default" validate_email_label "用户名称无效，请重新输入。" || return 1
     if [[ $label_candidate != "$current" ]]; then
-      if [[ $protocol == vless || $protocol == vmess || $protocol == trojan ]]; then
-        if stats_client_label_exists "$label_candidate"; then
-          warn "该用户名称已被其他入站使用，会导致流量合并，请重新输入。"
-          continue
-        fi
-      elif client_label_exists "$tag" "$label_candidate"; then
+      if client_label_exists "$tag" "$label_candidate"; then
         warn "用户名称已存在，请重新输入。"
         continue
       fi
@@ -1509,11 +1445,7 @@ rename_client() {
   else
     validate_email_label "$new_label" || die "新用户名称无效。"
     if [[ $new_label != "$old_label" ]]; then
-      if [[ $protocol == vless || $protocol == vmess || $protocol == trojan ]]; then
-        if stats_client_label_exists "$new_label"; then die "该用户名称已被其他入站使用，会导致流量合并。"; fi
-      else
-        if client_label_exists "$tag" "$new_label"; then die "用户名称已存在。"; fi
-      fi
+      if client_label_exists "$tag" "$new_label"; then die "用户名称已存在。"; fi
     fi
   fi
   tmp=$(temp_file)
@@ -2195,97 +2127,6 @@ node_count_summary() {
   fi
 }
 
-stats_api_address() {
-  jq -r '
-    if (.api.listen // "") != "" then .api.listen
-    elif (.api.tag // "") != "" then
-      (.api.tag as $apiTag |
-       [.inbounds[]? | select(.tag==$apiTag) | "\(.listen // "127.0.0.1"):\(.port)"][0] // empty)
-    else empty end' "$CONFIG_FILE" 2>/dev/null
-}
-
-select_stats_api_listen() {
-  local __var=$1 host port max_port
-  host=${STATS_API_LISTEN%:*}; port=${STATS_API_LISTEN##*:}
-  validate_port "$port" || port=10085
-  max_port=$((port+100)); ((max_port <= 65535)) || max_port=65535
-  while port_in_use_os "$port" && ((port < max_port)); do ((port+=1)); done
-  port_in_use_os "$port" && { warn "找不到可用的本地统计端口。"; return 1; }
-  printf -v "$__var" '%s:%s' "$host" "$port"
-}
-
-traffic_stats_configured() {
-  jq -e '
-    (.stats|type)=="object" and
-    .policy.system.statsInboundUplink==true and
-    .policy.system.statsInboundDownlink==true and
-    .policy.levels["0"].statsUserUplink==true and
-    .policy.levels["0"].statsUserDownlink==true and
-    (.api.services // [] | index("StatsService") != null)' "$CONFIG_FILE" >/dev/null 2>&1 \
-    && [[ -n $(stats_api_address) ]]
-}
-
-ensure_traffic_stats() {
-  ensure_runtime_dependencies stats; ensure_config
-  traffic_stats_configured && return 0
-  local tmp listen existing_api=0 add_listen=0
-  jq -e '.api|type=="object"' "$CONFIG_FILE" >/dev/null 2>&1 && existing_api=1
-  if ((existing_api)); then
-    listen=$(stats_api_address)
-    if [[ -z $listen ]]; then select_stats_api_listen listen || return 1; add_listen=1; fi
-  else
-    select_stats_api_listen listen || return 1
-  fi
-  tmp=$(temp_file)
-  jq --arg listen "$listen" --argjson existingApi "$existing_api" --argjson addListen "$add_listen" '
-    .stats=(.stats // {}) |
-    .policy=(.policy // {}) |
-    .policy.system=(.policy.system // {}) |
-    .policy.system.statsInboundUplink=true |
-    .policy.system.statsInboundDownlink=true |
-    .policy.levels=(.policy.levels // {}) |
-    .policy.levels["0"]=(.policy.levels["0"] // {}) |
-    .policy.levels["0"].statsUserUplink=true |
-    .policy.levels["0"].statsUserDownlink=true |
-    if $existingApi==0 then
-      .api={tag:"xrayctl-api",listen:$listen,services:["StatsService"]}
-    else
-      .api.services=((.api.services // []) + ["StatsService"] | unique) |
-      if $addListen==1 then .api.listen=$listen else . end
-    end' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then info "入站流量统计已启用；流量从本次 Xray 运行开始累计。"; fi
-  rm -f "$tmp"
-}
-
-format_bytes() {
-  local bytes=${1:-0}
-  awk -v value="$bytes" 'BEGIN {
-    if (value >= 1099511627776) printf "%.2f TB", value/1099511627776;
-    else if (value >= 1073741824) printf "%.2f GB", value/1073741824;
-    else if (value >= 1048576) printf "%.2f MB", value/1048576;
-    else if (value >= 1024) printf "%.2f KB", value/1024;
-    else printf "%d B", value;
-  }'
-}
-
-query_inbound_traffic() {
-  local tag=$1 __up=$2 __down=$3 address output parsed_up parsed_down up_name down_name
-  address=$(stats_api_address)
-  [[ -n $address && -x $XRAY_BIN ]] || return 1
-  output=$("$XRAY_BIN" api statsquery --server="$address" --timeout=2 -pattern "inbound>>>${tag}>>>traffic>>>" 2>/dev/null) || return 1
-  up_name="inbound>>>${tag}>>>traffic>>>uplink"; down_name="inbound>>>${tag}>>>traffic>>>downlink"
-  parsed_up=$(jq -r --arg name "$up_name" '[.stat[]?|select(.name==$name)|.value][0] // 0' <<<"$output")
-  parsed_down=$(jq -r --arg name "$down_name" '[.stat[]?|select(.name==$name)|.value][0] // 0' <<<"$output")
-  printf -v "$__up" '%s' "${parsed_up:-0}"
-  printf -v "$__down" '%s' "${parsed_down:-0}"
-}
-
-query_inbound_traffic_snapshot() {
-  local address
-  address=$(stats_api_address)
-  [[ -n $address && -x $XRAY_BIN ]] || return 1
-  "$XRAY_BIN" api statsquery --server="$address" --timeout=2 -pattern 'inbound>>>' 2>/dev/null
-}
 
 xray_version_summary() {
   local output first
@@ -2314,8 +2155,7 @@ show_main_summary() {
 
 show_main_inbounds() {
   command_exists jq && [[ -r $CONFIG_FILE ]] || return 0
-  local count snapshot="" stats_available=0 tag protocol port method security
-  local up down total up_name down_name
+  local count tag protocol port method security
   count=$(jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null) || return 0
   heading "当前入站"
   if ((count == 0)); then
@@ -2323,40 +2163,22 @@ show_main_inbounds() {
     printf '\n'
     return 0
   fi
-  if snapshot=$(query_inbound_traffic_snapshot) && jq -e '(.stat // [])|type=="array"' <<<"$snapshot" >/dev/null 2>&1; then
-    stats_available=1
-  fi
-  print_table_cell_clipped "标签" 20; printf '| '; print_table_cell_clipped "协议" 8; printf '| '
-  print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 7; printf '| '
-  print_table_cell_clipped "安全" 10; printf '| '; print_table_cell "上传" 12; printf '| '
-  print_table_cell "下载" 12; printf '| 总计\n'
+  print_table_cell_clipped "标签" 20; printf '|'; print_table_cell_clipped "协议" 8; printf '|'
+  print_table_cell "端口" 7; printf '|'; print_table_cell_clipped "传输" 7; printf '|'
+  print_table_cell_clipped "安全" 10; printf '\n'
   jq -r '.inbounds[] | [.tag,.protocol,
     (.port|tostring),(if (.streamSettings.method // "raw")=="websocket" then "ws" else (.streamSettings.method // "raw") end),
     (.streamSettings.security // "none")] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port method security; do
-        if ((stats_available)); then
-          up_name="inbound>>>${tag}>>>traffic>>>uplink"
-          down_name="inbound>>>${tag}>>>traffic>>>downlink"
-          IFS=$'\t' read -r up down < <(jq -r --arg up "$up_name" --arg down "$down_name" '
-            [([.stat[]?|select(.name==$up)|.value][0] // 0),
-             ([.stat[]?|select(.name==$down)|.value][0] // 0)] | @tsv' <<<"$snapshot")
-          [[ $up =~ ^[0-9]+$ ]] || up=0
-          [[ $down =~ ^[0-9]+$ ]] || down=0
-          total=$((up+down))
-          up=$(format_bytes "$up"); down=$(format_bytes "$down"); total=$(format_bytes "$total")
-        else
-          up="-"; down="-"; total="-"
-        fi
-        print_table_cell_clipped "$tag" 20; printf '| '; print_table_cell_clipped "$protocol" 8; printf '| '
-        print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 7; printf '| '
-        print_table_cell_clipped "$security" 10; printf '| '; print_table_cell "$up" 12; printf '| '
-        print_table_cell "$down" 12; printf '| %s\n' "$total"
+        print_table_cell_clipped "$tag" 20; printf '|'; print_table_cell_clipped "$protocol" 8; printf '|'
+        print_table_cell "$port" 7; printf '|'; print_table_cell_clipped "$method" 7; printf '|'
+        print_table_cell_clipped "$security" 10; printf '\n'
       done
   printf '\n'
 }
 
 show_node_summary() {
-  local tag=$1 protocol port method security listen up down total
+  local tag=$1 protocol port method security listen
   IFS=$'\t' read -r protocol port method security listen < <(
     jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|[
       .protocol,(.port|tostring),(.streamSettings.method // "raw"),
@@ -2364,14 +2186,6 @@ show_node_summary() {
   )
   printf '协议: %s  |  端口: %s  |  传输: %s  |  安全: %s  |  监听: %s\n\n' \
     "$protocol" "$port" "$method" "$security" "$listen"
-  if query_inbound_traffic "$tag" up down; then
-    total=$((up+down))
-    printf '流量: 上传 %s  |  下载 %s  |  总计 %s\n\n' "$(format_bytes "$up")" "$(format_bytes "$down")" "$(format_bytes "$total")"
-  elif service_is_active; then
-    printf '流量: 统计服务暂不可用\n\n'
-  else
-    printf '流量: Xray 服务未运行\n\n'
-  fi
 }
 
 outbound_exists() { jq -e --arg tag "$1" '.outbounds[]?|select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
@@ -2427,7 +2241,7 @@ prompt_outbound_tag() {
   local __var=$1 default=$2 tag_candidate
   while true; do
     prompt_validated_value tag_candidate "出站标签" "$default" validate_tag "标签只能包含字母、数字、点、下划线和横线。" || return 1
-    if outbound_exists "$tag_candidate" || inbound_exists "$tag_candidate" || [[ $tag_candidate == xrayctl-api ]]; then
+    if outbound_exists "$tag_candidate" || inbound_exists "$tag_candidate"; then
       warn "标签已存在，请重新输入。"
       continue
     fi
@@ -2651,7 +2465,6 @@ manage_inbound_menu() {
 
 inbound_menu() {
   local choice tag
-  if ! traffic_stats_configured; then run_menu_action ensure_traffic_stats; pause; fi
   while true; do
     clear_screen
     heading "入站管理"
