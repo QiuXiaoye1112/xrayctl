@@ -23,7 +23,6 @@ CERTBOT_VENV="${XRAYCTL_CERTBOT_VENV:-/opt/xrayctl-alpine/certbot}"
 CERTBOT_COMMAND="${XRAYCTL_CERTBOT_COMMAND:-/usr/local/bin/certbot}"
 CERT_RENEW_HOOK="${XRAYCTL_CERT_RENEW_HOOK:-/etc/periodic/daily/xrayctl-certbot-renew}"
 BACKUP_DIR="${XRAYCTL_BACKUP_DIR:-/var/backups/xrayctl}"
-STATS_API_LISTEN="${XRAYCTL_STATS_API_LISTEN:-127.0.0.1:10085}"
 QUICK_COMMAND="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"
 QUICK_SYMLINK="${XRAYCTL_SYMLINK_PATH:-/usr/local/bin/xrayctl}"
 SERVICE_NAME="${XRAYCTL_SERVICE_NAME:-xray}"
@@ -422,10 +421,15 @@ install_packages() {
 }
 
 acquire_lock() {
-  command_exists flock || return 0
   mkdir -p "$(dirname "$LOCK_FILE")"
-  exec 9>"$LOCK_FILE"
-  flock -n 9 || die "另一个 xrayctl 操作正在运行。"
+  if command_exists flock; then
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || die "另一个 xrayctl 操作正在运行。"
+  else
+    local lock_dir="${LOCK_FILE}.d"
+    mkdir "$lock_dir" 2>/dev/null || die "另一个 xrayctl 操作正在运行。"
+    trap 'rmdir "'"$lock_dir"'" 2>/dev/null || true' EXIT HUP INT TERM
+  fi
 }
 
 ensure_runtime_dependencies() {
@@ -1122,7 +1126,7 @@ add_inbound() {
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
   if apply_candidate "$tmp"; then
-    meta_set_inbound "$tag" "$host" "$public_key" replace
+    meta_set_inbound "$tag" "$host"
     heading "入站已创建"
     show_inbound "$tag"
     print_links "$tag" "" || true
@@ -1230,7 +1234,7 @@ modify_inbound_basic() {
   jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
     '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
   if apply_candidate "$tmp"; then
-    meta_set_inbound "$tag" "$host" "" keep
+    meta_set_inbound "$tag" "$host"
     current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
   fi
   rm -f "$tmp"
@@ -1257,7 +1261,7 @@ modify_inbound_transport() {
     else . end' "$CONFIG_FILE" >"$tmp"
   if apply_candidate "$tmp"; then
     host=$(public_host_for_tag "$tag")
-    meta_set_inbound "$tag" "$host" "$public_key" replace
+    meta_set_inbound "$tag" "$host"
     info "传输已更新，请重新导出客户端分享链接。"
   fi
   rm -f "$tmp"
