@@ -1503,20 +1503,24 @@ print_links() {
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
         while IFS=$'\t' read -r label password; do
           [[ -z $filter || $label == "$filter" ]] || continue
-          print_share_entry "$label" "配置" "SOCKS5  ${uri_host}:${port}  用户: ${label}  密码: ${password}"
+          link="socks5://$(url_encode "$label"):$(url_encode "$password")@${uri_host}:${port}#$(url_encode "${tag}-${label}")"
+          print_share_entry "$label" "链接" "$link"
         done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
       else
-        print_share_entry "无认证" "配置" "SOCKS5  ${uri_host}:${port}"
+        link="socks5://${uri_host}:${port}#$(url_encode "${tag}")"
+        print_share_entry "无认证" "链接" "$link"
       fi
       ;;
     http)
       if http_inbound_has_auth "$tag"; then
         while IFS=$'\t' read -r label password; do
           [[ -z $filter || $label == "$filter" ]] || continue
-          print_share_entry "$label" "配置" "HTTP  ${uri_host}:${port}  用户: ${label}  密码: ${password}"
+          link="http://$(url_encode "$label"):$(url_encode "$password")@${uri_host}:${port}#$(url_encode "${tag}-${label}")"
+          print_share_entry "$label" "链接" "$link"
         done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
       else
-        print_share_entry "无认证" "配置" "HTTP  ${uri_host}:${port}"
+        link="http://${uri_host}:${port}#$(url_encode "${tag}")"
+        print_share_entry "无认证" "链接" "$link"
       fi
       ;;
   esac
