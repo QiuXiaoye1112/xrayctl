@@ -1652,6 +1652,17 @@ install_firewall() {
     [[ -t 0 ]] && confirm "启用 UFW？" N || return 0
     [[ -n $ssh_port ]] || ssh_port=$(awk '{print $4}' <<<"${SSH_CONNECTION:-}" 2>/dev/null || true)
     validate_port "${ssh_port:-}" || ssh_port=22
+    # 自动放行所有当前监听端口，避免锁死现有服务
+    local listening_ports
+    listening_ports=$(ss -lntup 2>/dev/null | awk 'NR>1{a[$5]} END{for(p in a){sub(/.*:/,"",p); print int(p)}}' | sort -nu)
+    info "检测到当前监听端口: ${listening_ports:-无}"
+    for port in $listening_ports; do
+      if validate_port "$port" 2>/dev/null && [[ $port != "$ssh_port" ]]; then
+        run_bounded 15 ufw allow "${port}/tcp" >/dev/null 2>&1 || true
+        run_bounded 15 ufw allow "${port}/udp" >/dev/null 2>&1 || true
+        info "UFW 已预放行 ${port}。"
+      fi
+    done
     run_bounded 15 ufw allow "${ssh_port}/tcp" >/dev/null
     if run_bounded 20 ufw --force enable >/dev/null; then info "UFW 已启用；SSH ${ssh_port}/tcp 已放行。";
     else error "UFW 启用失败或超时。"; fi
@@ -1723,7 +1734,95 @@ certbot_supports_ip() {
 setup_certbot_renewal_timer() {
   local certbot_path
   certbot_path=$(command -v certbot) || return 1
-  cat >/etc/systemd/system/xrayctl-certbot-renew.service <<EOF
+
+show_firewall_rules() {
+	local backend
+	backend=$(active_firewall_backend || true)
+	if [[ -z $backend ]]; then warn "未检测到启用的 UFW/firewalld。"; return 0; fi
+	echo
+	if [[ $backend == ufw ]]; then
+		heading "当前 UFW 规则"
+		ufw status numbered 2>/dev/null || ufw status 2>/dev/null
+	else
+		heading "当前 firewalld 规则"
+		firewall-cmd --list-all 2>/dev/null || true
+	fi
+	echo
+}
+  delete_firewall_rule() {
+  local backend rule_lines choice line_count
+  if ! has_net_admin; then warn "当前 NAT/容器没有 NET_ADMIN 权限，无法修改系统防火墙。"; return 0; fi
+  backend=$(active_firewall_backend || true)
+  if [[ -z $backend ]]; then warn "未检测到启用的 UFW/firewalld。"; return 0; fi
+  show_firewall_rules
+  if [[ $backend == ufw ]]; then
+    rule_lines=$(ufw status numbered 2>/dev/null | grep -E '^\[[ 0-9]+\]' || true)
+    if [[ -z $rule_lines ]]; then info "UFW 当前没有编号规则。"; return 0; fi
+    line_count=$(wc -l <<<"$rule_lines")
+    confirm "输入要删除的规则编号进行删除？" N || return 0
+    read -r -p "请输入规则编号（多个用空格分隔）: " choice
+    for num in $choice; do
+      if [[ $num =~ ^[0-9]+$ ]] && ((num >= 1 && num <= line_count)); then
+        run_bounded 10 ufw --force delete "$num" >/dev/null && info "UFW 规则 ${num} 已删除。" || error "UFW 规则 ${num} 删除失败。"
+      else
+        warn "跳过无效编号: ${num}"
+      fi
+    done
+  else
+    # firewalld
+    local zone
+    zone=$(firewall-cmd --get-default-zone 2>/dev/null || printf 'public')
+    confirm "手动删除端口或服务规则？" N || return 0
+    read -r -p "输入要删除的端口号 (如 8080): " choice
+    if [[ -n $choice ]] && validate_port "$choice"; then
+      firewall-cmd --permanent --zone="$zone" --remove-port="${choice}/tcp" 2>/dev/null || true
+      firewall-cmd --permanent --zone="$zone" --remove-port="${choice}/udp" 2>/dev/null || true
+      firewall-cmd --reload >/dev/null
+      info "firewalld 端口 ${choice} 规则已删除。"
+    fi
+  fi
+}
+
+
+uninstall_firewall() {
+	local backend manager pkg
+	if ! has_net_admin; then warn "当前 NAT/容器没有 NET_ADMIN 权限，无法卸载系统防火墙。"; return 0; fi
+	backend=$(active_firewall_backend || true)
+	if [[ -z $backend ]]; then
+		warn "未检测到启用的 UFW/firewalld。"
+		# 检查是否已安装但未启用
+		if command_exists ufw; then backend=ufw;
+		elif command_exists firewall-cmd; then backend=firewalld;
+		else warn "未安装 UFW 或 firewalld。"; return 0; fi
+	fi
+	confirm "确认卸载 ${backend}？此操作会先停用防火墙并删除软件包。" N || return 0
+	manager=$(pkg_manager) || { error "无法识别包管理器。"; return 0; }
+	if [[ $backend == ufw ]]; then
+		run_bounded 10 ufw disable >/dev/null 2>&1 || true
+		case $manager in
+			apt)   pkg=ufw ;;
+			pacman) pkg=ufw ;;
+			*)     pkg=ufw ;;
+		esac
+	else
+		run_bounded 10 systemctl disable --now firewalld >/dev/null 2>&1 || true
+		case $manager in
+			dnf)  pkg=firewalld ;;
+			yum)  pkg=firewalld ;;
+			zypper) pkg=firewalld ;;
+			*)    pkg=firewalld ;;
+		esac
+	fi
+	case $manager in
+		apt)   DEBIAN_FRONTEND=noninteractive run_bounded 30 apt-get purge -y "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
+		dnf)   run_bounded 30 dnf remove -y "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
+		yum)   run_bounded 30 yum remove -y "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
+		pacman) run_bounded 30 pacman -Rs --noconfirm "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
+		zypper) run_bounded 30 zypper --non-interactive remove "$pkg" >/dev/null && info "${backend} 已卸载。" || error "${backend} 卸载失败。" ;;
+		*)     error "不支持的包管理器。" ;;
+	esac
+}
+cat >/etc/systemd/system/xrayctl-certbot-renew.service <<EOF
 [Unit]
 Description=Renew certificates managed by xrayctl
 
@@ -2112,32 +2211,33 @@ show_logs() {
   journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
 }
 
-enable_bbr() {
-  ensure_system_context bbr
-  local available current qdisc_enabled=0 config=/etc/sysctl.d/99-xrayctl-bbr.conf
+_check_bbr_available() {
   if [[ ! -r /proc/sys/net/ipv4/tcp_available_congestion_control || ! -e /proc/sys/net/ipv4/tcp_congestion_control ]]; then
-    warn "当前内核未暴露 TCP 拥塞控制接口，无法在此容器内启用 BBR。"
-    return 0
+    warn "当前内核未暴露 TCP 拥塞控制接口，无法在此容器内管理 BBR。"
+    return 1
   fi
-  current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
-  if [[ $current == bbr ]]; then info "BBR 已经启用，无需重复设置。"; return 0; fi
   if ! has_net_admin; then
     warn "当前 NAT/容器没有 NET_ADMIN 权限，无法修改内核拥塞控制。"
-    return 0
+    return 1
   fi
-  command_exists modprobe && run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true
-  available=$(< /proc/sys/net/ipv4/tcp_available_congestion_control)
+  local available=$(< /proc/sys/net/ipv4/tcp_available_congestion_control)
   if [[ " $available " != *" bbr "* ]]; then
-    warn "当前内核不支持 BBR：${available}"
-    return 0
+    warn "当前内核不支持 BBR。可用算法：${available}"
+    return 1
   fi
+  return 0
+}
+
+_enable_bbr() {
+  local qdisc_enabled=0 config=/etc/sysctl.d/99-xrayctl-bbr.conf
+  command_exists modprobe && run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true
   if [[ -e /proc/sys/net/core/default_qdisc ]]; then
     if run_bounded 5 sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then qdisc_enabled=1;
     else warn "无法设置 net.core.default_qdisc，跳过 fq。"; fi
   fi
   if ! run_bounded 5 sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
     error "无法写入拥塞控制参数或操作超时。"
-    return 0
+    return 1
   fi
   if ((qdisc_enabled)); then
     printf '%s\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' >"$config"
@@ -2146,9 +2246,58 @@ enable_bbr() {
   fi
   if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) != bbr ]]; then
     error "BBR 校验失败。"
-    return 0
+    return 1
   fi
   info "BBR 已启用。"
+}
+
+_disable_bbr() {
+  local current default_cc config=/etc/sysctl.d/99-xrayctl-bbr.conf
+  current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  if [[ $current != bbr ]]; then info "BBR 当前未启用，无需关闭。"; return 0; fi
+  default_cc=$(sed 's/ /\n/g' /proc/sys/net/ipv4/tcp_available_congestion_control | grep -vF bbr | head -1)
+  [[ -n $default_cc ]] || default_cc=cubic
+  if ! run_bounded 5 sysctl -w net.ipv4.tcp_congestion_control="$default_cc" >/dev/null 2>&1; then
+    error "无法恢复默认拥塞控制算法 ${default_cc}。"
+    return 1
+  fi
+  run_bounded 5 sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
+  rm -f "$config"
+  if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) == bbr ]]; then
+    error "BBR 关闭失败，当前仍为 bbr。"
+    return 1
+  fi
+  info "BBR 已关闭，拥塞控制恢复为 ${default_cc}。"
+}
+
+manage_bbr() {
+  ensure_system_context bbr
+  _check_bbr_available || return 0
+  local current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  if [[ $current == bbr ]]; then
+    info "当前拥塞控制: BBR"
+    if [[ -t 0 ]]; then
+      if confirm "BBR 已启用，是否关闭？" N; then
+        _disable_bbr
+      fi
+    fi
+  else
+    info "当前拥塞控制: ${current}"
+    if [[ -t 0 ]]; then
+      if confirm "BBR 未启用，是否开启？" Y; then
+        _enable_bbr
+      fi
+    else
+      _enable_bbr
+    fi
+  fi
+}
+
+enable_bbr() {
+  # 保留旧名称兼容非交互模式 CLI 调用
+  ensure_system_context bbr
+  _check_bbr_available || return 0
+  _enable_bbr
 }
 
 system_diagnostics() {
@@ -2733,12 +2882,15 @@ firewall_menu() {
     clear_screen
     heading "防火墙"
     printf '状态: %s\n\n' "$(firewall_state_summary)"
-    printf '1) 安装/启用\n2) 放行端口\n3) 关闭端口\n0) 返回\n'
+    printf '1) 安装/启用\n2) 查看规则\n3) 放行端口\n4) 关闭端口\n5) 删除规则\n6) 卸载\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
       1) run_menu_action install_firewall; pause;;
-      2) run_menu_action manage_firewall_port open; pause;;
-      3) run_menu_action manage_firewall_port close; pause;;
+      2) run_menu_action show_firewall_rules; pause;;
+      3) run_menu_action manage_firewall_port open; pause;;
+      4) run_menu_action manage_firewall_port close; pause;;
+      5) run_menu_action delete_firewall_rule; pause;;
+      6) run_menu_action uninstall_firewall; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -2758,10 +2910,10 @@ system_menu() {
     clear_screen
     heading "系统工具"
     printf 'BBR: %s  |  防火墙: %s\n\n' "$(bbr_state_summary)" "$(firewall_state_summary)"
-    printf '1) 防火墙管理\n2) 启用 BBR\n3) 系统诊断\n4) 修复快捷命令\n0) 返回\n'
+    printf '1) 防火墙管理\n2) BBR 管理\n3) 系统诊断\n4) 修复快捷命令\n0) 返回\n'
     read -r -p "请选择: " choice
     case $choice in
-      1) firewall_menu;; 2) run_menu_action enable_bbr; pause;; 3) run_menu_action system_diagnostics; pause;;
+      1) firewall_menu;; 2) run_menu_action manage_bbr; pause;; 3) run_menu_action system_diagnostics; pause;;
       4) run_menu_action repair_quick_command; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
@@ -2836,7 +2988,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl cert issue [域名] [邮箱]
   xrayctl cert import [标识] [证书] [私钥]
   xrayctl firewall install|open|close [端口]
-  xrayctl bbr                     启用 BBR
+  xrayctl bbr                     管理 BBR（交互式开启/关闭）
   xrayctl diagnose                系统诊断
   xrayctl version
 
@@ -2883,7 +3035,7 @@ dispatch() {
       case ${1:-list} in list) list_certificates;; issue) issue_certificate "${2-}" "${3-}";; import) import_certificate "${2-}" "${3-}" "${4-}";; delete|remove) delete_managed_certificate "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";; renew) ensure_runtime_dependencies cert-renew; install_certbot; certbot renew;; *) die "未知 cert 子命令。";; esac;;
     firewall)
       case ${1-} in install) install_firewall;; open) ensure_runtime_dependencies firewall; open_firewall_for_port "${2:?请提供端口}" force;; close) ensure_runtime_dependencies firewall; close_firewall_for_port "${2:?请提供端口}";; *) die "用法: xrayctl firewall install|open|close [端口]";; esac;;
-    bbr) enable_bbr;; diagnose|doctor) system_diagnostics;; quick-command) ensure_runtime_dependencies quick-command; install_quick_command;;
+    bbr) manage_bbr;; diagnose|doctor) system_diagnostics;; quick-command) ensure_runtime_dependencies quick-command; install_quick_command;;
     *) error "未知命令：$command"; show_help; return 2;;
   esac
 }
