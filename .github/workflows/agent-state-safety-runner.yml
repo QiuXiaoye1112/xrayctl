@@ -1,0 +1,165 @@
+name: Agent state safety runner
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.pull_request.head.ref == 'agent/fix-state-safety'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fix branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/fix-state-safety
+          fetch-depth: 0
+
+      - name: Apply targeted fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          paths = [Path('xrayctl.sh'), Path('alpine/xrayctl.sh')]
+
+          def replace_once(text, old, new, label, path):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one {label}, found {count}')
+              return text.replace(old, new, 1)
+
+          def replace_function(text, name, next_name, replacement, path):
+              pattern = re.compile(rf'{re.escape(name)}\(\) \{{\n.*?\n\}}\n\n{re.escape(next_name)}\(\)', re.S)
+              new_text, count = pattern.subn(lambda _: replacement + '\n\n' + next_name + '()', text, count=1)
+              if count != 1:
+                  raise SystemExit(f'{path}: failed to replace {name}')
+              return new_text
+
+          meta_function = '''meta_set_inbound() {
+            local tag=$1 host=$2 tmp
+            init_meta; tmp=$(temp_file)
+            jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \\
+              '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now}) |
+               del(.inbounds[$tag].realityPublicKey)' \\
+              "$META_FILE" >"$tmp"
+            install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+          }'''
+
+          reality_function = '''reality_public_key() {
+            local tag=$1 private output public
+            private=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE")
+            [[ -n $private ]] || return 1
+            output=$("$XRAY_BIN" x25519 -i "$private" 2>/dev/null) || return 1
+            public=$(awk -F': *' 'tolower($1) ~ /(public|password)/ {print $2; exit}' <<<"$output")
+            [[ -n $public ]] || return 1
+            printf '%s' "$public"
+          }'''
+
+          restore_function = '''restore_backup() {
+            ensure_runtime_dependencies restore; ensure_config
+            local archive=${1-} temp extract_config snapshot had_meta=0 had_certs=0
+            [[ -n $archive ]] || prompt_value archive "备份文件路径"
+            [[ -r $archive ]] || die "无法读取备份：$archive"
+            tar -tzf "$archive" >/dev/null || die "不是有效的 tar.gz 备份。"
+            if tar -tzf "$archive" | awk 'BEGIN{bad=0} /^\\// || /(^|\\/)\\.\\.($|\\/)/ {bad=1} END{exit !bad}'; then
+              die "备份包含不安全的路径。"
+            fi
+            extract_config="${CONFIG_FILE#/}"
+            tar -tzf "$archive" | grep -Fxq "$extract_config" || die "备份中没有 ${extract_config}。"
+            temp=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-restore.XXXXXX")
+            tar -xzf "$archive" -C "$temp"
+            if find "$temp" -type l -print -quit | grep -q .; then rm -rf "$temp"; die "备份中不允许包含符号链接。"; fi
+            [[ -f "$temp/$extract_config" ]] || { rm -rf "$temp"; die "备份配置不是普通文件。"; }
+            validate_candidate "$temp/$extract_config" || { rm -rf "$temp"; die "备份配置验证失败。"; }
+            confirm "恢复会覆盖当前配置和托管证书，继续吗？" N || { rm -rf "$temp"; return; }
+
+            backup_config_quiet >/dev/null || true
+            snapshot="$temp/.current"
+            mkdir -p "$snapshot"
+            cp -a "$CONFIG_FILE" "$snapshot/config.json"
+            if [[ -f $META_FILE ]]; then cp -a "$META_FILE" "$snapshot/meta.json"; had_meta=1; fi
+            if [[ -d $CERT_DIR ]]; then cp -a "$CERT_DIR" "$snapshot/certs"; had_certs=1; fi
+
+            cp -a "$temp/$extract_config" "$CONFIG_FILE"
+            if [[ -f "$temp/${META_FILE#/}" ]]; then cp -a "$temp/${META_FILE#/}" "$META_FILE"; else rm -f "$META_FILE"; fi
+            rm -rf "$CERT_DIR"
+            setup_certificate_access
+            if [[ -d "$temp/${CERT_DIR#/}" ]]; then cp -a "$temp/${CERT_DIR#/}/." "$CERT_DIR/"; fi
+            init_meta
+            setup_runtime_access
+
+            if ! restart_service; then
+              error "恢复后服务失败，正在回滚配置、元数据和证书。"
+              cp -a "$snapshot/config.json" "$CONFIG_FILE"
+              if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE"; else rm -f "$META_FILE"; fi
+              rm -rf "$CERT_DIR"
+              setup_certificate_access
+              if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/"; fi
+              init_meta
+              setup_runtime_access
+              restart_service || true
+              rm -rf "$temp"
+              die "恢复后服务失败，已回滚配置、元数据和证书。"
+            fi
+            rm -rf "$temp"; info "备份已恢复。"
+          }'''
+
+          for path in paths:
+              text = path.read_text()
+
+              old_menu = '( set -Eeuo pipefail; "$@" )'
+              new_menu = '''(
+              set -Eeuo pipefail
+              trap cleanup_on_exit EXIT
+              "$@"
+            )'''
+              text = replace_once(text, old_menu, new_menu, 'menu subshell', path)
+
+              text = replace_function(text, 'meta_set_inbound', 'meta_delete_inbound', meta_function, path)
+              text = replace_function(text, 'reality_public_key', 'share_separator', reality_function, path)
+              text = replace_function(text, 'restore_backup', 'show_status', restore_function, path)
+
+              old_local = 'local tag=${1-} filter=${2-} protocol host uri_host port query label id password method vmess_net payload link'
+              new_local = 'local tag=${1-} filter=${2-} protocol host uri_host port query label id password method vmess_net vmess_sni payload link'
+              text = replace_once(text, old_local, new_local, 'VMess local variable list', path)
+
+              old_case = '      case $method in raw) vmess_net=tcp;; websocket) vmess_net=ws;; *) vmess_net=$method;; esac\n      while IFS=$\'\\t\' read -r label id; do'
+              new_case = '      case $method in raw) vmess_net=tcp;; websocket) vmess_net=ws;; *) vmess_net=$method;; esac\n      vmess_sni=$(jq -r --arg tag "$tag" \'.inbounds[]|select(.tag==$tag)|.streamSettings.tlsSettings.serverName // empty\' "$CONFIG_FILE")\n      [[ -n $vmess_sni ]] || vmess_sni=$host\n      while IFS=$\'\\t\' read -r label id; do'
+              text = replace_once(text, old_case, new_case, 'VMess SNI setup', path)
+
+              old_json = '          \'{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:$net,type:$type,host:$host,path:$path,tls:$tls,sni:$add,alpn:""}\')'
+              new_json = '          --arg sni "$vmess_sni" \\\n          \'{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:$net,type:$type,host:$host,path:$path,tls:$tls,sni:$sni,alpn:""}\')'
+              text = replace_once(text, old_json, new_json, 'VMess JSON SNI', path)
+
+              path.write_text(text)
+
+          Path('.agent-state-safety-trigger').unlink(missing_ok=True)
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          bash -n xrayctl.sh
+          bash -n alpine/xrayctl.sh
+          grep -F '已回滚配置、元数据和证书' xrayctl.sh
+          grep -F '已回滚配置、元数据和证书' alpine/xrayctl.sh
+          ! grep -A8 '^reality_public_key()' xrayctl.sh | grep -q 'META_FILE'
+          ! grep -A8 '^reality_public_key()' alpine/xrayctl.sh | grep -q 'META_FILE'
+          grep -F -- '--arg sni "$vmess_sni"' xrayctl.sh
+          grep -F -- '--arg sni "$vmess_sni"' alpine/xrayctl.sh
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A xrayctl.sh alpine/xrayctl.sh .agent-state-safety-trigger
+          git diff --cached --quiet && { echo 'No changes staged'; exit 1; }
+          git commit -m 'fix state safety and share metadata'
+          git push origin HEAD:agent/fix-state-safety
