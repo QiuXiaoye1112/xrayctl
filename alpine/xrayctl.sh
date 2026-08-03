@@ -1289,7 +1289,7 @@ delete_inbound() {
     ]' "$CONFIG_FILE" >"$tmp"
   if apply_candidate "$tmp"; then
     meta_delete_inbound "$tag"
-    info "已删除入站 ${tag} 及其 ${user_count} 个用户。端口 ${port} 的防火墙规则未自动关闭，以免影响其他服务。"
+    info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
   fi
   rm -f "$tmp"
 }
