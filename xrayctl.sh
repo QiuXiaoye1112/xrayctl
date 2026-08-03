@@ -2293,7 +2293,7 @@ add_outbound() {
 
 select_outbound() {
   local __var=$1 include_direct=${2:-0} candidate_tag answer
-  local tags=() local_ips=() local_ip_tags=()
+  local tags=() local_ips=() local_ip_tags=() local_raw_ips=()
   ((include_direct == 0)) || tags+=("direct")
   while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || tags+=("$candidate_tag"); done < <(
     jq -r '.outbounds[]?|select((.protocol=="socks" or .protocol=="http" or .protocol=="freedom") and .tag!="direct" and .tag!="blocked")|.tag' "$CONFIG_FILE"
@@ -2307,6 +2307,7 @@ select_outbound() {
     for t in "${tags[@]}"; do [[ $t == "$tag" ]] && { found=1; break; }; done
     if ((!found)); then tags+=("$tag"); fi
     local_ips+=("$label")
+    local_raw_ips+=("$ip")
   done < <(ensure_config 2>/dev/null || true; detect_local_ips 2>/dev/null)
   ((${#tags[@]} > 0)) || { warn "没有可选出站。"; return 1; }
   # 构建带有类型标注的显示标签
@@ -2332,7 +2333,14 @@ select_outbound() {
   local chosen="${tags[$((answer-1))]}"
   # 如果选的是本地 IP 但 freedom 出站还不存在，自动创建
   if [[ $chosen =~ ^local- ]]; then
-    local ip; ip=$(printf '%s' "$chosen" | sed 's/^local-//; s/--/:/g; s/-/./g')
+    local ip=""
+    ip=$(jq -r --arg tag "$chosen" '.outbounds[]?|select(.tag==$tag)|.sendThrough // empty' "$CONFIG_FILE" 2>/dev/null || true)
+    if [[ -z $ip ]]; then
+      for ((i=0; i<${#local_ip_tags[@]}; i++)); do
+        [[ ${local_ip_tags[$i]} == "$chosen" ]] && { ip="${local_raw_ips[$i]}"; break; }
+      done
+    fi
+    [[ -n $ip ]] || { error "无法解析本地 IP。"; return 1; }
     chosen=$(_ensure_freedom_outbound "$ip") || { error "无法创建本地出口。"; return 1; }
   fi
   printf -v "$__var" '%s' "$chosen"
