@@ -252,41 +252,39 @@ detect_public_ip() { detect_public_ipv4 || detect_public_ipv6; }
 detect_local_ips() {
   # 输出: display_label\tip\tinterface
   # 排除 loopback、link-local、docker/虚拟网桥
-  local iface ip cidr entries v4 v6
+  local iface ip line
   if command_exists ip; then
+    # ip -o 单行输出，$2=网卡 $4=地址
     while IFS= read -r line; do
-      ip=$(awk '{print $2}' <<<"$line"); ip=${ip%/*}
-      iface=$(awk '{print $NF}' <<<"$line")
-      if validate_ipv4 "$ip" && [[ ! $ip =~ ^127\. ]]; then
-        [[ $iface =~ ^(docker|br-|veth|virbr|lo|lxc|cali|flannel|cilium) ]] && continue
-        printf '%s (%s · IPv4)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
-      fi
-    done < <(ip -4 addr show 2>/dev/null | grep 'inet ')
+      iface=$(awk '{print $2}' <<<"$line")
+      ip=$(awk '{print $4}' <<<"$line"); ip=${ip%/*}
+      [[ $iface =~ ^(docker|br-|veth|virbr|lo|lxc|cali|flannel|cilium) ]] && continue
+      validate_ipv4 "$ip" || continue
+      [[ $ip =~ ^127\. ]] && continue
+      printf '%s (%s · IPv4)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
+    done < <(ip -o -4 addr show 2>/dev/null)
     while IFS= read -r line; do
-      ip=$(awk '{print $2}' <<<"$line"); ip=${ip%/*}
-      iface=$(awk '{print $NF}' <<<"$line")
-      if [[ -n $ip && $ip != ::1 && $ip != fe80:* ]]; then
-        [[ $iface =~ ^(docker|br-|veth|virbr|lo|lxc|cali|flannel|cilium) ]] && continue
-        # 去掉 % interface 后缀
-        ip=${ip%%%*}
-        printf '%s (%s · IPv6)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
-      fi
-    done < <(ip -6 addr show 2>/dev/null | grep 'inet6 ')
+      iface=$(awk '{print $2}' <<<"$line")
+      ip=$(awk '{print $4}' <<<"$line"); ip=${ip%/*}
+      ip=${ip%%%*}
+      [[ $iface =~ ^(docker|br-|veth|virbr|lo|lxc|cali|flannel|cilium) ]] && continue
+      [[ -z $ip || $ip == ::1 || $ip == fe80:* ]] && continue
+      printf '%s (%s · IPv6)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
+    done < <(ip -o -6 addr show 2>/dev/null)
   elif command_exists ifconfig; then
     while IFS= read -r line; do
+      iface=$(awk '{print $1}' <<<"$line" | sed 's/:$//')
       ip=$(awk '{print $2}' <<<"$line")
-      if validate_ipv4 "$ip" && [[ ! $ip =~ ^127\. ]]; then
-        iface=$(awk '{print $NF}' <<<"$line")
-        printf '%s (%s · IPv4)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
-      fi
+      validate_ipv4 "$ip" || continue
+      [[ $ip =~ ^127\. ]] && continue
+      printf '%s (%s · IPv4)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
     done < <(ifconfig 2>/dev/null | grep 'inet ' | grep -v '127\.')
     while IFS= read -r line; do
+      iface=$(awk '{print $1}' <<<"$line" | sed 's/:$//')
       ip=$(awk '{print $2}' <<<"$line")
-      if [[ -n $ip && $ip != ::1 && $ip != fe80:* ]]; then
-        iface=$(awk '{print $NF}' <<<"$line")
-        ip=${ip%%%*}
-        printf '%s (%s · IPv6)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
-      fi
+      ip=${ip%%%*}
+      [[ -z $ip || $ip == ::1 || $ip == fe80:* ]] && continue
+      printf '%s (%s · IPv6)\t%s\t%s\n' "$ip" "$iface" "$ip" "$iface"
     done < <(ifconfig 2>/dev/null | grep 'inet6 ' | grep -v '::1\|fe80:')
   fi
 }
@@ -2299,7 +2297,7 @@ select_outbound() {
   local tags=() local_ips=() local_ip_tags=()
   ((include_direct == 0)) || tags+=("direct")
   while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || tags+=("$candidate_tag"); done < <(
-    jq -r '.outbounds[]?|select(.protocol=="socks" or .protocol=="http" or .protocol=="freedom")|.tag' "$CONFIG_FILE"
+    jq -r '.outbounds[]?|select((.protocol=="socks" or .protocol=="http" or .protocol=="freedom") and .tag!="direct" and .tag!="blocked")|.tag' "$CONFIG_FILE"
   )
   # 检测本地 IP，对已存在的 freedom 出站加备注
   while IFS=$'\t' read -r label ip iface; do
