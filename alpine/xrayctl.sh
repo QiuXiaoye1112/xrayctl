@@ -126,7 +126,7 @@ choose() {
   printf '%s\n' "$prompt"
   for ((i=0; i<${#options[@]}; i++)); do printf '  %d) %s\n' "$((i+1))" "${options[$i]}"; done
   while true; do
-    read -r -p "请选择 [1-${#options[@]}]: " selected_value || { echo; continue; }
+    read -r -p "请选择 [1-${#options[@]}]: " selected_value || { echo; return 1; }
     if [[ $selected_value =~ ^[0-9]+$ ]] && (( selected_value >= 1 && selected_value <= ${#options[@]} )); then
       printf -v "$__var" '%s' "$selected_value"
       return 0
@@ -484,7 +484,7 @@ write_default_config() {
       {"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"},
       {"type": "field", "protocol": ["bittorrent"], "outboundTag": "blocked"}
     ]
-  },
+  }
 }
 JSON
   tmp=$(temp_file)
@@ -1087,7 +1087,7 @@ build_inbound() {
             ip:"0.0.0.0"
           }}')
       else
-        [[ $listen == 127.0.0.1 || $listen == ::1 ]] || warn "公网监听的无认证 SOCKS5 风险极高。"
+        [[ $listen == 127.0.0.1 || $listen == ::1 ]] || die "公网监听的无认证 SOCKS5 不允许创建，请设置用户名密码或改为 127.0.0.1。"
         inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
           '{tag:$tag,listen:$listen,port:$port,protocol:"socks",settings:{auth:"noauth",udp:true,ip:"0.0.0.0"}}')
       fi
@@ -1103,7 +1103,7 @@ build_inbound() {
             allowTransparent:false
           }}')
       else
-        [[ $listen == 127.0.0.1 || $listen == ::1 ]] || warn "公网监听的无认证 HTTP 代理风险极高。"
+        [[ $listen == 127.0.0.1 || $listen == ::1 ]] || die "公网监听的无认证 HTTP 代理不允许创建，请设置用户名密码或改为 127.0.0.1。"
         inbound_json=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
           '{tag:$tag,listen:$listen,port:$port,protocol:"http",settings:{allowTransparent:false}}')
       fi
@@ -1958,7 +1958,7 @@ manage_inbound_certificate_menu() {
     heading "证书管理 · ${tag}"
     printf '证书: %s\n私钥: %s\nSNI: %s\n\n' "$current_cert" "$current_key" "$current_sni"
     printf '1) 更换托管证书\n2) 使用证书文件\n0) 返回入站\n'
-    read -r -p "请选择: " choice || { echo; continue; }
+    read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1)
         if select_managed_certificate identifier; then
@@ -2438,7 +2438,7 @@ outbound_menu() {
     heading "出站管理"
     list_outbound_overview
     printf '\n1) 选择入站设置出站\n2) 添加代理出站 (SOCKS5/HTTP)\n3) 删除出站\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; continue; }
+    read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action assign_outbound; pause;; 2) run_menu_action add_outbound; pause;;
       3) run_menu_action delete_outbound; pause;; 0) return;; *) warn "无效选项。"; pause;;
@@ -2453,7 +2453,7 @@ client_menu_for_tag() {
     heading "用户管理 · ${tag}"
     list_clients "$tag"
     printf '\n1) 添加用户\n2) 重命名用户\n3) 更换 UUID/密码\n4) 删除用户\n0) 返回入站\n'
-    read -r -p "请选择: " choice || { echo; continue; }
+    read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action add_client "$tag"; pause;; 2) run_menu_action rename_client "$tag"; pause;;
       3) run_menu_action rotate_client_credential "$tag"; pause;; 4) run_menu_action delete_client "$tag"; pause;;
@@ -2469,7 +2469,7 @@ modify_inbound_menu() {
     heading "修改入站信息 · ${tag}"
     if [[ $protocol == vless || $protocol == vmess || $protocol == trojan ]]; then
       printf '1) 修改入站名称\n2) 修改地址/端口\n3) 修改传输/安全\n0) 返回入站\n'
-      read -r -p "请选择: " choice || { echo; continue; }
+      read -r -p "请选择: " choice || { echo; return; }
       case $choice in
         1) run_menu_action rename_inbound "$tag"; pause; return;;
         2) run_menu_action modify_inbound_basic "$tag"; pause;;
@@ -2478,7 +2478,7 @@ modify_inbound_menu() {
       esac
     else
       printf '1) 修改入站名称\n2) 修改地址/端口\n0) 返回入站\n'
-      read -r -p "请选择: " choice || { echo; continue; }
+      read -r -p "请选择: " choice || { echo; return; }
       case $choice in
         1) run_menu_action rename_inbound "$tag"; pause; return;;
         2) run_menu_action modify_inbound_basic "$tag"; pause;;
@@ -2500,7 +2500,7 @@ manage_inbound_menu() {
         security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
         if [[ $security == tls ]]; then
           printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 证书管理\n5) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; continue; }
+          read -r -p "请选择: " choice || { echo; return; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
             4) manage_inbound_certificate_menu "$tag";; 5) run_menu_action show_inbound "$tag"; pause;;
@@ -2508,7 +2508,7 @@ manage_inbound_menu() {
           esac
         else
           printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; continue; }
+          read -r -p "请选择: " choice || { echo; return; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
             4) run_menu_action show_inbound "$tag"; pause;;
@@ -2521,7 +2521,7 @@ manage_inbound_menu() {
         printf '认证: %s\n\n' "$auth"
         if [[ $auth == password ]]; then
           printf '1) 客户端配置\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; continue; }
+          read -r -p "请选择: " choice || { echo; return; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
             4) run_menu_action show_inbound "$tag"; pause;;
@@ -2529,7 +2529,7 @@ manage_inbound_menu() {
           esac
         else
           printf '1) 客户端配置\n2) 修改入站信息\n3) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; continue; }
+          read -r -p "请选择: " choice || { echo; return; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol";;
             3) run_menu_action show_inbound "$tag"; pause;;
@@ -2542,7 +2542,7 @@ manage_inbound_menu() {
         printf '认证: %s\n\n' "$auth"
         if [[ $auth == password ]]; then
           printf '1) 客户端配置\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; continue; }
+          read -r -p "请选择: " choice || { echo; return; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
             4) run_menu_action show_inbound "$tag"; pause;;
@@ -2550,7 +2550,7 @@ manage_inbound_menu() {
           esac
         else
           printf '1) 客户端配置\n2) 修改入站信息\n3) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; continue; }
+          read -r -p "请选择: " choice || { echo; return; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol";;
             3) run_menu_action show_inbound "$tag"; pause;;
@@ -2561,7 +2561,7 @@ manage_inbound_menu() {
       shadowsocks)
         warn "此入站使用已停止支持的 Shadowsocks，仅保留查看入口；删除请返回入站列表。"
         printf '1) 查看 JSON\n0) 返回列表\n'
-        read -r -p "请选择: " choice || { echo; continue; }
+        read -r -p "请选择: " choice || { echo; return; }
         case $choice in
           1) run_menu_action show_inbound "$tag"; pause;;
           0) return;; *) warn "无效选项。"; pause;;
@@ -2580,7 +2580,7 @@ inbound_menu() {
     list_inbounds
     printf '\n完整配置: %s\n\n' "$CONFIG_FILE"
     printf '1) 新增入站\n2) 管理已有入站\n3) 订阅链接\n4) 删除入站\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; continue; }
+    read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action add_inbound; pause;;
       2) select_inbound tag && manage_inbound_menu "$tag";;
@@ -2604,7 +2604,7 @@ certificate_menu() {
     heading "TLS 证书"
     printf '托管证书: %s\n\n' "$(certificate_count)"
     printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 删除托管证书\n5) 测试自动续期\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; continue; }
+    read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action issue_certificate; pause;; 2) run_menu_action import_certificate; pause;;
       3) run_menu_action list_certificates; pause;;
@@ -2639,7 +2639,7 @@ service_menu() {
     printf '状态: %s  |  开机自启: %s  |  Xray: %s\n\n' \
       "$(service_state_summary)" "$(startup_state_summary)" "$(xray_version_summary)"
     printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装/更新/修复 Xray\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; continue; }
+    read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action toggle_service_running; pause;; 2) run_menu_action service_action restart; pause;;
       3) run_menu_action toggle_service_startup; pause;; 4) run_menu_action show_logs 100; pause;;
@@ -2664,7 +2664,7 @@ system_menu() {
     heading "系统工具"
     printf 'BBR: %s\n\n' "$(bbr_state_summary)"
     printf '1) BBR 管理\n2) 系统诊断\n3) 修复快捷命令\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; continue; }
+    read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action manage_bbr; pause;; 2) run_menu_action system_diagnostics; pause;;
       3) run_menu_action repair_quick_command; pause;;
@@ -2679,7 +2679,7 @@ uninstall_menu() {
     clear_screen
     heading "卸载"
     printf '1) 卸载 Xray（保留配置）\n2) 彻底卸载\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; continue; }
+    read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action uninstall_xray 0; pause;; 2) run_menu_action uninstall_xray 1; pause;;
       0) return;; *) warn "无效选项。"; pause;;
@@ -2695,7 +2695,7 @@ main_menu() {
     show_main_summary
     show_main_inbounds
     printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 服务管理\n5) 系统工具\n6) 卸载\n0) 退出\n'
-    read -r -p "请选择: " choice || { echo; continue; }
+    read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) service_menu;;
       5) system_menu;; 6) uninstall_menu;;
