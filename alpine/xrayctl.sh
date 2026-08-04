@@ -1684,7 +1684,7 @@ print_all_share_links() {
     found=1
     print_links "$tag" ""
   done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan|socks|http)$"))|.tag' "$CONFIG_FILE")
-  ((found == 1)) || die "没有可生成订阅链接的入站。"
+  ((found == 1)) || { warn "没有可生成订阅链接的入站。"; return 0; }
 }
 
 
@@ -1848,7 +1848,8 @@ issue_certificate() {
   fi
   if ! certbot "${certbot_args[@]}"; then
     if ((was_active)); then rc-service "$SERVICE_NAME" start || true; CERT_STOPPED_SERVICE=0; fi
-    die "证书签发失败；确认 ${domain} 的 TCP 80 可从公网访问。"
+    warn "证书签发失败；确认 ${domain} 的 TCP 80 可从公网访问。"
+    return 0
   fi
   paths=$(copy_certificate_pair "$domain" "/etc/letsencrypt/live/${domain}/fullchain.pem" "/etc/letsencrypt/live/${domain}/privkey.pem")
   cert_path=$(head -n1 <<<"$paths")
