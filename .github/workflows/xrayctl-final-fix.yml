@@ -1,0 +1,220 @@
+name: xrayctl final fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/xrayctl-final-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply scoped fixes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          sh = Path('xrayctl.sh')
+          s = sh.read_text()
+
+          def replace_one(text, old, new, label):
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f'{label}: expected exactly 1 match, got {n}')
+              return text.replace(old, new, 1)
+
+          s = replace_one(s, '''  if [[ -f $QUICK_COMMAND ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null; then
+            source=$QUICK_COMMAND
+          elif [[ -z $source || ! -r $source ]] || ! grep -q '^# xrayctl - Xray Linux terminal manager' "$source" 2>/dev/null; then
+            downloaded=$(temp_file)
+            info "正在下载快捷命令脚本。"
+            if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \\
+              --connect-timeout 15 --max-time 120 "$SCRIPT_DOWNLOAD_URL" -o "$downloaded"; then
+              rm -f "$downloaded"
+              die "快捷命令脚本下载失败。"
+            fi
+            grep -q '^# xrayctl - Xray Linux terminal manager' "$downloaded" \\
+              || { rm -f "$downloaded"; die "快捷命令脚本校验失败。"; }
+            source=$downloaded
+          fi
+          ''', '''  if [[ -n $source && -r $source ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$source" 2>/dev/null; then
+            :
+          elif [[ -f $QUICK_COMMAND ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null; then
+            source=$QUICK_COMMAND
+          else
+            downloaded=$(temp_file)
+            info "正在下载快捷命令脚本。"
+            if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \\
+              --connect-timeout 15 --max-time 120 "$SCRIPT_DOWNLOAD_URL" -o "$downloaded"; then
+              rm -f "$downloaded"
+              die "快捷命令脚本下载失败。"
+            fi
+            grep -q '^# xrayctl - Xray Linux terminal manager' "$downloaded" \\
+              || { rm -f "$downloaded"; die "快捷命令脚本校验失败。"; }
+            source=$downloaded
+          fi
+          ''', 'quick-command source priority')
+
+          s = replace_one(s, '''  if [[ -n $__count_var ]]; then
+            printf -v "$__count_var" '%s' "$count"
+          fi
+          return $count
+          }''', '''  if [[ -n $__count_var ]]; then
+            printf -v "$__count_var" '%s' "$count"
+          fi
+          return 0
+          }''', 'residual scanner exit status')
+
+          s = replace_one(s, '''  _uninstall_snapshot_metadata
+          _uninstall_disable_timers
+          _uninstall_remove_managed_certs
+          _uninstall_remove_cloudflare
+          _uninstall_remove_certbot
+          _uninstall_xray_core
+          _uninstall_remove_systemd_overrides
+          _uninstall_remove_runtime_group
+          _uninstall_remove_quick_command
+          _cleanup_legacy_resources
+          _uninstall_remove_config
+          _uninstall_remove_logs
+
+          local residual_count
+          _scan_xrayctl_residuals residual_count
+
+          if ((residual_count > 0)); then
+            warn "检测到 ${residual_count} 项残留，请手动检查。"
+          fi
+          info "完全卸载完成；备份保留在 ${BACKUP_DIR}。"
+          rm -f "$SNAPSHOT_META"
+          ''', '''  _uninstall_snapshot_metadata
+          local step_failures=0 residual_count=0
+          _uninstall_disable_timers           || ((step_failures+=1))
+          _uninstall_remove_managed_certs     || ((step_failures+=1))
+          _uninstall_remove_cloudflare        || ((step_failures+=1))
+          _uninstall_remove_certbot           || ((step_failures+=1))
+          _uninstall_xray_core                || ((step_failures+=1))
+          _uninstall_remove_systemd_overrides || ((step_failures+=1))
+          _uninstall_remove_runtime_group     || ((step_failures+=1))
+          _uninstall_remove_quick_command     || ((step_failures+=1))
+          _cleanup_legacy_resources           || ((step_failures+=1))
+          _uninstall_remove_config            || ((step_failures+=1))
+          _uninstall_remove_logs              || ((step_failures+=1))
+
+          _scan_xrayctl_residuals residual_count
+
+          if ((step_failures > 0)); then
+            warn "完全卸载有 ${step_failures} 个清理步骤失败，请结合残留检查确认。"
+          fi
+          if ((residual_count > 0)); then
+            warn "检测到 ${residual_count} 项残留，请手动检查。"
+          fi
+          info "完全卸载完成；备份保留在 ${BACKUP_DIR}。"
+          rm -f "$SNAPSHOT_META"
+          ''', 'level-1 uninstall tolerance')
+
+          s = replace_one(s, '''  validate_candidate "$temp/$extract_config" || { rm -rf "$temp"; die "备份配置验证失败。"; }
+          ''', '''  jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' \\
+            "$temp/$extract_config" >/dev/null || { rm -rf "$temp"; die "备份配置 JSON 结构无效。"; }
+          ''', 'restore pre-validation')
+
+          s = replace_one(s, '''  if ! restart_service; then
+            error "恢复后服务失败，正在回滚配置、元数据和证书。"
+            cp -a "$snapshot/config.json" "$CONFIG_FILE"
+            if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE"; else rm -f "$META_FILE"; fi
+            rm -rf "$CERT_DIR"
+            setup_certificate_access
+            if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/"; fi
+            init_meta
+            setup_runtime_access
+            restart_service || true
+            rm -rf "$temp"
+            die "恢复后服务失败，已回滚配置、元数据和证书。"
+          fi
+          ''', '''  if ! validate_candidate "$CONFIG_FILE" || ! restart_service; then
+            error "恢复后配置验证或服务启动失败，正在回滚配置、元数据和证书。"
+            cp -a "$snapshot/config.json" "$CONFIG_FILE"
+            if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE"; else rm -f "$META_FILE"; fi
+            rm -rf "$CERT_DIR"
+            setup_certificate_access
+            if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/"; fi
+            init_meta
+            setup_runtime_access
+            restart_service || true
+            rm -rf "$temp"
+            die "恢复失败，已回滚配置、元数据和证书。"
+          fi
+          ''', 'restore staged validation')
+
+          s = replace_one(s, '''  if ((rc != 0)); then
+            warn "证书签发失败，请查看上方 Certbot 输出的具体原因。"
+            return 0
+          fi
+          ''', '''  if ((rc != 0)); then
+            warn "证书签发失败，请查看上方 Certbot 输出的具体原因。"
+            return 1
+          fi
+          ''', 'cert issue exit status')
+
+          s = replace_one(s, '''  else
+            info "没有需要续期的证书。"
+          fi
+          }
+
+          renew_certificate_command() {''', '''  else
+            info "没有需要续期的证书。"
+          fi
+          if ((failed > 0)); then
+            return 1
+          fi
+          return 0
+          }
+
+          renew_certificate_command() {''', 'renew-auto exit status')
+
+          s = replace_one(s, '''    certbot_cmd delete --cert-name "$cert_name" --non-interactive \\
+              || { warn "Let's Encrypt 证书删除失败，托管副本未改动。"; return 0; }
+          ''', '''    certbot_cmd delete --cert-name "$cert_name" --non-interactive \\
+              || { warn "Let's Encrypt 证书删除失败，托管副本未改动。"; return 1; }
+          ''', 'cert delete exit status')
+
+          s = replace_one(s, '  ((found == 1)) || { warn "没有可生成订阅链接的入站。"; return 0; }', '  ((found == 1)) || { warn "没有可生成分享链接的入站。"; return 0; }', 'share-links warning')
+          s = replace_one(s, "    printf '\\n1) 新增入站\\n2) 管理已有入站\\n3) 订阅链接\\n4) 删除入站\\n0) 返回\\n'", "    printf '\\n1) 新增入站\\n2) 管理已有入站\\n3) 全部分享链接\\n4) 删除入站\\n0) 返回\\n'", 'inbound menu wording')
+
+          sh.write_text(s)
+
+          readme = Path('README.md')
+          r = readme.read_text()
+          r = replace_one(r, '- VLESS、VMess、Trojan 分享链接及 Base64 订阅内容', '- VLESS、VMess、Trojan 分享链接', 'README feature wording')
+          r = replace_one(r, '│  ├─ 订阅链接（输出各入站用户的原始分享链接）', '│  ├─ 全部分享链接（输出各入站用户的原始分享链接）', 'README menu wording')
+          r = replace_one(r, 'xrayctl subscription             # 全部入站 Base64 订阅内容\n', '', 'README subscription command')
+          readme.write_text(r)
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          bash -n xrayctl.sh
+          ! grep -nE 'xrayctl subscription|Base64 订阅|订阅链接' README.md
+          ! grep -n '没有可生成订阅链接的入站' xrayctl.sh
+          grep -n '全部分享链接' xrayctl.sh README.md
+          grep -n 'return 1' xrayctl.sh >/dev/null
+
+      - name: Commit fixes and remove one-shot workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/xrayctl-final-fix.yml
+          git config user.name 'OpenAI'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add xrayctl.sh README.md .github/workflows/xrayctl-final-fix.yml
+          git diff --cached --check
+          git commit -m 'fix: finalize restore uninstall and CLI failure semantics'
+          git push origin HEAD:main
