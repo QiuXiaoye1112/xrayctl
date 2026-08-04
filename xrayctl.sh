@@ -500,24 +500,44 @@ has_net_admin() {
 #   Layer 3: ensure_meta     — init_meta_base + run_metadata_migrations
 # ============================================================
 
+# ============================================================
+# Metadata — three-layer design (P0-1 fix: zero recursion)
+#   Layer 1: init_meta_base    — create/upgrade, NEVER runs migrations
+#   Layer 2: *_raw helpers     — direct jq on $META_FILE, NEVER call init_meta
+#   Layer 3: ensure_meta       — init_meta_base + run_metadata_migrations
+# ============================================================
+
 init_meta_base() {
   mkdir -p "$CONFIG_DIR"
-  if [[ ! -s $META_FILE ]] || ! jq -e 'type=="object" and (.inbounds|type=="object")' "$META_FILE" >/dev/null 2>&1; then
-    printf '%s\n' '{"schema":4,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' >"$META_FILE"
+
+  if [[ ! -s $META_FILE ]]; then
+    printf '%s\n' \
+      '{"schema":3,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' \
+      >"$META_FILE"
     chmod 600 "$META_FILE"
     return 0
   fi
-  local schema
-  schema=$(jq -r '.schema // 1' "$META_FILE")
-  if ((schema < 4)); then
-    local tmp; tmp=$(temp_file)
-    jq '.schema = 4 | .certificates = (.certificates // {}) | .managedResources = (.managedResources // {}) | .migrations = (.migrations // {})' "$META_FILE" >"$tmp"
-    install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-    ((schema <= 2)) && info "元数据已迁移至 schema 4。"
-  fi
+
+  local tmp
+  tmp=$(temp_file)
+
+  jq '
+    .schema = 3 |
+    .inbounds = (.inbounds // {}) |
+    .certificates = (.certificates // {}) |
+    .managedResources = (.managedResources // {}) |
+    .migrations = (.migrations // {})
+  ' "$META_FILE" >"$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+
+  install -m 600 "$tmp" "$META_FILE"
+  rm -f "$tmp"
 }
 
-# Raw helpers — read/write META_FILE directly, MUST NOT call ensure_meta / init_meta_base
+# --- Raw helpers — read/write META_FILE directly, MUST NOT call ensure_meta / init_meta_base ---
+
 meta_migration_done_raw() {
   jq -r --arg name "$1" '.migrations[$name] // false' "$META_FILE" 2>/dev/null | grep -qx true
 }
@@ -525,27 +545,48 @@ meta_migration_done_raw() {
 meta_mark_migration_raw() {
   local name=$1 tmp
   tmp=$(temp_file)
-  jq --arg name "$name" '.migrations[$name] = true' "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+  jq --arg name "$name" '.migrations[$name] = true' "$META_FILE" >"$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  install -m 600 "$tmp" "$META_FILE"
+  rm -f "$tmp"
 }
 
 meta_cert_exists_raw() {
-  jq -e --arg id "$1" '.certificates[$id]' "$META_FILE" >/dev/null 2>&1
+  jq -e --arg id "$1" '.certificates[$id] != null' "$META_FILE" >/dev/null 2>&1
 }
 
 meta_cert_set_raw() {
-  local identifier=$1 subject=$2 certName=$3 source=$4 validation=$5 autoRenew=${6:-true} tmp
+  local identifier=$1 subject=$2 cert_name=$3 source=$4 validation=$5 auto_renew=${6:-true}
+  local tmp
   tmp=$(temp_file)
-  jq --arg id "$identifier" --arg subject "$subject" --arg certName "$certName" \
-     --arg source "$source" --arg validation "$validation" --arg autoRenew "$autoRenew" \
-     --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-    '.certificates[$id] = {subject:$subject, certName:$certName, source:$source,
-      validation:$validation, autoRenew: ($autoRenew == "true"), updatedAt:$now}' \
-    "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+  jq \
+    --arg id "$identifier" \
+    --arg subject "$subject" \
+    --arg certName "$cert_name" \
+    --arg source "$source" \
+    --arg validation "$validation" \
+    --arg autoRenew "$auto_renew" \
+    --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '.certificates[$id] = {
+      subject:$subject,
+      certName:$certName,
+      source:$source,
+      validation:$validation,
+      autoRenew:($autoRenew=="true"),
+      updatedAt:$now
+    }' \
+    "$META_FILE" >"$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
+  install -m 600 "$tmp" "$META_FILE"
+  rm -f "$tmp"
 }
 
-# Migration functions — use only raw helpers, NEVER call ensure_meta
+# --- Migration functions — use ONLY raw helpers, NEVER call ensure_meta / init_meta ---
+
 meta_mark_migration() {
   init_meta_base
   meta_mark_migration_raw "$1"
@@ -558,27 +599,36 @@ migration_done() {
 
 migrate_legacy_certificates_v1() {
   migration_done "legacyCertScanV1" && return 0
+
+  local crt key identifier subject migrated=0
+
   if [[ -d $CERT_DIR ]]; then
-    local crt key identifier ok=1
     for crt in "$CERT_DIR"/*.crt; do
       [[ -e $crt ]] || continue
+
       identifier=$(basename "$crt" .crt)
       key="${CERT_DIR}/${identifier}.key"
+
       [[ -r $key ]] || continue
       meta_cert_exists_raw "$identifier" && continue
-      local subject
+
       subject=$(certificate_server_names "$crt" | head -1)
-      [[ -z $subject ]] && subject="$identifier"
-      if meta_cert_set_raw "$identifier" "$subject" "$identifier" "legacy" "legacy" "false"; then
-        info "已迁移旧版证书：${identifier}"
-      else
-        warn "迁移旧版证书失败：${identifier}"
-        ok=0
-      fi
+      [[ -n $subject ]] || subject="$identifier"
+
+      meta_cert_set_raw \
+        "$identifier" \
+        "$subject" \
+        "$identifier" \
+        "legacy" \
+        "legacy" \
+        "false" || return 1
+
+      ((migrated+=1))
     done
-    ((ok)) || return 1
   fi
+
   meta_mark_migration_raw "legacyCertScanV1"
+  ((migrated == 0)) || info "已注册 ${migrated} 张旧版证书至 metadata。"
 }
 
 cleanup_legacy_certbot_symlink_v1() {
@@ -600,12 +650,13 @@ run_metadata_migrations() {
   cleanup_legacy_certbot_symlink_v1
 }
 
+# --- Public entry points ---
+
 ensure_meta() {
   init_meta_base
   run_metadata_migrations
 }
 
-# Public metadata helpers — call ensure_meta (will only run migrations once)
 init_meta() { ensure_meta; }
 
 meta_cert_exists() {
@@ -2447,7 +2498,7 @@ sync_managed_certificate() {
   local key_target="${CERT_DIR}/${identifier}.key"
   local cert_tmp="${cert_target}.new"   key_tmp="${key_target}.new"
   local cert_bak="${cert_target}.old"   key_bak="${key_target}.old"
-  local changed_value=0 need_rollback=0
+  local sync_changed_internal=0 need_rollback=0
 
   [[ -d ${CERTBOT_CONFIG_DIR}/live/${cert_name} ]] || { warn "Certbot 证书目录不存在：${cert_name}"; return 1; }
   [[ -r $source_cert ]] || { warn "无法读取证书：${source_cert}"; return 1; }
@@ -2484,14 +2535,14 @@ sync_managed_certificate() {
   # Detect changes via cmp
   if ! cmp -s "$source_cert" "$cert_target" 2>/dev/null ||
      ! cmp -s "$source_key"  "$key_target"  2>/dev/null; then
-    changed_value=1
+    sync_changed_internal=1
   fi
 
   # Clean up backups
   rm -f "$cert_bak" "$key_bak"
 
   if [[ -n $__changed_var ]]; then
-    printf -v "$__changed_var" '%s' "$changed_value"
+    printf -v "$__changed_var" '%s' "$sync_changed_internal"
   fi
   return 0
 }
@@ -2911,7 +2962,8 @@ managed_certificate_count() {
 
 renew_one_certificate() {
   local identifier=$1 __result_var=${2:-}
-  local cert_name validation owner result="failed"
+  local cert_name validation owner
+  local renewal_result_internal="failed"
   local lineage_changed=0 sync_changed=0
   local before_serial="" after_serial=""
   local live_cert="${CERTBOT_CONFIG_DIR}/live"
@@ -2995,25 +3047,25 @@ renew_one_certificate() {
 
   # --- Determine result ---
   if [[ $sync_changed == 1 ]]; then
-    result="renewed"
+    renewal_result_internal="renewed"
   elif [[ $lineage_changed == 1 ]]; then
-    result="renewed"   # LE renewed but our copy was already current somehow
+    renewal_result_internal="renewed"
   else
-    result="unchanged"
+    renewal_result_internal="unchanged"
   fi
 
   # --- Restart Xray IFF CERT_DIR copy changed ---
   if [[ $sync_changed == 1 ]] && service_is_active; then
     if ! restart_service; then
       warn "证书已更新，但 Xray 重启失败。"
-      [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "$result"
+      [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "$renewal_result_internal"
       return 1
     fi
     info "Xray 已重启以加载新证书。"
   fi
 
   if [[ -n $__result_var ]]; then
-    printf -v "$__result_var" '%s' "$result"
+    printf -v "$__result_var" '%s' "$renewal_result_internal"
   fi
   return 0
 }
@@ -3030,7 +3082,11 @@ renew_managed_certificates() {
       renewed)   ((renewed+=1));;
       unchanged) ((unchanged+=1));;
       blocked)   ((blocked+=1)); blocked_list+="  - ${id}"$'\n';;
-      *)         ((failed+=1));;
+      failed)    ((failed+=1));;
+      *)
+        warn "未知续期状态：${result:-empty}（${id}）"
+        ((failed+=1))
+        ;;
     esac
   done < <(meta_cert_auto_renew_certs)
   if ((renewed > 0 || unchanged > 0 || blocked > 0 || failed > 0)); then
