@@ -1788,11 +1788,14 @@ install_certbot_dns_plugin() {
   if [[ -n $certbot_path ]]; then
     certbot_python=$(head -1 "$certbot_path" 2>/dev/null | sed 's/^#!//; s/[[:space:]]*$//')
     if [[ -n $certbot_python && -x $certbot_python ]]; then
-      "$certbot_python" -m pip install certbot-dns-cloudflare >/dev/null 2>&1 && return 0
+      "$certbot_python" -m pip install certbot-dns-cloudflare 2>&1 | tail -3 && return 0
     fi
   fi
   command_exists pip3 || install_packages python3-pip
-  pip3 install certbot-dns-cloudflare >/dev/null 2>&1 || { warn "certbot-dns-cloudflare 安装失败，请检查 pip 和网络。"; return 1; }
+  if ! pip3 install certbot-dns-cloudflare 2>&1 | tail -3; then
+    warn "certbot-dns-cloudflare 安装失败，请查看上方错误信息。"
+    return 1
+  fi
 }
 
 issue_certificate() {
