@@ -522,7 +522,7 @@ init_meta_base() {
   tmp=$(temp_file)
 
   jq '
-    .schema = 4 |
+    .schema = ([.schema // 1, 4] | max) |
     .inbounds = (.inbounds // {}) |
     .certificates = (.certificates // {}) |
     .managedResources = (.managedResources // {}) |
