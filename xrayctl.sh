@@ -3311,7 +3311,10 @@ restore_backup() {
       ((warned+=1))
     fi
   done < <(meta_cert_list)
-  ((warned > 0)) && warn "共 ${warned} 张 Let's Encrypt 证书缺少 Certbot 续期数据。"
+  if ((warned > 0)); then
+    warn "共 ${warned} 张 Let's Encrypt 证书缺少 Certbot 续期数据。"
+  fi
+  return 0
 }
 
 show_status() {
