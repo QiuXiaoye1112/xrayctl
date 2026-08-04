@@ -1783,7 +1783,7 @@ issue_certificate() {
   [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。"
   validate_email_address "$email" || die "邮箱格式无效。"
   install_certbot "$mode"
-  if [[ -f ${CERT_DIR}/${domain}.crt ]]; then
+  if [[ -f ${CERT_DIR}/${domain}.crt && -f ${CERT_DIR}/${domain}.key ]]; then
     if [[ -f /etc/letsencrypt/renewal/${domain}.conf ]]; then
       confirm "证书 ${domain} 已存在，是否强制重新签发？" N || { info "已取消。"; return 0; }
     else
