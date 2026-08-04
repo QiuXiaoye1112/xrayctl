@@ -1784,12 +1784,7 @@ issue_certificate() {
   validate_email_address "$email" || die "邮箱格式无效。"
   install_certbot "$mode"
   if [[ -f ${CERT_DIR}/${domain}.crt && -f ${CERT_DIR}/${domain}.key ]]; then
-    if [[ -f /etc/letsencrypt/renewal/${domain}.conf ]]; then
-      confirm "证书 ${domain} 已存在，是否强制重新签发？" N || { info "已取消。"; return 0; }
-    else
-      warn "证书 ${domain} 已存在但不是 Let's Encrypt 签发的，请先删除后再申请。"
-      return 0
-    fi
+    confirm "证书 ${domain} 已存在，是否强制重新签发？" N || { info "已取消。"; return 0; }
   fi
   service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
   local certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email" --force-renewal)
