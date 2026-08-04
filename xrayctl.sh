@@ -855,67 +855,6 @@ meta_rename_inbound() {
   install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
 }
 
-meta_cert_exists() {
-  init_meta
-  jq -e --arg id "$1" '.certificates[$id]' "$META_FILE" >/dev/null 2>&1
-}
-
-meta_cert_set() {
-  local identifier=$1 subject=$2 certName=$3 source=$4 validation=$5 autoRenew=${6:-true} tmp
-  init_meta; tmp=$(temp_file)
-  jq --arg id "$identifier" --arg subject "$subject" --arg certName "$certName" \
-     --arg source "$source" --arg validation "$validation" --arg autoRenew "$autoRenew" \
-     --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-    '.certificates[$id] = {subject:$subject, certName:$certName, source:$source,
-      validation:$validation, autoRenew: ($autoRenew == "true"), updatedAt:$now}' \
-    "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-}
-
-meta_cert_delete() {
-  local identifier=$1 tmp
-  init_meta; tmp=$(temp_file)
-  jq --arg id "$identifier" 'del(.certificates[$id])' "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-}
-
-meta_cert_get_field() {
-  local identifier=$1 field=$2
-  init_meta
-  jq -r --arg id "$identifier" --arg field "$field" \
-    '.certificates[$id][$field] // empty' "$META_FILE"
-}
-
-meta_cert_list() {
-  init_meta
-  jq -r '.certificates | keys[]' "$META_FILE" 2>/dev/null
-}
-
-meta_cert_auto_renew_certs() {
-  init_meta
-  jq -r '.certificates | to_entries[] | select(.value.autoRenew == true) | .key' "$META_FILE" 2>/dev/null
-}
-
-meta_resource_register() {
-  local key=$1 value=$2 tmp
-  init_meta; tmp=$(temp_file)
-  jq --arg key "$key" --arg value "$value" \
-    '.managedResources[$key] = $value' "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-}
-
-meta_resource_get() {
-  init_meta
-  jq -r --arg key "$1" '.managedResources[$key] // empty' "$META_FILE"
-}
-
-meta_resource_remove() {
-  local key=$1 tmp
-  init_meta; tmp=$(temp_file)
-  jq --arg key "$key" 'del(.managedResources[$key])' "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-}
-
 is_xrayctl_certbot_venv() {
   [[ -d $CERTBOT_VENV ]] || return 1
   [[ -x ${CERTBOT_VENV}/bin/python ]] || return 1
@@ -942,19 +881,6 @@ is_xrayctl_certbot_symlink() {
   [[ $target == "${CERTBOT_VENV}/bin/certbot" ]]
 }
 
-register_managed_resources() {
-  meta_resource_register "certbotVenv" "$CERTBOT_VENV"
-  meta_resource_register "certbotConfigDir" "$CERTBOT_CONFIG_DIR"
-  meta_resource_register "certbotWorkDir" "$CERTBOT_WORK_DIR"
-  meta_resource_register "certbotLogsDir" "$CERTBOT_LOGS_DIR"
-  meta_resource_register "cloudflareCredentials" "$CLOUDFLARE_INI"
-  meta_resource_register "renewTimer" "xrayctl-certbot-renew.timer"
-  meta_resource_register "renewService" "xrayctl-certbot-renew.service"
-  meta_resource_register "quickCommand" "$QUICK_COMMAND"
-  meta_resource_register "quickSymlink" "$QUICK_SYMLINK"
-  meta_resource_register "runtimeGroup" "$RUNTIME_GROUP"
-}
-
 get_service_user() {
   local user
   user=$(systemctl show "$SERVICE_NAME" -p User --value 2>/dev/null || true)
@@ -976,6 +902,7 @@ SupplementaryGroups=${RUNTIME_GROUP}
 EOF
   rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
   systemctl daemon-reload
+  meta_resource_register "runtimeGroup" "$RUNTIME_GROUP"
 }
 
 setup_certificate_access() { setup_runtime_access; }
@@ -1050,6 +977,8 @@ install_quick_command() {
   fi
   ln -sfn "$QUICK_COMMAND" "$QUICK_SYMLINK"
   info "快捷命令已安装：xrayctl"
+  meta_resource_register "quickCommand" "$QUICK_COMMAND"
+  meta_resource_register "quickSymlink" "$QUICK_SYMLINK"
 }
 
 # ============================================================
@@ -1100,6 +1029,20 @@ safe_remove_file() {
   ((matched)) || { warn "路径不在允许删除列表：$path"; return 1; }
   [[ -e $path ]] || return 0
   rm -f -- "$path"
+}
+
+safe_remove_managed_dir() {
+  local resource_key=$1 path=$2 recorded
+  [[ -n $path && $path == /* ]] || return 1
+  case $path in
+    /|/usr|/usr/local|/etc|/var|/var/lib|/var/log|/opt|/home|/root)
+      warn "拒绝删除危险路径：$path"; return 1 ;;
+  esac
+  recorded=$(_snapshot_meta_resource_get "$resource_key")
+  [[ -n $recorded ]] || { warn "缺少资产登记，拒绝删除：$path"; return 1; }
+  [[ $recorded == "$path" ]] || { warn "资产路径不匹配，拒绝删除：$path (登记: $recorded)"; return 1; }
+  [[ -e $path ]] || return 0
+  rm -rf -- "$path"
 }
 
 meta_resource_remove_existing() {
@@ -1177,10 +1120,10 @@ _uninstall_remove_managed_certs() {
 _uninstall_remove_certbot() {
   if can_remove_certbot_venv; then
     if is_xrayctl_certbot_symlink; then rm -f /usr/local/bin/certbot; fi
-    safe_remove_dir "$CERTBOT_CONFIG_DIR" "$CERTBOT_CONFIG_DIR"
-    safe_remove_dir "$CERTBOT_WORK_DIR" "$CERTBOT_WORK_DIR"
-    safe_remove_dir "$CERTBOT_LOGS_DIR" "$CERTBOT_LOGS_DIR"
-    safe_remove_dir "$CERTBOT_VENV" "$CERTBOT_VENV"
+    safe_remove_managed_dir "certbotConfigDir" "$CERTBOT_CONFIG_DIR"
+    safe_remove_managed_dir "certbotWorkDir" "$CERTBOT_WORK_DIR"
+    safe_remove_managed_dir "certbotLogsDir" "$CERTBOT_LOGS_DIR"
+    safe_remove_managed_dir "certbotVenv" "$CERTBOT_VENV"
     meta_resource_remove_existing "certbotVenv"; meta_resource_remove_existing "certbotConfigDir"
     meta_resource_remove_existing "certbotWorkDir"; meta_resource_remove_existing "certbotLogsDir"
   else
@@ -1190,7 +1133,8 @@ _uninstall_remove_certbot() {
 }
 
 _uninstall_remove_cloudflare() {
-  safe_remove_file "$CLOUDFLARE_INI" "$CLOUDFLARE_INI"
+  safe_remove_managed_dir "cloudflareCredentials" "$CLOUDFLARE_INI" 2>/dev/null || \
+    rm -f "$CLOUDFLARE_INI" 2>/dev/null || true
   rmdir "$(dirname "$CLOUDFLARE_INI")" 2>/dev/null || true
   meta_resource_remove_existing "cloudflareCredentials"
 }
@@ -1199,7 +1143,7 @@ _uninstall_remove_config() {
   [[ -f $CONFIG_FILE ]] && rm -f "$CONFIG_FILE"
   rm -f "$SNAPSHOT_META"
   [[ -f $META_FILE ]] && rm -f "$META_FILE"
-  [[ -d $CERT_DIR ]] && safe_remove_dir "$CERT_DIR" "$CERT_DIR"
+  [[ -d $CERT_DIR ]] && safe_remove_managed_dir "certDir" "$CERT_DIR"
   [[ -d $CONFIG_DIR ]] && rmdir "$CONFIG_DIR" 2>/dev/null || true
 }
 
@@ -2147,6 +2091,22 @@ delete_client() {
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   [[ -n $label ]] || select_client label "$tag" || return
+  # HTTP: refuse to delete the last user on a non-localhost address
+  if [[ $protocol == http ]]; then
+    local total_users listen_addr
+    total_users=$(jq --arg tag "$tag" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])]|length' "$CONFIG_FILE")
+    if ((total_users == 1)); then
+      listen_addr=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.listen // "0.0.0.0"' "$CONFIG_FILE")
+      if [[ $listen_addr != "127.0.0.1" && $listen_addr != "::1" ]]; then
+        warn "这是 HTTP 入站 ${tag} 的最后一个用户。"
+        warn "当前监听地址为 ${listen_addr}，删除后将变成无认证公网代理。"
+        warn "如需无认证 HTTP，请先将监听地址改为 127.0.0.1/::1。"
+        return 1
+      fi
+      confirm "删除最后一个用户后 HTTP 入站将变为无认证，确定？" N || return 0
+    fi
+  fi
+
   [[ $assume_yes == 1 ]] || confirm "从 ${tag} 删除用户 ${label}？" N || return 0
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
@@ -2359,15 +2319,38 @@ print_links() {
   share_separator
 }
 
+generate_share_links_raw() {
+  local tag=$1 uri_host port link protocol
+  uri_host=$(public_host_for_tag "$tag")
+  port=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.port' "$CONFIG_FILE")
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  case $protocol in
+    vless|vmess|trojan)
+      jq -r --arg tag "$tag" --arg host "$uri_host" --arg port "$port" \
+        --arg proto "$protocol" '
+        .inbounds[] | select(.tag==$tag) |
+        .settings.clients[]? |
+        "\($proto)://\(.id // .password // "")@\($host):\($port)?\(
+          if $proto=="vless" then "encryption=none&security=&type=&host="
+          elif $proto=="vmess" then "encryption=none"
+          else ""
+          end
+        )#\($tag)-\(.email)"' "$CONFIG_FILE" 2>/dev/null || true
+      ;;
+    *) return 0 ;;
+  esac
+}
+
 print_subscription() {
   ensure_config; init_meta
   local tag=${1-} links current_tag
   if [[ -n $tag ]]; then
-    links=$(print_links "$tag" "" | grep -E '^(vless|vmess|trojan)://' || true)
+    links=$(generate_share_links_raw "$tag")
   else
     links=""
     while IFS= read -r current_tag; do
-      links+="$(print_links "$current_tag" "" | grep -E '^(vless|vmess|trojan)://' || true)"$'\n'
+      [[ -n $current_tag ]] || continue
+      links+="$(generate_share_links_raw "$current_tag")"$'\n'
     done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan)$"))|.tag' "$CONFIG_FILE")
     links=${links%$'\n'}
   fi
@@ -2453,6 +2436,10 @@ ensure_certbot_environment() {
     || warn "certbot-dns-cloudflare 插件安装可能失败，Cloudflare DNS 验证不可用。"
 
   mkdir -p "$CERTBOT_CONFIG_DIR" "$CERTBOT_WORK_DIR" "$CERTBOT_LOGS_DIR"
+  meta_resource_register "certbotVenv" "$CERTBOT_VENV"
+  meta_resource_register "certbotConfigDir" "$CERTBOT_CONFIG_DIR"
+  meta_resource_register "certbotWorkDir" "$CERTBOT_WORK_DIR"
+  meta_resource_register "certbotLogsDir" "$CERTBOT_LOGS_DIR"
 }
 
 certbot_cmd() {
@@ -2488,6 +2475,8 @@ WantedBy=timers.target
 EOF
   systemctl daemon-reload
   systemctl enable --now xrayctl-certbot-renew.timer >/dev/null
+  meta_resource_register "renewTimer" "xrayctl-certbot-renew.timer"
+  meta_resource_register "renewService" "xrayctl-certbot-renew.service"
 }
 
 sync_managed_certificate() {
@@ -2678,6 +2667,7 @@ save_cloudflare_credentials() {
   printf '%s\n' "dns_cloudflare_email = ${email}" "dns_cloudflare_api_key = ${api_key}" >"$CLOUDFLARE_INI"
   chmod 600 "$CLOUDFLARE_INI"
   info "Cloudflare 凭据已保存至 ${CLOUDFLARE_INI}"
+  meta_resource_register "cloudflareCredentials" "$CLOUDFLARE_INI"
 }
 
 cloudflare_credentials_menu() {
@@ -3128,6 +3118,21 @@ renew_managed_certificates() {
   fi
 }
 
+renew_certificate_command() {
+  local identifier=${1-} result=""
+  ensure_runtime_dependencies cert-renew
+  [[ -n $identifier ]] || die "请提供证书标识。"
+  if ! renew_one_certificate "$identifier" result; then
+    return 1
+  fi
+  case $result in
+    renewed)   info "${identifier}: 已续期。";;
+    unchanged) info "${identifier}: 无需续期。";;
+    blocked)   warn "${identifier}: 自动续期被阻塞。";;
+    failed)    return 1;;
+  esac
+}
+
 # ============================================================
 # Certificate selection / inbound check / delete
 # ============================================================
@@ -3233,6 +3238,7 @@ backup_all() {
   tar -czf "$target" -C / "${paths[@]}" 2>/dev/null || { rm -f "$target"; die "备份失败。"; }
   chmod 600 "$target"
   info "备份已创建：$target"
+  info "提示：备份包含 Xray 配置、metadata 和证书副本，不含 Certbot 账户/lineage 数据。"
 }
 
 restore_backup() {
@@ -4045,7 +4051,7 @@ dispatch() {
         import) import_certificate "${2-}" "${3-}" "${4-}";;
         delete|remove) delete_managed_certificate "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
         renew-auto) renew_managed_certificates;;
-        renew) renew_one_certificate "${2-}";;
+        renew) renew_certificate_command "${2-}";;
         cloudflare) cloudflare_credentials_menu;;
         *) die "未知 cert 子命令：${1}";; esac;;
 
