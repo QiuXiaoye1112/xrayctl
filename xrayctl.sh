@@ -1774,25 +1774,26 @@ update_tls_inbound_certificate() {
 CF_CREDENTIALS_FILE="${XRAYCTL_CF_CREDENTIALS:-/etc/letsencrypt/cloudflare.ini}"
 
 install_certbot_dns_plugin() {
-  if certbot plugins 2>/dev/null | grep -q 'dns-cloudflare'; then return 0; fi
-  info "正在安装 certbot-dns-cloudflare..."
+  # 用 certbot 自己的 Python 装，保证环境一致
+  local certbot_path certbot_python
+  certbot_path=$(command -v certbot 2>/dev/null || true)
+  if [[ -n $certbot_path ]]; then
+    certbot_python=$(head -1 "$certbot_path" 2>/dev/null | sed 's/^#!//; s/[[:space:]]*$//')
+    if [[ -n $certbot_python && -x $certbot_python ]]; then
+      if "$certbot_python" -c 'import certbot_dns_cloudflare' 2>/dev/null; then return 0; fi
+      info "正在安装 certbot-dns-cloudflare..."
+      "$certbot_python" -m pip install certbot-dns-cloudflare >/dev/null 2>&1 && return 0
+    fi
+  fi
+  # 回退：系统包或 pip3
   local manager; manager=$(pkg_manager 2>/dev/null || true)
   case $manager in
     apt) DEBIAN_FRONTEND=noninteractive apt-get install -y python3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
     dnf) dnf install -y python3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
     apk) apk add --no-cache py3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
   esac
-  # 用 certbot 自己的 Python 装插件，避免环境不一致
-  local certbot_path certbot_python
-  certbot_path=$(command -v certbot 2>/dev/null || true)
-  if [[ -n $certbot_path ]]; then
-    certbot_python=$(head -1 "$certbot_path" 2>/dev/null | sed 's/^#!//; s/[[:space:]]*$//')
-    if [[ -n $certbot_python && -x $certbot_python ]]; then
-      "$certbot_python" -m pip install certbot-dns-cloudflare >/dev/null 2>&1 && return 0
-    fi
-  fi
   command_exists pip3 || install_packages python3-pip
-  pip3 install certbot-dns-cloudflare >/dev/null 2>&1 || { warn "certbot-dns-cloudflare 安装失败，请检查 pip 和网络。"; return 1; }
+  pip3 install certbot-dns-cloudflare >/dev/null 2>&1 || { warn "certbot-dns-cloudflare 安装失败。"; return 1; }
 }
 
 issue_certificate() {
