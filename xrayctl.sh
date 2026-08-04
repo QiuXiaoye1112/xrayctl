@@ -512,7 +512,7 @@ init_meta_base() {
 
   if [[ ! -s $META_FILE ]]; then
     printf '%s\n' \
-      '{"schema":3,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' \
+      '{"schema":4,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' \
       >"$META_FILE"
     chmod 600 "$META_FILE"
     return 0
@@ -522,7 +522,7 @@ init_meta_base() {
   tmp=$(temp_file)
 
   jq '
-    .schema = 3 |
+    .schema = 4 |
     .inbounds = (.inbounds // {}) |
     .certificates = (.certificates // {}) |
     .managedResources = (.managedResources // {}) |
@@ -2531,8 +2531,22 @@ sync_managed_certificate() {
   fi
 
   # Backup current
-  if [[ -f $cert_target ]]; then had_cert=1; cp -a "$cert_target" "$cert_bak"; fi
-  if [[ -f $key_target ]];  then had_key=1;  cp -a "$key_target"  "$key_bak"; fi
+  if [[ -f $cert_target ]]; then
+    had_cert=1
+    if ! cp -a "$cert_target" "$cert_bak"; then
+      rm -f "$cert_tmp" "$key_tmp"
+      warn "备份当前证书失败，已取消替换。"
+      return 1
+    fi
+  fi
+  if [[ -f $key_target ]]; then
+    had_key=1
+    if ! cp -a "$key_target" "$key_bak"; then
+      rm -f "$cert_tmp" "$key_tmp" "$cert_bak"
+      warn "备份当前私钥失败，已取消替换。"
+      return 1
+    fi
+  fi
 
   # Replace
   if ! mv -f "$cert_tmp" "$cert_target"; then need_rollback=1; fi
@@ -3065,7 +3079,7 @@ renew_one_certificate() {
   if [[ $sync_changed == 1 ]] && service_is_active; then
     if ! restart_service; then
       warn "证书副本已更新，但 Xray 重启失败。"
-      [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "$renewal_result_internal"
+      [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"
       return 1
     fi
     info "Xray 已重启以加载新证书。"
