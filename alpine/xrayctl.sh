@@ -1837,10 +1837,13 @@ install_certbot_dns_plugin() {
     dnf) dnf install -y python3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
     apk) apk add --no-cache py3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
   esac
-  local certbot_path; certbot_path=$(command -v certbot 2>/dev/null || true)
-  if [[ -n $certbot_path && -L $certbot_path ]]; then
-    local certbot_python; certbot_python=$(head -1 "$certbot_path" | sed 's/^#!//')
-    [[ -x $certbot_python ]] && "$certbot_python" -m pip install certbot-dns-cloudflare >/dev/null 2>&1 && return 0
+  local certbot_path certbot_python
+  certbot_path=$(command -v certbot 2>/dev/null || true)
+  if [[ -n $certbot_path ]]; then
+    certbot_python=$(head -1 "$certbot_path" 2>/dev/null | sed 's/^#!//; s/[[:space:]]*$//')
+    if [[ -n $certbot_python && -x $certbot_python ]]; then
+      "$certbot_python" -m pip install certbot-dns-cloudflare >/dev/null 2>&1 && return 0
+    fi
   fi
   command_exists pip3 || install_packages python3-pip
   pip3 install certbot-dns-cloudflare >/dev/null 2>&1 || { warn "certbot-dns-cloudflare 安装失败，请检查 pip 和网络。"; return 1; }
