@@ -1040,10 +1040,10 @@ safe_remove_managed_dir() {
     /|/usr|/usr/local|/etc|/var|/var/lib|/var/log|/opt|/home|/root)
       warn "拒绝删除危险路径：$path"; return 1 ;;
   esac
+  [[ -e $path ]] || return 0
   recorded=$(_snapshot_meta_resource_get "$resource_key")
   [[ -n $recorded ]] || { warn "缺少资产登记，拒绝删除：$path"; return 1; }
   [[ $recorded == "$path" ]] || { warn "资产路径不匹配，拒绝删除：$path (登记: $recorded)"; return 1; }
-  [[ -e $path ]] || return 0
   rm -rf -- "$path"
 }
 
@@ -1054,10 +1054,10 @@ safe_remove_managed_file() {
     /|/etc|/usr|/usr/local|/var|/opt|/home|/root)
       warn "拒绝删除危险路径：$path"; return 1 ;;
   esac
+  [[ -e $path ]] || return 0
   recorded=$(_snapshot_meta_resource_get "$resource_key")
   [[ -n $recorded ]] || { warn "缺少资产登记，拒绝删除：$path"; return 1; }
   [[ $recorded == "$path" ]] || { warn "资产路径不匹配，拒绝删除：$path (登记: $recorded)"; return 1; }
-  [[ -e $path ]] || return 0
   rm -f -- "$path"
 }
 
@@ -1142,6 +1142,8 @@ _uninstall_remove_certbot() {
     safe_remove_managed_dir "certbotVenv" "$CERTBOT_VENV"
     meta_resource_remove_existing "certbotVenv"; meta_resource_remove_existing "certbotConfigDir"
     meta_resource_remove_existing "certbotWorkDir"; meta_resource_remove_existing "certbotLogsDir"
+  elif [[ ! -d $CERTBOT_VENV ]]; then
+    return 0
   else
     warn "Certbot 环境未通过所有权验证，跳过删除。"
     return 1
@@ -1182,7 +1184,7 @@ _uninstall_remove_quick_command() {
 }
 
 _uninstall_remove_backups() {
-  safe_remove_dir "$BACKUP_DIR" "$BACKUP_DIR"
+  safe_remove_managed_dir "backupDir" "$BACKUP_DIR"
 }
 
 _uninstall_remove_logs() {
