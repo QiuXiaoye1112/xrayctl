@@ -28,6 +28,13 @@ JQ_INSTALL_PATH="${XRAYCTL_JQ_INSTALL_PATH:-/usr/local/bin/jq}"
 CERT_STOPPED_SERVICE=0
 APT_IPV4_AVAILABLE_CACHE=""
 
+CERTBOT_VENV="${XRAYCTL_CERTBOT_VENV:-/opt/xrayctl/certbot}"
+CERTBOT_BIN="${CERTBOT_VENV}/bin/certbot"
+CERTBOT_CONFIG_DIR="${XRAYCTL_CERTBOT_CONFIG_DIR:-/var/lib/xrayctl/letsencrypt}"
+CERTBOT_WORK_DIR="${XRAYCTL_CERTBOT_WORK_DIR:-/var/lib/xrayctl/certbot-work}"
+CERTBOT_LOGS_DIR="${XRAYCTL_CERTBOT_LOGS_DIR:-/var/log/xrayctl/certbot}"
+CLOUDFLARE_INI="${XRAYCTL_CLOUDFLARE_INI:-/etc/xrayctl/cloudflare.ini}"
+
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
   C_BLUE=$'\033[34m'; C_CYAN=$'\033[36m'; C_BOLD=$'\033[1m'; C_RESET=$'\033[0m'
@@ -472,8 +479,19 @@ has_net_admin() {
 init_meta() {
   mkdir -p "$CONFIG_DIR"
   if [[ ! -s $META_FILE ]] || ! jq -e 'type=="object" and (.inbounds|type=="object")' "$META_FILE" >/dev/null 2>&1; then
-    printf '%s\n' '{"schema":1,"inbounds":{}}' >"$META_FILE"
+    printf '%s\n' '{"schema":2,"inbounds":{},"certificates":{}}' >"$META_FILE"
     chmod 600 "$META_FILE"
+    return 0
+  fi
+  local schema
+  schema=$(jq -r '.schema // 1' "$META_FILE")
+  if [[ $schema == 1 ]]; then
+    local tmp
+    tmp=$(temp_file)
+    jq '.schema = 2 | .certificates = (.certificates // {})' "$META_FILE" >"$tmp"
+    install -m 600 "$tmp" "$META_FILE"
+    rm -f "$tmp"
+    info "元数据已迁移至 schema 2。"
   fi
 }
 
@@ -612,6 +630,47 @@ meta_rename_inbound() {
   install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
 }
 
+meta_cert_exists() {
+  init_meta
+  jq -e --arg id "$1" '.certificates[$id]' "$META_FILE" >/dev/null 2>&1
+}
+
+meta_cert_set() {
+  local identifier=$1 subject=$2 certName=$3 source=$4 validation=$5 autoRenew=${6:-true} tmp
+  init_meta; tmp=$(temp_file)
+  jq --arg id "$identifier" --arg subject "$subject" --arg certName "$certName" \
+     --arg source "$source" --arg validation "$validation" --arg autoRenew "$autoRenew" \
+     --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '.certificates[$id] = {subject:$subject, certName:$certName, source:$source,
+      validation:$validation, autoRenew: ($autoRenew == "true"), updatedAt:$now}' \
+    "$META_FILE" >"$tmp"
+  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+}
+
+meta_cert_delete() {
+  local identifier=$1 tmp
+  init_meta; tmp=$(temp_file)
+  jq --arg id "$identifier" 'del(.certificates[$id])' "$META_FILE" >"$tmp"
+  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+}
+
+meta_cert_get_field() {
+  local identifier=$1 field=$2
+  init_meta
+  jq -r --arg id "$identifier" --arg field "$field" \
+    '.certificates[$id][$field] // empty' "$META_FILE"
+}
+
+meta_cert_list() {
+  init_meta
+  jq -r '.certificates | keys[]' "$META_FILE" 2>/dev/null
+}
+
+meta_cert_auto_renew_certs() {
+  init_meta
+  jq -r '.certificates | to_entries[] | select(.value.autoRenew == true) | .key' "$META_FILE" 2>/dev/null
+}
+
 get_service_user() {
   local user
   user=$(systemctl show "$SERVICE_NAME" -p User --value 2>/dev/null || true)
@@ -724,9 +783,16 @@ uninstall_xray() {
   if [[ $purge == 1 ]]; then TERM="${TERM:-xterm}" bash "$installer" remove --purge; else TERM="${TERM:-xterm}" bash "$installer" remove; fi
   rm -f "$installer"
   if [[ $purge == 1 ]]; then
+    # Clean up old deploy hooks (migration from pre-isolation era)
     for hook in /etc/letsencrypt/renewal-hooks/deploy/xrayctl-*; do
       [[ -e $hook ]] && rm -f "$hook"
     done
+    # Clean up isolated certbot environment
+    rm -rf "$CERTBOT_CONFIG_DIR" "$CERTBOT_WORK_DIR" "$CERTBOT_LOGS_DIR"
+    rm -rf "$CERTBOT_VENV"
+    rm -f "$CLOUDFLARE_INI"
+    # Remove renewal timer units
+    rm -f /etc/systemd/system/xrayctl-certbot-renew.service /etc/systemd/system/xrayctl-certbot-renew.timer
     rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-access.conf" "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
     rmdir "$SYSTEMD_OVERRIDE_DIR" 2>/dev/null || true
     if [[ $RUNTIME_GROUP == xrayctl ]]; then
@@ -1622,22 +1688,83 @@ print_all_share_links() {
 }
 
 
-certbot_supports_ip() {
-  command_exists certbot && certbot --help all 2>/dev/null | grep -q -- '--ip-address'
+# ============================================================
+# Unified Certbot environment — all certbot calls go through
+# the isolated venv at /opt/xrayctl/certbot (see certbot_cmd).
+# ============================================================
+
+ensure_certbot_environment() {
+  local manager pip_timeout=${XRAYCTL_CERT_PIP_TIMEOUT:-120} apt_timeout=${XRAYCTL_CERT_APT_TIMEOUT:-60}
+  local need_install=0
+
+  if [[ ! -x $CERTBOT_BIN ]]; then need_install=1
+  elif ! "$CERTBOT_BIN" --help all 2>/dev/null | grep -q -- '--ip-address'; then need_install=1
+  elif ! "$CERTBOT_VENV/bin/pip" list 2>/dev/null | grep -q 'certbot-dns-cloudflare'; then need_install=1
+  fi
+
+  if ((need_install == 0)); then return 0; fi
+
+  manager=$(pkg_manager) || die "无法准备 Certbot 环境（未知的包管理器）。"
+  info "正在准备独立的 Certbot 环境。"
+
+  case $manager in
+    apt)
+      DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$apt_timeout" \
+        apt_get_guarded install -y --no-install-recommends python3 python3-venv \
+        || die "Python venv 安装失败或超时。" ;;
+    dnf) run_bounded "$apt_timeout" dnf install -y python3 python3-pip || die "Python 环境安装失败或超时。" ;;
+    yum) run_bounded "$apt_timeout" yum install -y python3 python3-pip || die "Python 环境安装失败或超时。" ;;
+    pacman) run_bounded "$apt_timeout" pacman -Sy --noconfirm python python-pip || die "Python 环境安装失败或超时。" ;;
+    zypper) run_bounded "$apt_timeout" zypper --non-interactive install python3 python3-pip || die "Python 环境安装失败或超时。" ;;
+  esac
+
+  install -d -m 755 "$(dirname "$CERTBOT_VENV")"
+  if [[ ! -x $CERTBOT_VENV/bin/python ]]; then
+    python3 -m venv "$CERTBOT_VENV" || {
+      python3 -m venv --without-pip "$CERTBOT_VENV" || die "无法创建 Certbot Python 环境。"
+      local bootstrap
+      bootstrap=$(temp_file)
+      if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 2 \
+        --connect-timeout 15 --max-time 60 https://bootstrap.pypa.io/get-pip.py -o "$bootstrap"; then
+        rm -f "$bootstrap"; die "下载 pip 引导脚本失败。"
+      fi
+      if ! run_bounded "$pip_timeout" "$CERTBOT_VENV/bin/python" "$bootstrap" --disable-pip-version-check; then
+        rm -f "$bootstrap"; die "pip 引导安装失败。"
+      fi
+      rm -f "$bootstrap"
+    }
+  fi
+
+  info "正在安装 Certbot 及插件。"
+  run_bounded "$pip_timeout" "$CERTBOT_VENV/bin/pip" install --disable-pip-version-check \
+    --timeout 15 --retries 2 --upgrade 'certbot>=5.4' certbot-dns-cloudflare certbot-nginx \
+    || die "Certbot / 插件安装失败。"
+
+  "$CERTBOT_BIN" --help all 2>/dev/null | grep -q -- '--ip-address' \
+    || die "当前安装的 Certbot 不支持 IP 证书。"
+  "$CERTBOT_VENV/bin/pip" list 2>/dev/null | grep -q 'certbot-dns-cloudflare' \
+    || warn "certbot-dns-cloudflare 插件安装可能失败，Cloudflare DNS 验证不可用。"
+
+  mkdir -p "$CERTBOT_CONFIG_DIR" "$CERTBOT_WORK_DIR" "$CERTBOT_LOGS_DIR"
+}
+
+certbot_cmd() {
+  "$CERTBOT_BIN" \
+    --config-dir "$CERTBOT_CONFIG_DIR" \
+    --work-dir "$CERTBOT_WORK_DIR" \
+    --logs-dir "$CERTBOT_LOGS_DIR" \
+    "$@"
 }
 
 setup_certbot_renewal_timer() {
-  local certbot_path
-  certbot_path=$(command -v certbot) || return 1
-
-
-cat >/etc/systemd/system/xrayctl-certbot-renew.service <<EOF
+  local quick_command="${QUICK_COMMAND:-/usr/local/sbin/xrayctl}"
+  cat >/etc/systemd/system/xrayctl-certbot-renew.service <<EOF
 [Unit]
 Description=Renew certificates managed by xrayctl
 
 [Service]
 Type=oneshot
-ExecStart=${certbot_path} renew --quiet
+ExecStart=${quick_command} cert renew-auto
 EOF
   cat >/etc/systemd/system/xrayctl-certbot-renew.timer <<'EOF'
 [Unit]
@@ -1655,97 +1782,51 @@ EOF
   systemctl enable --now xrayctl-certbot-renew.timer >/dev/null
 }
 
-bootstrap_certbot_venv_without_apt() {
-  local venv_dir=$1 bootstrap pip_timeout=${XRAYCTL_CERT_PIP_TIMEOUT:-120}
-  command_exists python3 || return 1
-  install -d -m 755 "$(dirname "$venv_dir")"
-  if [[ ! -x $venv_dir/bin/python || ! -x $venv_dir/bin/pip ]]; then
-    info "正在准备 Certbot 环境。"
+sync_managed_certificate() {
+  local identifier=$1 certbot_live="${CERTBOT_CONFIG_DIR}/live/${identifier}"
+  local cert_target="${CERT_DIR}/${identifier}.crt"
+  local key_target="${CERT_DIR}/${identifier}.key"
+  local old_cert_hash="" new_cert_hash=""
+  [[ -d $certbot_live ]] || { warn "Certbot 证书目录不存在：${certbot_live}"; return 1; }
+  [[ -r ${certbot_live}/fullchain.pem ]] || { warn "无法读取证书：${certbot_live}/fullchain.pem"; return 1; }
+  [[ -r ${certbot_live}/privkey.pem ]] || { warn "无法读取私钥：${certbot_live}/privkey.pem"; return 1; }
+  validate_certificate_pair_files "${certbot_live}/fullchain.pem" "${certbot_live}/privkey.pem" || return 1
+  if [[ -f $cert_target ]]; then
+    old_cert_hash=$(sha256sum "$cert_target" | cut -d' ' -f1)
   fi
-  if [[ ! -x $venv_dir/bin/python ]]; then
-    python3 -m venv --without-pip "$venv_dir" >/dev/null 2>&1 || return 1
+  setup_certificate_access
+  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" \
+    "${certbot_live}/fullchain.pem" "$cert_target"
+  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" \
+    "${certbot_live}/privkey.pem" "$key_target"
+  if [[ -f $cert_target ]]; then
+    new_cert_hash=$(sha256sum "$cert_target" | cut -d' ' -f1)
   fi
-  if [[ ! -x $venv_dir/bin/pip ]]; then
-    bootstrap=$(temp_file)
-    if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 2 \
-      --connect-timeout 15 --max-time 60 https://bootstrap.pypa.io/get-pip.py -o "$bootstrap"; then
-      rm -f "$bootstrap"
-      return 1
-    fi
-    if ! run_bounded "$pip_timeout" "$venv_dir/bin/python" "$bootstrap" --disable-pip-version-check; then
-      rm -f "$bootstrap"
-      return 1
-    fi
-    rm -f "$bootstrap"
-  fi
-  [[ -x $venv_dir/bin/pip ]]
+  [[ $old_cert_hash != "$new_cert_hash" ]]
 }
 
-install_certbot_ip_support() {
-  local manager venv_dir=/opt/xrayctl/certbot
-  local apt_timeout=${XRAYCTL_CERT_APT_TIMEOUT:-60} pip_timeout=${XRAYCTL_CERT_PIP_TIMEOUT:-120}
-  manager=$(pkg_manager) || die "无法安装支持 IP 证书的 Certbot。"
-  if ! bootstrap_certbot_venv_without_apt "$venv_dir"; then
-    info "正在切换 Certbot 安装方式。"
-    case $manager in
-      apt)
-        info "正在准备 Python 环境。"
-        DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$apt_timeout" \
-          apt_get_guarded install -y --no-install-recommends python3 python3-venv \
-          || die "Python venv 安装失败或超时，请检查 APT 软件源。" ;;
-      dnf) run_bounded "$apt_timeout" dnf install -y python3 python3-pip || die "Python 环境安装失败或超时。" ;;
-      yum) run_bounded "$apt_timeout" yum install -y python3 python3-pip || die "Python 环境安装失败或超时。" ;;
-      pacman) run_bounded "$apt_timeout" pacman -Sy --noconfirm python python-pip || die "Python 环境安装失败或超时。" ;;
-      zypper) run_bounded "$apt_timeout" zypper --non-interactive install python3 python3-pip || die "Python 环境安装失败或超时。" ;;
-    esac
-    python3 -m venv "$venv_dir" || die "无法创建 Certbot Python 环境。"
-  fi
-  info "正在安装 Certbot。"
-  run_bounded "$pip_timeout" "$venv_dir/bin/pip" install --disable-pip-version-check \
-    --timeout 15 --retries 2 --upgrade 'certbot>=5.4' \
-    || die "新版 Certbot 安装失败。"
-  if [[ -e /usr/local/bin/certbot && ! -L /usr/local/bin/certbot ]]; then
-    die "/usr/local/bin/certbot 已存在且不是符号链接。"
-  fi
-  ln -sfn "$venv_dir/bin/certbot" /usr/local/bin/certbot
-  hash -r
-  certbot_supports_ip || die "当前 Certbot 不支持 IP 证书。"
-  setup_certbot_renewal_timer
+hash_ipv6_identifier() {
+  local ip=$1
+  printf 'ip6-%s' "$(printf '%s' "$ip" | sha256sum | cut -c1-8)"
 }
 
-install_certbot() {
-  local mode=${1:-domain} manager install_timeout=${XRAYCTL_CERT_APT_TIMEOUT:-60}
-  if command_exists certbot && { [[ $mode != ip ]] || certbot_supports_ip; }; then return 0; fi
-  if [[ $mode == ip ]]; then install_certbot_ip_support; return; fi
-  manager=$(pkg_manager) || die "无法自动安装 certbot。"
-  info "安装 certbot。"
-  case $manager in
-    apt)
-      DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$install_timeout" apt_get_guarded update -y \
-        || warn "APT 软件索引更新失败或超时，尝试使用现有索引。"
-      DEBIAN_FRONTEND=noninteractive XRAYCTL_APT_TIMEOUT="$install_timeout" \
-        apt_get_guarded install -y --no-install-recommends certbot \
-        || die "certbot 安装失败或超时，请检查 APT 软件源。"
-      ;;
-    dnf) run_bounded "$install_timeout" dnf install -y certbot || die "certbot 安装失败或超时。" ;;
-    yum) run_bounded "$install_timeout" yum install -y epel-release || die "EPEL 安装失败或超时。"; run_bounded "$install_timeout" yum install -y certbot || die "certbot 安装失败或超时。" ;;
-    pacman) run_bounded "$install_timeout" pacman -Sy --noconfirm certbot || die "certbot 安装失败或超时。" ;;
-    zypper) run_bounded "$install_timeout" zypper --non-interactive install certbot || die "certbot 安装失败或超时。" ;;
+detect_port80_owner() {
+  local pid pname
+  pid=$(ss -tlnp 2>/dev/null | awk '/:80 /{print $NF}' | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)
+  if [[ -z $pid ]]; then
+    pid=$(netstat -tlnp 2>/dev/null | awk '/:80 /{print $NF}' | sed -n 's/.*\///p' | head -1)
+    if [[ -z $pid ]]; then printf 'free'; return 0; fi
+    pname="$pid"
+  else
+    pname=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+  fi
+  case $pname in
+    xray) printf 'xray';;
+    nginx) printf 'nginx';;
+    httpd|apache2) printf 'apache';;
+    "") printf 'free';;
+    *) printf 'other';;
   esac
-}
-
-write_certbot_deploy_hook() {
-  local domain=$1 hook_dir=/etc/letsencrypt/renewal-hooks/deploy hook
-  hook="${hook_dir}/xrayctl-${domain}"
-  mkdir -p "$hook_dir"
-  cat >"$hook" <<EOF
-#!/usr/bin/env bash
-set -Eeuo pipefail
-install -m 640 -o "${RUNTIME_OWNER}" -g "${RUNTIME_GROUP}" "/etc/letsencrypt/live/${domain}/fullchain.pem" "${CERT_DIR}/${domain}.crt"
-install -m 640 -o "${RUNTIME_OWNER}" -g "${RUNTIME_GROUP}" "/etc/letsencrypt/live/${domain}/privkey.pem" "${CERT_DIR}/${domain}.key"
-systemctl try-restart "${SERVICE_NAME}.service"
-EOF
-  chmod 750 "$hook"
 }
 
 update_tls_inbound_certificate() {
@@ -1771,68 +1852,248 @@ update_tls_inbound_certificate() {
   rm -f "$tmp"
 }
 
+# ============================================================
+# Cloudflare credentials
+# ============================================================
+
+load_cloudflare_credentials() {
+  [[ -f $CLOUDFLARE_INI && -r $CLOUDFLARE_INI ]] || return 1
+  grep -q 'dns_cloudflare_api_key' "$CLOUDFLARE_INI" 2>/dev/null
+}
+
+save_cloudflare_credentials() {
+  local email="" api_key=""
+  while [[ -z $email ]]; do
+    prompt_value email "Cloudflare 邮箱"
+    if [[ $email == *@*.* && $email != *" "* ]]; then break; fi
+    warn "邮箱格式无效，请重新输入。"
+    email=""
+  done
+  while [[ -z $api_key ]]; do
+    prompt_secret api_key "Cloudflare Global API Key"
+    [[ -n $api_key ]] && break
+    warn "API Key 不能为空。"
+  done
+  mkdir -p "$(dirname "$CLOUDFLARE_INI")"
+  printf '%s\n' "dns_cloudflare_email = ${email}" "dns_cloudflare_api_key = ${api_key}" >"$CLOUDFLARE_INI"
+  chmod 600 "$CLOUDFLARE_INI"
+  info "Cloudflare 凭据已保存至 ${CLOUDFLARE_INI}"
+}
+
+cloudflare_credentials_menu() {
+  local choice
+  while true; do
+    clear_screen
+    heading "Cloudflare 凭据管理"
+    if load_cloudflare_credentials; then
+      local email
+      email=$(grep 'dns_cloudflare_email' "$CLOUDFLARE_INI" 2>/dev/null | sed 's/.*=\s*//')
+      printf 'Cloudflare 邮箱: %s\nGlobal API Key: 已配置\n\n' "${email:-未知}"
+      printf '1) 更新 Global API Key\n2) 删除保存的凭据\n0) 返回\n'
+    else
+      printf 'Cloudflare 凭据: 未配置\n\n'
+      printf '1) 配置 Cloudflare 凭据\n0) 返回\n'
+    fi
+    read -r -p "请选择: " choice || { echo; return; }
+    case $choice in
+      1) save_cloudflare_credentials; pause;;
+      2) if load_cloudflare_credentials; then
+           confirm "确认删除 Cloudflare 凭据？" N || { info "已取消。"; pause; continue; }
+           rm -f "$CLOUDFLARE_INI"; info "Cloudflare 凭据已删除。"
+         fi
+         pause;;
+      0) return;; *) warn "无效选项。"; pause;;
+    esac
+  done
+}
+
+# ============================================================
+# Certificate issuance sub-functions
+# ============================================================
+
+issue_domain_cloudflare() {
+  local domain=$1 email=$2 force=${3:-0}
+  local certbot_args=(certonly --dns-cloudflare --dns-cloudflare-credentials "$CLOUDFLARE_INI" \
+    --non-interactive --agree-tos --cert-name "$domain" -m "$email" -d "$domain")
+  [[ $force == 1 ]] && certbot_args+=(--force-renewal)
+  certbot_cmd "${certbot_args[@]}"
+}
+
+issue_domain_http() {
+  local domain=$1 email=$2 force=${3:-0}
+  local owner was_active=0
+  owner=$(detect_port80_owner)
+  local certbot_args=(certonly --standalone --non-interactive --agree-tos \
+    --preferred-challenges http --cert-name "$domain" -m "$email" -d "$domain")
+  [[ $force == 1 ]] && certbot_args+=(--force-renewal)
+
+  case $owner in
+    free)
+      certbot_cmd "${certbot_args[@]}"
+      ;;
+    xray)
+      service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
+      if ! certbot_cmd "${certbot_args[@]}"; then
+        ((was_active)) && { systemctl start "$SERVICE_NAME" || true; CERT_STOPPED_SERVICE=0; }
+        return 1
+      fi
+      if ((was_active)); then
+        systemctl start "$SERVICE_NAME"; CERT_STOPPED_SERVICE=0
+      fi
+      ;;
+    nginx)
+      certbot_args=(certonly --nginx --non-interactive --agree-tos \
+        --cert-name "$domain" -m "$email" -d "$domain")
+      [[ $force == 1 ]] && certbot_args+=(--force-renewal)
+      certbot_cmd "${certbot_args[@]}"
+      ;;
+    *)
+      warn "80 端口被其他程序占用，无法使用 HTTP 验证。请选择 Cloudflare DNS 自动验证。"
+      return 1
+      ;;
+  esac
+}
+
+issue_domain_manual_dns() {
+  local domain=$1 email=$2 force=${3:-0}
+  local certbot_args=(certonly --manual --agree-tos -m "$email" --preferred-challenges dns --cert-name "$domain" -d "$domain")
+  [[ $force == 1 ]] && certbot_args+=(--force-renewal)
+  info "Certbot 将提示添加 TXT 记录，请在 DNS 面板添加后回车继续。"
+  certbot_cmd "${certbot_args[@]}"
+}
+
+issue_ip_certificate() {
+  local ip=$1 email=$2 force=${3:-0} identifier owner was_active=0
+  identifier=$(hash_ipv6_identifier "$ip")
+  owner=$(detect_port80_owner)
+  local certbot_args=(certonly --standalone --non-interactive --agree-tos \
+    --preferred-challenges http --cert-name "$identifier" -m "$email" \
+    --preferred-profile shortlived --ip-address "$ip")
+  [[ $force == 1 ]] && certbot_args+=(--force-renewal)
+
+  case $owner in
+    free) certbot_cmd "${certbot_args[@]}";;
+    xray)
+      service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
+      if ! certbot_cmd "${certbot_args[@]}"; then
+        ((was_active)) && { systemctl start "$SERVICE_NAME" || true; CERT_STOPPED_SERVICE=0; }
+        return 1
+      fi
+      if ((was_active)); then
+        systemctl start "$SERVICE_NAME"; CERT_STOPPED_SERVICE=0
+      fi
+      ;;
+    *) warn "80 端口被占用，IP 证书只能使用 HTTP 验证。"; return 1;;
+  esac
+}
+
+# ============================================================
+# Main certificate issue entry point
+# ============================================================
+
 issue_certificate() {
   ensure_runtime_dependencies cert-issue
-  local domain=${1-} email=${2-} was_active=0 paths cert_path default_domain="" mode=domain verify_method=http
+  ensure_certbot_environment
+  local domain=${1-} email=${2-} force=0 mode=domain verify_method="" identifier="" cert_name=""
+  local was_active=0 rc=0
+
   if [[ -z $domain ]]; then
+    local default_domain
     default_domain=$(detect_public_ip || true)
     prompt_validated_value domain "证书域名/IP" "$default_domain" validate_domain_or_ip "域名/IP 无效，请重新输入。"
   fi
   if validate_ip_literal "$domain"; then mode=ip;
   elif ! validate_domain "$domain"; then die "证书域名/IP 无效。"; fi
 
-  # 域名可选 DNS 验证，IP 只能用 HTTP
+  # Determine cert_name / identifier
+  if [[ $mode == ip ]]; then
+    identifier=$(hash_ipv6_identifier "$domain")
+    cert_name="$identifier"
+  else
+    identifier="$domain"
+    cert_name="$domain"
+  fi
+
+  # Choose verification method for domains
   if [[ $mode == domain ]]; then
-    choose verify_method "选择验证方式" "DNS (手动添加 TXT 记录)" "HTTP (需要 80 端口可访问)"
-    if [[ $verify_method == 1 ]]; then
-      verify_method=dns-manual
+    local cf_label="Cloudflare DNS 自动验证"
+    local dns_label="DNS 手动验证（无法自动续期）"
+    local http_label="HTTP 自动验证"
+    if load_cloudflare_credentials; then
+      choose verify_method "选择验证方式" "$cf_label" "$http_label" "$dns_label"
+    else
+      choose verify_method "选择验证方式" "$http_label" "$dns_label"
+      if [[ $verify_method == 1 ]]; then verify_method=http; else verify_method=dns-manual; fi
+      # Adjust for CF case
+      if load_cloudflare_credentials; then true; fi
+    fi
+    # Remap after choose with CF
+    if load_cloudflare_credentials; then
+      case $verify_method in
+        1) verify_method=dns-cloudflare;; 2) verify_method=http;; 3) verify_method=dns-manual;;
+      esac
     fi
   fi
 
   [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。"
   validate_email_address "$email" || die "邮箱格式无效。"
-  install_certbot "$mode"
-  if [[ -f ${CERT_DIR}/${domain}.crt && -f ${CERT_DIR}/${domain}.key ]]; then
+
+  # Check if cert already exists
+  if [[ -f ${CERT_DIR}/${identifier}.crt && -f ${CERT_DIR}/${identifier}.key ]]; then
     local using_inbounds
-    using_inbounds=$(jq -r --arg cert "${CERT_DIR}/${domain}.crt" \
+    using_inbounds=$(jq -r --arg cert "${CERT_DIR}/${identifier}.crt" \
       '.inbounds[]?|select(.streamSettings.tlsSettings.certificates[0].certificateFile==$cert)|.tag' "$CONFIG_FILE" 2>/dev/null | paste -sd ',')
     if [[ -n $using_inbounds ]]; then
-      confirm "证书 ${domain} 正在被 ${using_inbounds} 使用，是否强制重新签发？" N || { info "已取消。"; return 0; }
+      confirm "证书 ${identifier} 正在被 ${using_inbounds} 使用，是否强制重新签发？" N || { info "已取消。"; return 0; }
     else
-      confirm "证书 ${domain} 已存在，是否强制重新签发？" N || { info "已取消。"; return 0; }
+      confirm "证书 ${identifier} 已存在，是否强制重新签发？" N || { info "已取消。"; return 0; }
     fi
+    force=1
   fi
 
-  local certbot_args
-  if [[ $verify_method == dns-manual ]]; then
-    info "Certbot 将提示添加 TXT 记录，请在 DNS 面板添加后回车继续。"
-    certbot_args=(certonly --manual --agree-tos -m "$email" --force-renewal
-      --preferred-challenges dns -d "$domain")
-  else
-    service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
-    certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email" --force-renewal)
-    if [[ $mode == ip ]]; then
-      certbot_args+=(--preferred-profile shortlived --ip-address "$domain")
-    else
-      certbot_args+=(-d "$domain")
-    fi
-  fi
-  if ! certbot "${certbot_args[@]}"; then
-    if ((was_active)); then systemctl start "$SERVICE_NAME" || true; CERT_STOPPED_SERVICE=0; fi
+  # Issue
+  local validation="" auto_renew="true"
+  case $mode:$verify_method in
+    domain:dns-cloudflare)
+      validation=dns-cloudflare
+      issue_domain_cloudflare "$domain" "$email" "$force" || rc=1
+      ;;
+    domain:http)
+      validation=http-standalone
+      local owner; owner=$(detect_port80_owner)
+      [[ $owner == nginx ]] && validation=http-nginx
+      issue_domain_http "$domain" "$email" "$force" || rc=1
+      ;;
+    domain:dns-manual)
+      validation=dns-manual; auto_renew="false"
+      issue_domain_manual_dns "$domain" "$email" "$force" || rc=1
+      ;;
+    ip:*)
+      validation=http-standalone
+      issue_ip_certificate "$domain" "$email" "$force" || rc=1
+      ;;
+  esac
+
+  if ((rc != 0)); then
     warn "证书签发失败，请查看上方 Certbot 输出的具体原因。"
     return 0
   fi
-  paths=$(copy_certificate_pair "$domain" "/etc/letsencrypt/live/${domain}/fullchain.pem" "/etc/letsencrypt/live/${domain}/privkey.pem")
-  cert_path=$(head -n1 <<<"$paths")
-  write_certbot_deploy_hook "$domain"
+
+  # Sync cert to CERT_DIR and register metadata
+  sync_managed_certificate "$cert_name" || true
+  register_certificate_metadata "$identifier" "$domain" "letsencrypt" "$validation" "$auto_renew"
   setup_certbot_renewal_timer
-  if ((was_active)); then
-    systemctl start "$SERVICE_NAME"; CERT_STOPPED_SERVICE=0
-  elif [[ $verify_method == dns-manual ]] && service_is_active; then
-    systemctl restart "$SERVICE_NAME"
-  fi
-  info "证书已保存：${cert_path}"
+  info "证书已签发并托管：${identifier}"
 }
+
+register_certificate_metadata() {
+  local identifier=$1 subject=$2 source=$3 validation=$4 auto_renew=$5
+  meta_cert_set "$identifier" "$subject" "$identifier" "$source" "$validation" "$auto_renew"
+}
+
+# ============================================================
+# Certificate import / list / count / delete
+# ============================================================
 
 import_certificate() {
   ensure_runtime_dependencies cert-import
@@ -1842,45 +2103,114 @@ import_certificate() {
   [[ -n $cert ]] || prompt_validated_value cert "证书文件路径" "" validate_readable_file "证书文件不存在或不可读，请重新输入。"
   [[ -n $key ]] || prompt_validated_value key "私钥文件路径" "" validate_readable_file "私钥文件不存在或不可读，请重新输入。"
   paths=$(copy_certificate_pair "$domain" "$cert" "$key")
+  meta_cert_set "$domain" "$domain" "$domain" "imported" "dns-manual" "false"
   info "证书已导入：$(head -n1 <<<"$paths")"
 }
 
 list_certificates() {
-  if [[ ! -d $CERT_DIR ]]; then info "还没有托管证书。"; return; fi
-  local cert found=0
-  for cert in "$CERT_DIR"/*.crt; do
-    [[ -e $cert ]] || continue
+  init_meta
+  local id cert found=0 source validation auto_renew
+  while IFS= read -r id; do
+    [[ -n $id ]] || continue
+    cert="${CERT_DIR}/${id}.crt"
     found=1
-    printf '%s\n' "$(basename "$cert")"
-    openssl x509 -in "$cert" -noout -subject -issuer -dates 2>/dev/null | sed 's/^/  /'
-  done
+    source=$(meta_cert_get_field "$id" source)
+    validation=$(meta_cert_get_field "$id" validation)
+    auto_renew=$(meta_cert_get_field "$id" autoRenew)
+    printf '%s.crt' "$id"
+    [[ -n $source ]] && printf '  来源: %s' "$source"
+    [[ -n $validation ]] && printf '  验证: %s' "$validation"
+    [[ -n $auto_renew ]] && printf '  自动续期: %s' "$auto_renew"
+    printf '\n'
+    if [[ -r $cert ]]; then
+      openssl x509 -in "$cert" -noout -subject -issuer -dates 2>/dev/null | sed 's/^/  /'
+    else
+      printf '  [证书文件缺失]\n'
+    fi
+  done < <(meta_cert_list)
   ((found)) || info "还没有托管证书。"
 }
 
 certificate_count() {
-  local cert count=0
-  for cert in "$CERT_DIR"/*.crt; do [[ -e $cert ]] && ((count+=1)); done
-  printf '%s' "$count"
+  meta_cert_list | grep -c . 2>/dev/null || printf '0'
 }
 
 managed_certificate_count() {
-  local cert identifier count=0
-  for cert in "$CERT_DIR"/*.crt; do
-    [[ -e $cert ]] || continue
-    identifier=$(basename "$cert" .crt)
-    [[ -r "${CERT_DIR}/${identifier}.key" ]] && ((count+=1))
-  done
-  printf '%s' "$count"
+  meta_cert_list | grep -c . 2>/dev/null || printf '0'
 }
 
+# ============================================================
+# Certificate renewal
+# ============================================================
+
+renew_one_certificate() {
+  local cert_name=$1
+  local validation was_active=0 changed=0 rc=0
+  meta_cert_exists "$cert_name" || { warn "证书不在托管列表：${cert_name}"; return 1; }
+  validation=$(meta_cert_get_field "$cert_name" validation)
+  case $validation in
+    http-standalone)
+      case $(detect_port80_owner) in
+        free) ;;
+        xray)
+          service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
+          ;;
+        *)
+          warn "${cert_name} 续期失败：80 端口当前被占用，与初始 standalone 配置不兼容。"
+          return 1
+          ;;
+      esac
+      ;;
+    http-nginx|dns-cloudflare) ;;
+    dns-manual)
+      warn "${cert_name} 使用手动 DNS，无法自动续期。请手动重新签发。"
+      return 1
+      ;;
+  esac
+
+  if ! certbot_cmd renew --cert-name "$cert_name" --quiet; then
+    warn "证书续期失败：${cert_name}"
+    [[ $was_active == 1 ]] && { systemctl start "$SERVICE_NAME" || true; CERT_STOPPED_SERVICE=0; }
+    return 1
+  fi
+
+  sync_managed_certificate "$cert_name" && changed=1 || changed=0
+
+  if [[ $was_active == 1 ]]; then
+    systemctl start "$SERVICE_NAME"; CERT_STOPPED_SERVICE=0
+  fi
+  if [[ $changed == 1 && $was_active == 0 ]] && service_is_active; then
+    service_restart; info "Xray 已重启以加载新证书。"
+  fi
+  info "证书续期成功：${cert_name}"
+  return 0
+}
+
+renew_managed_certificates() {
+  ensure_runtime_dependencies cert-renew
+  local renewed=0 failed=0 id
+  while IFS= read -r id; do
+    [[ -n $id ]] || continue
+    if renew_one_certificate "$id"; then ((renewed+=1)); else ((failed+=1)); fi
+  done < <(meta_cert_auto_renew_certs)
+  if ((renewed > 0 || failed > 0)); then
+    info "续期完成：成功 ${renewed}，失败 ${failed}。"
+  else
+    info "没有需要续期的证书。"
+  fi
+}
+
+# ============================================================
+# Certificate selection / inbound check / delete
+# ============================================================
+
 select_managed_certificate() {
-  local __var=$1 always_choose=${2:-0} cert answer cert_identifier
+  local __var=$1 always_choose=${2:-0} answer
   local identifiers=()
-  for cert in "$CERT_DIR"/*.crt; do
-    [[ -e $cert ]] || continue
-    cert_identifier=$(basename "$cert" .crt)
-    [[ -r "${CERT_DIR}/${cert_identifier}.key" ]] && identifiers+=("$cert_identifier")
-  done
+  while IFS= read -r id; do
+    [[ -n $id ]] || continue
+    [[ -r "${CERT_DIR}/${id}.crt" && -r "${CERT_DIR}/${id}.key" ]] && identifiers+=("$id")
+  done < <(meta_cert_list)
   ((${#identifiers[@]} > 0)) || { warn "没有可用的托管证书。"; return 1; }
   if ((${#identifiers[@]} == 1)) && [[ $always_choose != 1 ]]; then
     printf -v "$__var" '%s' "${identifiers[0]}"
@@ -1903,12 +2233,13 @@ certificate_inbound_users() {
 
 delete_managed_certificate() {
   ensure_runtime_dependencies cert-delete
-  local identifier=${1-} assume_yes=${2:-0} cert_path key_path hook renewal users tag
+  local identifier=${1-} assume_yes=${2:-0} cert_path key_path renewal users tag
   [[ -n $identifier ]] || select_managed_certificate identifier 1 || return 0
   validate_certificate_identifier "$identifier" || die "证书标识无效。"
+  meta_cert_exists "$identifier" || { warn "该证书不在 xrayctl 托管列表中，不予删除。"; return 0; }
   cert_path="${CERT_DIR}/${identifier}.crt"
   key_path="${CERT_DIR}/${identifier}.key"
-  [[ -e $cert_path || -e $key_path ]] || { warn "托管证书不存在：${identifier}"; return 0; }
+  [[ -e $cert_path || -e $key_path ]] || { warn "托管证书文件不存在：${identifier}"; return 0; }
   users=$(certificate_inbound_users "$identifier")
   if [[ -n $users ]]; then
     warn "证书正在被以下 TLS 入站使用，不能删除："
@@ -1916,14 +2247,13 @@ delete_managed_certificate() {
     return 0
   fi
   [[ $assume_yes == 1 ]] || confirm "删除托管证书 ${identifier}？" N || return 0
-  renewal="/etc/letsencrypt/renewal/${identifier}.conf"
+  renewal="${CERTBOT_CONFIG_DIR}/renewal/${identifier}.conf"
   if [[ -f $renewal ]]; then
-    command_exists certbot || { warn "该证书仍有 Let's Encrypt 续期配置，但当前找不到 certbot，未执行删除。"; return 0; }
-    certbot delete --cert-name "$identifier" --non-interactive \
+    certbot_cmd delete --cert-name "$identifier" --non-interactive \
       || { warn "Let's Encrypt 证书删除失败，托管副本未改动。"; return 0; }
   fi
-  hook="/etc/letsencrypt/renewal-hooks/deploy/xrayctl-${identifier}"
-  rm -f "$cert_path" "$key_path" "$hook"
+  rm -f "$cert_path" "$key_path"
+  meta_cert_delete "$identifier"
   info "托管证书已删除：${identifier}"
 }
 
@@ -2582,12 +2912,16 @@ certificate_menu() {
     clear_screen
     heading "TLS 证书"
     printf '托管证书: %s\n\n' "$(certificate_count)"
-    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 删除托管证书\n0) 返回\n'
+    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 删除托管证书\n5) Cloudflare 凭据\n'
+    printf '6) 立即续期所有证书\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
-      1) run_menu_action issue_certificate; pause;; 2) run_menu_action import_certificate; pause;;
+      1) run_menu_action issue_certificate; pause;;
+      2) run_menu_action import_certificate; pause;;
       3) run_menu_action list_certificates; pause;;
       4) run_menu_action delete_managed_certificate; pause;;
+      5) cloudflare_credentials_menu;;
+      6) run_menu_action renew_managed_certificates; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -2715,10 +3049,14 @@ xrayctl - Xray Linux 管理脚本
   xrayctl config check|show|edit
   xrayctl backup [文件.tar.gz]
   xrayctl restore [文件.tar.gz]
-  xrayctl cert list
-  xrayctl cert issue [域名] [邮箱]
-  xrayctl cert import [标识] [证书] [私钥]
-  xrayctl bbr                     管理 BBR（交互式开启/关闭）
+  xrayctl cert list                 列出托管证书
+  xrayctl cert issue [域名] [邮箱]   Let's Encrypt 自动签发
+  xrayctl cert import [标识] [证书] [私钥]  导入已有证书
+  xrayctl cert delete <标识> [--yes] 删除托管证书
+  xrayctl cert renew-auto            立即续期所有托管证书
+  xrayctl cert renew <标识>          续期单个证书
+  xrayctl cert cloudflare            管理 Cloudflare DNS 凭据
+  xrayctl bbr                        管理 BBR（交互式开启/关闭）
   xrayctl diagnose                系统诊断
   xrayctl version
 
@@ -2762,7 +3100,15 @@ dispatch() {
       case ${1:-check} in check|test) check_config;; show) ensure_config; jq . "$CONFIG_FILE";; edit) edit_config;; *) die "未知 config 子命令。";; esac;;
     backup) backup_all "${1-}";; restore) restore_backup "${1-}";;
     cert)
-      case ${1:-list} in list) list_certificates;; issue) issue_certificate "${2-}" "${3-}";; import) import_certificate "${2-}" "${3-}" "${4-}";; delete|remove) delete_managed_certificate "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";; *) die "未知 cert 子命令。";; esac;;
+      case ${1:-list} in
+        list) list_certificates;;
+        issue) issue_certificate "${2-}" "${3-}";;
+        import) import_certificate "${2-}" "${3-}" "${4-}";;
+        delete|remove) delete_managed_certificate "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
+        renew-auto) renew_managed_certificates;;
+        renew) renew_one_certificate "${2-}";;
+        cloudflare) cloudflare_credentials_menu;;
+        *) die "未知 cert 子命令：${1}";; esac;;
 
     bbr) manage_bbr;; diagnose|doctor) system_diagnostics;; quick-command) ensure_runtime_dependencies quick-command; install_quick_command;;
     *) error "未知命令：$command"; show_help; return 2;;
