@@ -21,7 +21,7 @@
 - 更换凭据时支持自定义输入；UUID 格式错误会要求重试，密码或 UUID 留空则自动生成
 - 密码输入过程可见；留空时自动生成并在添加完成后显示（请避免在共享终端或录屏中操作）
 - SOCKS5、HTTP 出站新增、入站绑定和删除
-- VLESS、VMess、Trojan 分享链接及 Base64 订阅内容
+- VLESS、VMess、Trojan 分享链接
 - Let's Encrypt 域名/公网 IP 签发、自动续期、已有证书导入和安全删除
 - IP 证书优先免 APT 创建 Certbot 环境；证书依赖安装均带硬超时，避免 NAT 主机无限等待软件源
 - 配置校验、日志级别、systemd 服务与日志管理
@@ -50,7 +50,7 @@ Xray Linux 管理脚本
 │  │  │  ├─ 修改地址和端口
 │  │  │  └─ 修改传输和安全方式
 │  │  └─ 查看 JSON
-│  ├─ 订阅链接（输出各入站用户的原始分享链接）
+│  ├─ 全部分享链接（输出各入站用户的原始分享链接）
 │  └─ 删除入站（同时删除该入站内的全部用户和关联规则）
 ├─ 出站管理
 │  ├─ 查看入站当前出站规则
@@ -149,7 +149,6 @@ xrayctl client rename TAG OLD NEW
 xrayctl client rotate TAG USER   # 重置 UUID/密码
 xrayctl client delete TAG USER
 xrayctl link TAG                 # 分享链接
-xrayctl subscription             # 全部入站 Base64 订阅内容
 xrayctl config check             # JSON + Xray 核心检查
 xrayctl logs 100                 # 最近 100 行日志
 xrayctl cert issue example.com admin@example.com

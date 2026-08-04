@@ -950,9 +950,11 @@ install_quick_command() {
   local source=${BASH_SOURCE[0]:-} downloaded=""
   mkdir -p "$(dirname "$QUICK_COMMAND")" "$(dirname "$QUICK_SYMLINK")"
 
-  if [[ -f $QUICK_COMMAND ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null; then
+  if [[ -n $source && -r $source ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$source" 2>/dev/null; then
+    :
+  elif [[ -f $QUICK_COMMAND ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null; then
     source=$QUICK_COMMAND
-  elif [[ -z $source || ! -r $source ]] || ! grep -q '^# xrayctl - Xray Linux terminal manager' "$source" 2>/dev/null; then
+  else
     downloaded=$(temp_file)
     info "正在下载快捷命令脚本。"
     if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
@@ -1332,7 +1334,7 @@ _scan_xrayctl_residuals() {
   if [[ -n $__count_var ]]; then
     printf -v "$__count_var" '%s' "$count"
   fi
-  return $count
+  return 0
 }
 
 # ============================================================
@@ -1418,20 +1420,24 @@ _xrayctl_uninstall_level_1() {
   fi
 
   _uninstall_snapshot_metadata
-  _uninstall_disable_timers
-  _uninstall_remove_managed_certs
-  _uninstall_remove_cloudflare
-  _uninstall_remove_certbot
-  _uninstall_xray_core
-  _uninstall_remove_systemd_overrides
-  _uninstall_remove_runtime_group
-  _uninstall_remove_quick_command
-  _cleanup_legacy_resources
-  _uninstall_remove_config
-  _uninstall_remove_logs
+  local step_failures=0 residual_count=0
+  _uninstall_disable_timers           || ((step_failures+=1))
+  _uninstall_remove_managed_certs     || ((step_failures+=1))
+  _uninstall_remove_cloudflare        || ((step_failures+=1))
+  _uninstall_remove_certbot           || ((step_failures+=1))
+  _uninstall_xray_core                || ((step_failures+=1))
+  _uninstall_remove_systemd_overrides || ((step_failures+=1))
+  _uninstall_remove_runtime_group     || ((step_failures+=1))
+  _uninstall_remove_quick_command     || ((step_failures+=1))
+  _cleanup_legacy_resources           || ((step_failures+=1))
+  _uninstall_remove_config            || ((step_failures+=1))
+  _uninstall_remove_logs              || ((step_failures+=1))
 
-  local residual_count
   _scan_xrayctl_residuals residual_count
+
+  if ((step_failures > 0)); then
+    warn "完全卸载有 ${step_failures} 个清理步骤失败，请结合残留检查确认。"
+  fi
 
   if ((residual_count > 0)); then
     warn "检测到 ${residual_count} 项残留，请手动检查。"
@@ -2344,7 +2350,7 @@ print_all_share_links() {
     found=1
     print_links "$tag" ""
   done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan|socks|http)$"))|.tag' "$CONFIG_FILE")
-  ((found == 1)) || { warn "没有可生成订阅链接的入站。"; return 0; }
+  ((found == 1)) || { warn "没有可生成分享链接的入站。"; return 0; }
 }
 
 
@@ -2869,7 +2875,7 @@ issue_certificate() {
 
   if ((rc != 0)); then
     warn "证书签发失败，请查看上方 Certbot 输出的具体原因。"
-    return 0
+    return 1
   fi
 
   # Sync cert to CERT_DIR and register metadata
@@ -3112,6 +3118,10 @@ renew_managed_certificates() {
   else
     info "没有需要续期的证书。"
   fi
+  if ((failed > 0)); then
+    return 1
+  fi
+  return 0
 }
 
 renew_certificate_command() {
@@ -3182,7 +3192,7 @@ delete_managed_certificate() {
   renewal="${CERTBOT_CONFIG_DIR}/renewal/${cert_name}.conf"
   if [[ -f $renewal ]]; then
     certbot_cmd delete --cert-name "$cert_name" --non-interactive \
-      || { warn "Let's Encrypt 证书删除失败，托管副本未改动。"; return 0; }
+      || { warn "Let's Encrypt 证书删除失败，托管副本未改动。"; return 1; }
   fi
   rm -f "$cert_path" "$key_path"
   meta_cert_delete "$identifier"
@@ -3253,7 +3263,8 @@ restore_backup() {
   tar -xzf "$archive" -C "$temp"
   if find "$temp" -type l -print -quit | grep -q .; then rm -rf "$temp"; die "备份中不允许包含符号链接。"; fi
   [[ -f "$temp/$extract_config" ]] || { rm -rf "$temp"; die "备份配置不是普通文件。"; }
-  validate_candidate "$temp/$extract_config" || { rm -rf "$temp"; die "备份配置验证失败。"; }
+  jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' \
+    "$temp/$extract_config" >/dev/null || { rm -rf "$temp"; die "备份配置 JSON 结构无效。"; }
   confirm "恢复会覆盖当前配置和托管证书，继续吗？" N || { rm -rf "$temp"; return; }
 
   backup_config_quiet >/dev/null || true
@@ -3271,8 +3282,8 @@ restore_backup() {
   init_meta
   setup_runtime_access
 
-  if ! restart_service; then
-    error "恢复后服务失败，正在回滚配置、元数据和证书。"
+  if ! validate_candidate "$CONFIG_FILE" || ! restart_service; then
+    error "恢复后配置验证或服务启动失败，正在回滚配置、元数据和证书。"
     cp -a "$snapshot/config.json" "$CONFIG_FILE"
     if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE"; else rm -f "$META_FILE"; fi
     rm -rf "$CERT_DIR"
@@ -3282,7 +3293,7 @@ restore_backup() {
     setup_runtime_access
     restart_service || true
     rm -rf "$temp"
-    die "恢复后服务失败，已回滚配置、元数据和证书。"
+    die "恢复失败，已回滚配置、元数据和证书。"
   fi
   rm -rf "$temp"; info "备份已恢复。"
 
@@ -3844,7 +3855,7 @@ inbound_menu() {
     heading "入站管理"
     list_inbounds
     printf '\n完整配置: %s\n\n' "$CONFIG_FILE"
-    printf '1) 新增入站\n2) 管理已有入站\n3) 订阅链接\n4) 删除入站\n0) 返回\n'
+    printf '1) 新增入站\n2) 管理已有入站\n3) 全部分享链接\n4) 删除入站\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action add_inbound; pause;;
