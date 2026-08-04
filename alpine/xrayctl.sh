@@ -1829,9 +1829,15 @@ update_tls_inbound_certificate() {
 }
 
 install_certbot_dns_plugin() {
-  command_exists pip3 || install_packages python3-pip
   if python3 -c 'import certbot_dns_cloudflare' 2>/dev/null; then return 0; fi
   info "正在安装 certbot-dns-cloudflare..."
+  local manager; manager=$(pkg_manager 2>/dev/null || true)
+  case $manager in
+    apt) DEBIAN_FRONTEND=noninteractive apt-get install -y python3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
+    dnf) dnf install -y python3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
+    apk) apk add --no-cache py3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
+  esac
+  command_exists pip3 || install_packages python3-pip
   pip3 install certbot-dns-cloudflare >/dev/null 2>&1 || { warn "certbot-dns-cloudflare 安装失败，请检查 pip 和网络。"; return 1; }
 }
 
