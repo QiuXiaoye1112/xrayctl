@@ -2547,7 +2547,7 @@ inbound_menu() {
 test_certificate_renewal() {
   ensure_runtime_dependencies cert-renew
   install_certbot
-  certbot renew --dry-run
+  certbot renew --dry-run || { warn "续期测试失败，请查看上方 Certbot 输出的具体原因。"; return 0; }
 }
 
 certificate_menu() {
