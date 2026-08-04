@@ -1783,8 +1783,11 @@ issue_certificate() {
   [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。"
   validate_email_address "$email" || die "邮箱格式无效。"
   install_certbot "$mode"
+  if [[ -f ${CERT_DIR}/${domain}.crt ]]; then
+    confirm "证书 ${domain} 已存在，是否强制重新签发？" N || { info "已取消。"; return 0; }
+  fi
   service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
-  local certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email")
+  local certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email" --force-renewal)
   if [[ $mode == ip ]]; then
     certbot_args+=(--preferred-profile shortlived --ip-address "$domain")
   else
