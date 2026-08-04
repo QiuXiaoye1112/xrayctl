@@ -1517,7 +1517,7 @@ link_query_for_stream() {
     reality)
       sni=$(jq -r '.realitySettings.serverNames[0]' <<<"$stream")
       sid=$(jq -r '.realitySettings.shortIds[0]' <<<"$stream")
-      pbk=$(reality_public_key "$tag") || die "无法获得 REALITY 公钥。"
+      pbk=$(reality_public_key "$tag") || { warn "无法获得 REALITY 公钥。"; return 0; }
       query+="&sni=$(url_encode "$sni")&fp=chrome&pbk=$(url_encode "$pbk")&sid=$(url_encode "$sid")&spx=%2F"
       ;;
   esac
