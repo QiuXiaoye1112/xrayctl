@@ -1776,7 +1776,8 @@ CF_CREDENTIALS_FILE="${XRAYCTL_CF_CREDENTIALS:-/etc/letsencrypt/cloudflare.ini}"
 install_certbot_dns_plugin() {
   command_exists pip3 || install_packages python3-pip
   if python3 -c 'import certbot_dns_cloudflare' 2>/dev/null; then return 0; fi
-  pip3 install certbot-dns-cloudflare >/dev/null 2>&1 || die "certbot-dns-cloudflare 安装失败。"
+  info "正在安装 certbot-dns-cloudflare..."
+  pip3 install certbot-dns-cloudflare >/dev/null 2>&1 || { warn "certbot-dns-cloudflare 安装失败，请检查 pip 和网络。"; return 1; }
 }
 
 issue_certificate() {
@@ -1836,6 +1837,9 @@ issue_certificate() {
   if ! certbot "${certbot_args[@]}"; then
     if ((was_active)); then systemctl start "$SERVICE_NAME" || true; CERT_STOPPED_SERVICE=0; fi
     warn "证书签发失败，请查看上方 Certbot 输出的具体原因。"
+    if [[ $verify_method == dns ]]; then
+      warn "提示：确认 API Token 有 Zone:DNS:Edit 权限，且域名在 Cloudflare 账户中。"
+    fi
     return 0
   fi
   paths=$(copy_certificate_pair "$domain" "/etc/letsencrypt/live/${domain}/fullchain.pem" "/etc/letsencrypt/live/${domain}/privkey.pem")
