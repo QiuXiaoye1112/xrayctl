@@ -419,6 +419,8 @@ install_jq_standalone() {
     "$JQ_INSTALL_PATH" --version >/dev/null || { warn "jq 静态包无法运行。"; return 1; }
   fi
   info "jq 已安装：${JQ_INSTALL_PATH}"
+  meta_resource_register "standaloneJqPath" "$JQ_INSTALL_PATH"
+  meta_resource_register "standaloneJqSha256" "$expected_hash"
 }
 
 install_packages() {
@@ -875,7 +877,7 @@ install_quick_command() {
 
 # ============================================================
 # Uninstall — three levels
-#   Level 0: remove Xray core, keep config/certs/backups/xrayctl
+#   Level 0: remove Xray core, keep config/certs/backups/xrayctl/timer
 #   Level 1: full uninstall, keep backups
 #   Level 2: purge everything xrayctl ever created
 # ============================================================
@@ -893,76 +895,163 @@ cleanup_step() {
   fi
 }
 
+safe_remove_dir() {
+  local path=$1 allowed matched=0
+  [[ -n $path ]] || return 1
+  [[ $path == /* ]] || return 1
+  case $path in
+    /|/usr|/usr/local|/etc|/var|/var/lib|/var/log|/opt|/home|/root)
+      warn "拒绝删除危险路径：$path"; return 1 ;;
+  esac
+  shift
+  for allowed in "$@"; do
+    [[ $path == "$allowed" ]] && { matched=1; break; }
+  done
+  ((matched)) || { warn "路径不在允许删除列表：$path"; return 1; }
+  [[ -e $path ]] || return 0
+  rm -rf -- "$path"
+}
+
+safe_remove_file() {
+  local path=$1 allowed matched=0
+  [[ -n $path ]] || return 1
+  [[ $path == /* ]] || return 1
+  shift
+  for allowed in "$@"; do
+    [[ $path == "$allowed" ]] && { matched=1; break; }
+  done
+  ((matched)) || { warn "路径不在允许删除列表：$path"; return 1; }
+  [[ -e $path ]] || return 0
+  rm -f -- "$path"
+}
+
+meta_resource_remove_existing() {
+  local key=$1 tmp
+  [[ -f $META_FILE ]] || return 0
+  jq -e 'type=="object"' "$META_FILE" >/dev/null 2>&1 || return 0
+  tmp=$(temp_file)
+  jq --arg key "$key" 'del(.managedResources[$key])' "$META_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
+  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+}
+
+meta_resource_get_existing() {
+  [[ -f $META_FILE ]] || return 1
+  jq -r --arg key "$1" '.managedResources[$key] // empty' "$META_FILE" 2>/dev/null
+}
+
+_uninstall_snapshot_metadata() {
+  SNAPSHOT_META=$(temp_file)
+  if [[ -f $META_FILE ]]; then
+    cp "$META_FILE" "$SNAPSHOT_META"
+  else
+    printf '{"certificates":{},"managedResources":{}}' >"$SNAPSHOT_META"
+  fi
+}
+
+_snapshot_meta_cert_list() {
+  jq -r '.certificates | keys[]' "$SNAPSHOT_META" 2>/dev/null
+}
+
+_snapshot_meta_cert_get_field() {
+  jq -r --arg id "$1" --arg field "$2" ".certificates[\$id][\$field] // empty" "$SNAPSHOT_META"
+}
+
+_snapshot_meta_resource_get() {
+  jq -r --arg key "$1" ".managedResources[\$key] // empty" "$SNAPSHOT_META" 2>/dev/null
+}
+
+can_remove_certbot_venv() {
+  local recorded
+  recorded=$(_snapshot_meta_resource_get "certbotVenv")
+  [[ -n $recorded && $recorded == "$CERTBOT_VENV" ]] || return 1
+  is_xrayctl_certbot_venv
+}
+
 _uninstall_disable_timers() {
   systemctl disable --now xrayctl-certbot-renew.timer >/dev/null 2>&1 || true
   systemctl stop xrayctl-certbot-renew.service >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/xrayctl-certbot-renew.service /etc/systemd/system/xrayctl-certbot-renew.timer
   systemctl daemon-reload 2>/dev/null || true
-  meta_resource_remove "renewTimer"; meta_resource_remove "renewService"
+  meta_resource_remove_existing "renewTimer"; meta_resource_remove_existing "renewService"
 }
 
 _uninstall_remove_managed_certs() {
   local id cert_name source rc=0
   while IFS= read -r id; do
     [[ -n $id ]] || continue
-    cert_name=$(meta_cert_get_field "$id" certName)
-    source=$(meta_cert_get_field "$id" source)
+    cert_name=$(_snapshot_meta_cert_get_field "$id" certName)
+    source=$(_snapshot_meta_cert_get_field "$id" source)
     case $source in
       letsencrypt)
-        [[ -n $cert_name ]] && certbot_cmd delete --cert-name "$cert_name" --non-interactive >/dev/null 2>&1 || true
+        if [[ -n $cert_name ]]; then
+          if ! certbot_cmd delete --cert-name "$cert_name" --non-interactive >/dev/null 2>&1; then
+            warn "Certbot 证书 ${cert_name} 删除失败，将随 Certbot 目录一并清理。"
+            rc=1
+          fi
+        fi
         ;;
     esac
     rm -f "${CERT_DIR}/${id}.crt" "${CERT_DIR}/${id}.key"
     meta_cert_delete "$id"
-  done < <(meta_cert_list)
+  done < <(_snapshot_meta_cert_list)
+  return $rc
 }
 
 _uninstall_remove_certbot() {
-  if is_xrayctl_certbot_symlink; then rm -f /usr/local/bin/certbot; fi
-  [[ -d $CERTBOT_CONFIG_DIR ]] && rm -rf "$CERTBOT_CONFIG_DIR"
-  [[ -d $CERTBOT_WORK_DIR ]] && rm -rf "$CERTBOT_WORK_DIR"
-  [[ -d $CERTBOT_LOGS_DIR ]] && rm -rf "$CERTBOT_LOGS_DIR"
-  [[ -d $CERTBOT_VENV ]] && rm -rf "$CERTBOT_VENV"
-  meta_resource_remove "certbotVenv"; meta_resource_remove "certbotConfigDir"
-  meta_resource_remove "certbotWorkDir"; meta_resource_remove "certbotLogsDir"
+  if can_remove_certbot_venv; then
+    if is_xrayctl_certbot_symlink; then rm -f /usr/local/bin/certbot; fi
+    safe_remove_dir "$CERTBOT_CONFIG_DIR" "$CERTBOT_CONFIG_DIR"
+    safe_remove_dir "$CERTBOT_WORK_DIR" "$CERTBOT_WORK_DIR"
+    safe_remove_dir "$CERTBOT_LOGS_DIR" "$CERTBOT_LOGS_DIR"
+    safe_remove_dir "$CERTBOT_VENV" "$CERTBOT_VENV"
+    meta_resource_remove_existing "certbotVenv"; meta_resource_remove_existing "certbotConfigDir"
+    meta_resource_remove_existing "certbotWorkDir"; meta_resource_remove_existing "certbotLogsDir"
+  else
+    warn "Certbot 环境未通过所有权验证，跳过删除。"
+    return 1
+  fi
 }
 
 _uninstall_remove_cloudflare() {
-  [[ -f $CLOUDFLARE_INI ]] && rm -f "$CLOUDFLARE_INI"
+  safe_remove_file "$CLOUDFLARE_INI" "$CLOUDFLARE_INI"
   rmdir "$(dirname "$CLOUDFLARE_INI")" 2>/dev/null || true
-  meta_resource_remove "cloudflareCredentials"
+  meta_resource_remove_existing "cloudflareCredentials"
 }
 
 _uninstall_remove_config() {
   [[ -f $CONFIG_FILE ]] && rm -f "$CONFIG_FILE"
+  rm -f "$SNAPSHOT_META"
   [[ -f $META_FILE ]] && rm -f "$META_FILE"
-  [[ -d $CERT_DIR ]] && rm -rf "$CERT_DIR"
+  [[ -d $CERT_DIR ]] && safe_remove_dir "$CERT_DIR" "$CERT_DIR"
   [[ -d $CONFIG_DIR ]] && rmdir "$CONFIG_DIR" 2>/dev/null || true
+}
+
+_uninstall_remove_runtime_group() {
+  if [[ $RUNTIME_GROUP == xrayctl ]]; then
+    getent group "$RUNTIME_GROUP" >/dev/null 2>&1 && groupdel "$RUNTIME_GROUP" 2>/dev/null || true
+  fi
+  meta_resource_remove_existing "runtimeGroup"
 }
 
 _uninstall_remove_systemd_overrides() {
   rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-access.conf" "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
   rmdir "$SYSTEMD_OVERRIDE_DIR" 2>/dev/null || true
-  if [[ $RUNTIME_GROUP == xrayctl ]]; then
-    getent group "$RUNTIME_GROUP" >/dev/null 2>&1 && groupdel "$RUNTIME_GROUP" 2>/dev/null || true
-  fi
-  meta_resource_remove "runtimeGroup"
   systemctl daemon-reload 2>/dev/null || true
 }
 
 _uninstall_remove_quick_command() {
   if is_xrayctl_symlink; then rm -f "$QUICK_SYMLINK"; fi
   if is_xrayctl_quick_command; then rm -f "$QUICK_COMMAND"; fi
-  meta_resource_remove "quickCommand"; meta_resource_remove "quickSymlink"
+  meta_resource_remove_existing "quickCommand"; meta_resource_remove_existing "quickSymlink"
   hash -r 2>/dev/null || true
 }
 
 _uninstall_remove_backups() {
-  [[ -d $BACKUP_DIR ]] && rm -rf "$BACKUP_DIR"
+  safe_remove_dir "$BACKUP_DIR" "$BACKUP_DIR"
 }
 
 _uninstall_remove_logs() {
-  rm -rf /var/log/xray 2>/dev/null || true
+  safe_remove_dir /var/log/xray /var/log/xray
 }
 
 _cleanup_legacy_resources() {
@@ -975,9 +1064,83 @@ _cleanup_legacy_resources() {
   rm -f /etc/letsencrypt/renewal/xrayctl-*.conf 2>/dev/null || true
 }
 
+_uninstall_xray_core_fallback() {
+  systemctl disable --now xray.service >/dev/null 2>&1 || true
+  systemctl disable --now xray@.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/xray.service /etc/systemd/system/xray@.service
+  rm -rf /etc/systemd/system/xray.service.d 2>/dev/null || true
+  rm -f /usr/local/bin/xray /usr/local/bin/xray-linux-*
+  rm -rf /usr/local/share/xray 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+}
+
+_uninstall_xray_core() {
+  local installer
+  installer=$(temp_file)
+  if curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+    "$OFFICIAL_INSTALLER_URL" -o "$installer" 2>/dev/null; then
+    chmod 700 "$installer"
+    TERM="${TERM:-xterm}" bash "$installer" remove --purge >/dev/null 2>&1 || true
+    rm -f "$installer"
+    return 0
+  else
+    rm -f "$installer"
+    warn "无法下载 Xray 官方卸载脚本，使用本地安全回退。"
+    _uninstall_xray_core_fallback
+    return 0
+  fi
+}
+
+_uninstall_xray_core_keep_config() {
+  local installer
+  installer=$(temp_file)
+  if curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+    "$OFFICIAL_INSTALLER_URL" -o "$installer" 2>/dev/null; then
+    chmod 700 "$installer"
+    TERM="${TERM:-xterm}" bash "$installer" remove >/dev/null 2>&1 || true
+    rm -f "$installer"
+    return 0
+  else
+    rm -f "$installer"
+    warn "无法下载 Xray 官方卸载脚本，使用本地安全回退。"
+    _uninstall_xray_core_fallback
+    return 0
+  fi
+}
+
+_uninstall_remove_bbr() {
+  local bbr_config
+  bbr_config=$(_snapshot_meta_resource_get "bbrConfig")
+  if [[ -n $bbr_config && -f $bbr_config ]]; then
+    _disable_bbr >/dev/null 2>&1 || true
+    rm -f "$bbr_config"
+    meta_resource_remove_existing "bbrConfig"
+  fi
+}
+
+_uninstall_remove_owned_jq() {
+  local jq_path jq_hash current_hash
+  jq_path=$(_snapshot_meta_resource_get "standaloneJqPath")
+  [[ -n $jq_path ]] || return 0
+  jq_hash=$(_snapshot_meta_resource_get "standaloneJqSha256")
+  [[ -n $jq_hash ]] || return 0
+  if [[ -f $jq_path ]]; then
+    current_hash=$(sha256sum "$jq_path" 2>/dev/null | cut -d' ' -f1)
+    if [[ $current_hash == "$jq_hash" ]]; then
+      rm -f "$jq_path"
+      meta_resource_remove_existing "standaloneJqPath"
+      meta_resource_remove_existing "standaloneJqSha256"
+    else
+      info "jq 已被修改/替换，保留：${jq_path}"
+    fi
+  fi
+}
+
 _scan_xrayctl_residuals() {
+  local __count_var=${1:-} count=0
   local paths=(
     "$XRAY_BIN"
+    /usr/local/bin/xray-linux-*
     "$QUICK_COMMAND"
     "$QUICK_SYMLINK"
     "$CONFIG_DIR"
@@ -989,21 +1152,55 @@ _scan_xrayctl_residuals() {
     "$BACKUP_DIR"
     /etc/systemd/system/xrayctl-certbot-renew.timer
     /etc/systemd/system/xrayctl-certbot-renew.service
+    /etc/systemd/system/xray.service
+    /etc/systemd/system/xray@.service
+    /etc/systemd/system/xray.service.d
+    /etc/sysctl.d/99-xrayctl-bbr.conf
     /var/log/xray
   )
-  local ok=1
+
   for p in "${paths[@]}"; do
-    if [[ -e $p ]]; then
+    if compgen -G "$p" >/dev/null 2>&1 || [[ -e $p ]]; then
       printf '  ✗ 残留: %s\n' "$p"
-      ok=0
+      ((count+=1))
     fi
   done
+
+  if is_xrayctl_certbot_symlink && [[ -L /usr/local/bin/certbot ]]; then
+    printf '  ✗ 残留: /usr/local/bin/certbot → xrayctl venv\n'
+    ((count+=1))
+  fi
+
+  for hook in /etc/letsencrypt/renewal-hooks/deploy/xrayctl-*; do
+    [[ -e $hook ]] || continue
+    printf '  ✗ 残留: %s\n' "$hook"
+    ((count+=1))
+  done
+
   if systemctl list-unit-files 2>/dev/null | grep -qE 'xrayctl|xray[.]service'; then
     printf '  ✗ 残留: systemd 单元仍存在\n'
-    ok=0
+    ((count+=1))
   fi
-  ((ok))
+
+  if pgrep -x xray >/dev/null 2>&1; then
+    printf '  ✗ 残留: xray 运行中进程\n'
+    ((count+=1))
+  fi
+
+  if systemctl is-active xray.service >/dev/null 2>&1; then
+    printf '  ✗ 残留: xray.service 仍在运行\n'
+    ((count+=1))
+  fi
+
+  if [[ -n $__count_var ]]; then
+    printf -v "$__count_var" '%s' "$count"
+  fi
+  return $count
 }
+
+# ============================================================
+# Three uninstall level implementations
+# ============================================================
 
 _xrayctl_purge_level_2() {
   heading "彻底删除"
@@ -1018,6 +1215,7 @@ _xrayctl_purge_level_2() {
   - Cloudflare Global API Key
   - Certbot 独立环境
   - 自动续期任务
+  - xrayctl 配置的 BBR 设置
   - 日志、元数据
   - 所有 xrayctl 备份
 
@@ -1027,7 +1225,9 @@ _xrayctl_purge_level_2() {
   - /etc/letsencrypt（其他网站证书）
   - Cloudflare DNS 记录
   - 系统软件包 (curl / python3 / jq)
+  - xrayctl 未修改过的文件
 
+完全删除不会创建或保留备份。
 EOF
   printf '输入 DELETE 确认：'
   local answer
@@ -1038,87 +1238,94 @@ EOF
   fi
   echo
 
-  local step_failures=0
+  _uninstall_snapshot_metadata
+  local step_failures=0 residual_count=0
 
-  cleanup_step "停止续期任务"      _uninstall_disable_timers       || ((step_failures+=1))
-  cleanup_step "删除托管证书"      _uninstall_remove_managed_certs || ((step_failures+=1))
-  cleanup_step "删除 Cloudflare 凭据" _uninstall_remove_cloudflare  || ((step_failures+=1))
-  cleanup_step "删除 Certbot 环境" _uninstall_remove_certbot       || ((step_failures+=1))
-
-  # Xray core via official installer
-  printf '  %s ... ' "卸载 Xray 核心"
-  local installer
-  installer=$(temp_file)
-  if curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
-    "$OFFICIAL_INSTALLER_URL" -o "$installer" 2>/dev/null; then
-    chmod 700 "$installer"
-    TERM="${TERM:-xterm}" bash "$installer" remove --purge >/dev/null 2>&1 || true
-    rm -f "$installer"
-    printf '✓\n'
-  else
-    printf '✗\n'
-    ((step_failures+=1))
-  fi
-
-  cleanup_step "删除 xrayctl 配置"   _uninstall_remove_config           || ((step_failures+=1))
-  cleanup_step "清理 systemd 残留"   _uninstall_remove_systemd_overrides || ((step_failures+=1))
-  cleanup_step "删除快捷命令"        _uninstall_remove_quick_command     || ((step_failures+=1))
-  cleanup_step "删除日志"            _uninstall_remove_logs              || ((step_failures+=1))
-  cleanup_step "删除备份"            _uninstall_remove_backups           || ((step_failures+=1))
-  cleanup_step "清理旧版本残留"      _cleanup_legacy_resources           || ((step_failures+=1))
+  cleanup_step "停止续期任务"           _uninstall_disable_timers          || ((step_failures+=1))
+  cleanup_step "删除托管证书"           _uninstall_remove_managed_certs    || ((step_failures+=1))
+  cleanup_step "删除 Cloudflare 凭据"   _uninstall_remove_cloudflare       || ((step_failures+=1))
+  cleanup_step "删除 Certbot 环境"      _uninstall_remove_certbot          || ((step_failures+=1))
+  cleanup_step "卸载 Xray 核心"         _uninstall_xray_core               || ((step_failures+=1))
+  cleanup_step "清理 systemd 覆盖"      _uninstall_remove_systemd_overrides || ((step_failures+=1))
+  cleanup_step "删除运行用户组"         _uninstall_remove_runtime_group    || ((step_failures+=1))
+  cleanup_step "删除快捷命令"           _uninstall_remove_quick_command    || ((step_failures+=1))
+  cleanup_step "撤销 BBR 设置"          _uninstall_remove_bbr              || ((step_failures+=1))
+  cleanup_step "删除独立安装的 jq"      _uninstall_remove_owned_jq         || ((step_failures+=1))
+  cleanup_step "清理旧版本残留"         _cleanup_legacy_resources          || ((step_failures+=1))
+  cleanup_step "删除 xrayctl 配置"      _uninstall_remove_config           || ((step_failures+=1))
+  cleanup_step "删除日志"               _uninstall_remove_logs             || ((step_failures+=1))
+  cleanup_step "删除备份"               _uninstall_remove_backups          || ((step_failures+=1))
 
   echo
   heading "残留检查"
-  if _scan_xrayctl_residuals; then
-    printf '\n彻底删除完成，未检测到残留。\n'
-  else
-    printf '\n存在 %d 项残留，请手动检查。\n' "$step_failures"
-  fi
+  _scan_xrayctl_residuals residual_count
+
+  echo
+  printf '执行结果：失败步骤 %d，检测残留 %d\n' "$step_failures" "$residual_count"
   echo
   printf '未修改：\n  - 系统 Certbot\n  - /etc/letsencrypt\n  - 其他网站证书\n  - 系统软件包\n'
 }
 
 _xrayctl_uninstall_level_1() {
+  heading "完全卸载"
   confirm "将卸载 Xray 并删除配置、证书、日志与元数据，保留备份。确定吗？" N || return 0
+
+  local final_backup
+  final_backup="${BACKUP_DIR}/pre-uninstall-$(timestamp).tar.gz"
+  if backup_all "$final_backup" >/dev/null 2>&1; then
+    info "最终备份已创建：${final_backup}"
+  else
+    warn "最终备份失败，已取消完全卸载。"
+    return 1
+  fi
+
+  _uninstall_snapshot_metadata
   _uninstall_disable_timers
   _uninstall_remove_managed_certs
-  _uninstall_remove_certbot
   _uninstall_remove_cloudflare
-  local installer
-  installer=$(temp_file)
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
-    "$OFFICIAL_INSTALLER_URL" -o "$installer" 2>/dev/null
-  chmod 700 "$installer"
-  TERM="${TERM:-xterm}" bash "$installer" remove --purge >/dev/null 2>&1 || true
-  rm -f "$installer"
-  _uninstall_remove_config
+  _uninstall_remove_certbot
+  _uninstall_xray_core
   _uninstall_remove_systemd_overrides
+  _uninstall_remove_runtime_group
   _uninstall_remove_quick_command
-  _uninstall_remove_logs
   _cleanup_legacy_resources
+  _uninstall_remove_config
+  _uninstall_remove_logs
+
+  local residual_count
+  _scan_xrayctl_residuals residual_count
+
+  if ((residual_count > 0)); then
+    warn "检测到 ${residual_count} 项残留，请手动检查。"
+  fi
   info "完全卸载完成；备份保留在 ${BACKUP_DIR}。"
 }
 
 _xrayctl_uninstall_level_0() {
-  confirm "卸载 Xray 核心但保留配置和备份，确定吗？" N || return 0
-  backup_all >/dev/null 2>&1 || true
-  local installer
-  installer=$(temp_file)
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
-    "$OFFICIAL_INSTALLER_URL" -o "$installer" 2>/dev/null
-  chmod 700 "$installer"
-  TERM="${TERM:-xterm}" bash "$installer" remove >/dev/null 2>&1 || true
-  rm -f "$installer"
-  info "Xray 已卸载；配置和备份已保留。"
+  heading "卸载程序"
+  confirm "卸载 Xray 核心但保留配置、证书、备份和 xrayctl。确定吗？" N || return 0
+
+  local final_backup
+  final_backup="${BACKUP_DIR}/pre-uninstall-$(timestamp).tar.gz"
+  backup_all "$final_backup" >/dev/null 2>&1 || true
+
+  _uninstall_xray_core_keep_config
+  info "Xray 已卸载。配置、证书、备份和自动续期仍保留。"
+  info "需要时可运行 xrayctl install 重新安装 Xray。"
 }
 
+# ============================================================
+# Unified uninstall entry point
+# ============================================================
+
 uninstall_xray() {
-  local purge=${1:-0}
-  case $purge in
+  ensure_system_context uninstall
+  local level=${1:-0}
+  case $level in
     0) _xrayctl_uninstall_level_0;;
     1) _xrayctl_uninstall_level_1;;
     2) _xrayctl_purge_level_2;;
-    *) die "无效的卸载级别：$purge";;
+    *) die "无效卸载级别：$level";;
   esac
 }
 
@@ -2781,6 +2988,7 @@ _enable_bbr() {
     return 1
   fi
   info "BBR 已启用。"
+  meta_resource_register "bbrConfig" "$config"
 }
 
 _disable_bbr() {
@@ -3352,15 +3560,15 @@ uninstall_menu() {
   while true; do
     clear_screen
     heading "卸载"
-    printf '1) 卸载程序 — 删除 Xray 核心，保留配置、证书、备份、xrayctl\n'
+    printf '1) 卸载程序 — 删除 Xray 核心，保留配置、证书、备份、xrayctl、续期\n'
     printf '2) 完全卸载 — 删除 Xray + xrayctl 管理数据，保留备份\n'
     printf '3) 彻底删除 — 删除 xrayctl 创建的全部内容（含备份、Certbot、凭据）\n'
     printf '0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
-      1) run_menu_action uninstall_xray 0; pause;;
-      2) run_menu_action uninstall_xray 1; pause;;
-      3) _xrayctl_purge_level_2; pause;;
+      1) uninstall_xray 0; pause;;
+      2) uninstall_xray 1; pause;;
+      3) uninstall_xray 2; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
