@@ -1,0 +1,44 @@
+name: xrayctl restore exit fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/xrayctl-restore-exit-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch and validate
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('xrayctl.sh')
+          s = p.read_text()
+          old = '  ((warned > 0)) && warn "共 ${warned} 张 Let\'s Encrypt 证书缺少 Certbot 续期数据。"\n}'
+          new = '  if ((warned > 0)); then\n    warn "共 ${warned} 张 Let\'s Encrypt 证书缺少 Certbot 续期数据。"\n  fi\n  return 0\n}'
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one restore tail, got {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          bash -n xrayctl.sh
+          git diff --check
+          grep -n '共 ${warned} 张 Let' xrayctl.sh
+      - name: Commit and clean up
+        shell: bash
+        run: |
+          rm -f .github/workflows/xrayctl-restore-exit-fix.yml
+          git config user.name 'OpenAI'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add xrayctl.sh .github/workflows/xrayctl-restore-exit-fix.yml
+          git diff --cached --check
+          git commit -m 'fix: keep successful restore exit status zero'
+          git push origin HEAD:main
