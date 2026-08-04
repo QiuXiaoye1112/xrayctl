@@ -1788,9 +1788,10 @@ issue_certificate() {
     using_inbounds=$(jq -r --arg cert "${CERT_DIR}/${domain}.crt" \
       '.inbounds[]?|select(.streamSettings.tlsSettings.certificates[0].certificateFile==$cert)|.tag' "$CONFIG_FILE" 2>/dev/null | paste -sd ',')
     if [[ -n $using_inbounds ]]; then
-      info "证书 ${domain} 正在被入站使用：${using_inbounds}"
+      confirm "证书 ${domain} 正在被 ${using_inbounds} 使用，是否强制重新签发？" N || { info "已取消。"; return 0; }
+    else
+      confirm "证书 ${domain} 已存在，是否强制重新签发？" N || { info "已取消。"; return 0; }
     fi
-    confirm "证书 ${domain} 已存在，是否强制重新签发？" N || { info "已取消。"; return 0; }
   fi
   service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
   local certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email" --force-renewal)
