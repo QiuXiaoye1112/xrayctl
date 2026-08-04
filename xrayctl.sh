@@ -1794,7 +1794,7 @@ issue_certificate() {
   if [[ $mode == domain ]]; then
     choose verify_method "选择验证方式" "DNS (Cloudflare, 推荐)" "HTTP (需要 80 端口可访问)"
     if [[ $verify_method == 1 ]]; then
-      install_certbot_dns_plugin
+      install_certbot_dns_plugin || return 0
       if [[ ! -f $CF_CREDENTIALS_FILE ]]; then
         local cf_token
         prompt_secret cf_token "Cloudflare API Token (Zone:DNS:Edit 权限)"
@@ -1846,7 +1846,11 @@ issue_certificate() {
   cert_path=$(head -n1 <<<"$paths")
   write_certbot_deploy_hook "$domain"
   setup_certbot_renewal_timer
-  if ((was_active)); then systemctl start "$SERVICE_NAME"; CERT_STOPPED_SERVICE=0; fi
+  if ((was_active)); then
+    systemctl start "$SERVICE_NAME"; CERT_STOPPED_SERVICE=0
+  elif [[ $verify_method == dns ]] && service_is_active; then
+    systemctl restart "$SERVICE_NAME"
+  fi
   info "证书已保存：${cert_path}"
 }
 

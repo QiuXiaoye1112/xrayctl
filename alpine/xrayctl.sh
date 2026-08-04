@@ -1850,7 +1850,7 @@ issue_certificate() {
   if [[ $mode == domain ]]; then
     choose verify_method "选择验证方式" "DNS (Cloudflare, 推荐)" "HTTP (需要 80 端口可访问)"
     if [[ $verify_method == 1 ]]; then
-      install_certbot_dns_plugin
+      install_certbot_dns_plugin || return 0
       if [[ ! -f $CF_CREDENTIALS_FILE ]]; then
         local cf_token
         prompt_secret cf_token "Cloudflare API Token (Zone:DNS:Edit 权限)"
