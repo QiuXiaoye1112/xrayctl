@@ -1854,7 +1854,7 @@ issue_certificate() {
   paths=$(copy_certificate_pair "$domain" "/etc/letsencrypt/live/${domain}/fullchain.pem" "/etc/letsencrypt/live/${domain}/privkey.pem")
   cert_path=$(head -n1 <<<"$paths")
   write_certbot_deploy_hook "$domain"
-  [[ $mode != ip ]] || setup_certbot_renewal_timer
+  setup_certbot_renewal_timer
   if ((was_active)); then rc-service "$SERVICE_NAME" start; CERT_STOPPED_SERVICE=0; fi
   info "证书已保存：${cert_path}"
 }
@@ -2596,25 +2596,18 @@ inbound_menu() {
   done
 }
 
-test_certificate_renewal() {
-  ensure_runtime_dependencies cert-renew
-  install_certbot
-  certbot renew --dry-run || { warn "续期测试失败，请查看上方 Certbot 输出的具体原因。"; return 0; }
-}
-
 certificate_menu() {
   local choice
   while true; do
     clear_screen
     heading "TLS 证书"
     printf '托管证书: %s\n\n' "$(certificate_count)"
-    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 删除托管证书\n5) 测试自动续期\n0) 返回\n'
+    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 删除托管证书\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action issue_certificate; pause;; 2) run_menu_action import_certificate; pause;;
       3) run_menu_action list_certificates; pause;;
       4) run_menu_action delete_managed_certificate; pause;;
-      5) run_menu_action test_certificate_renewal; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -2789,7 +2782,7 @@ dispatch() {
       case ${1:-check} in check|test) check_config;; show) ensure_config; jq . "$CONFIG_FILE";; edit) edit_config;; *) die "未知 config 子命令。";; esac;;
     backup) backup_all "${1-}";; restore) restore_backup "${1-}";;
     cert)
-      case ${1:-list} in list) list_certificates;; issue) issue_certificate "${2-}" "${3-}";; import) import_certificate "${2-}" "${3-}" "${4-}";; delete|remove) delete_managed_certificate "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";; renew) ensure_runtime_dependencies cert-renew; install_certbot; certbot renew;; *) die "未知 cert 子命令。";; esac;;
+      case ${1:-list} in list) list_certificates;; issue) issue_certificate "${2-}" "${3-}";; import) import_certificate "${2-}" "${3-}" "${4-}";; delete|remove) delete_managed_certificate "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";; *) die "未知 cert 子命令。";; esac;;
 
     bbr) manage_bbr;; diagnose|doctor) system_diagnostics;; quick-command) ensure_runtime_dependencies quick-command; install_quick_command;;
     *) error "未知命令：$command"; show_help; return 2;;
