@@ -493,42 +493,92 @@ has_net_admin() {
 # Metadata migrations — versioned, independent of schema
 # ============================================================
 
-meta_mark_migration() {
-  local name=$1 tmp
-  init_meta
-  jq -e '.migrations // {}' "$META_FILE" >/dev/null 2>&1 || {
-    tmp=$(temp_file)
-    jq '.migrations = {}' "$META_FILE" >"$tmp"
+# ============================================================
+# Metadata — three-layer design
+#   Layer 1: init_meta_base  — create/upgrade META_FILE, never runs migrations
+#   Layer 2: *_raw helpers   — read/write META_FILE directly, never call init_meta
+#   Layer 3: ensure_meta     — init_meta_base + run_metadata_migrations
+# ============================================================
+
+init_meta_base() {
+  mkdir -p "$CONFIG_DIR"
+  if [[ ! -s $META_FILE ]] || ! jq -e 'type=="object" and (.inbounds|type=="object")' "$META_FILE" >/dev/null 2>&1; then
+    printf '%s\n' '{"schema":4,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' >"$META_FILE"
+    chmod 600 "$META_FILE"
+    return 0
+  fi
+  local schema
+  schema=$(jq -r '.schema // 1' "$META_FILE")
+  if ((schema < 4)); then
+    local tmp; tmp=$(temp_file)
+    jq '.schema = 4 | .certificates = (.certificates // {}) | .managedResources = (.managedResources // {}) | .migrations = (.migrations // {})' "$META_FILE" >"$tmp"
     install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-  }
+    ((schema <= 2)) && info "元数据已迁移至 schema 4。"
+  fi
+}
+
+# Raw helpers — read/write META_FILE directly, MUST NOT call ensure_meta / init_meta_base
+meta_migration_done_raw() {
+  jq -r --arg name "$1" '.migrations[$name] // false' "$META_FILE" 2>/dev/null | grep -qx true
+}
+
+meta_mark_migration_raw() {
+  local name=$1 tmp
   tmp=$(temp_file)
   jq --arg name "$name" '.migrations[$name] = true' "$META_FILE" >"$tmp"
   install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
 }
 
+meta_cert_exists_raw() {
+  jq -e --arg id "$1" '.certificates[$id]' "$META_FILE" >/dev/null 2>&1
+}
+
+meta_cert_set_raw() {
+  local identifier=$1 subject=$2 certName=$3 source=$4 validation=$5 autoRenew=${6:-true} tmp
+  tmp=$(temp_file)
+  jq --arg id "$identifier" --arg subject "$subject" --arg certName "$certName" \
+     --arg source "$source" --arg validation "$validation" --arg autoRenew "$autoRenew" \
+     --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '.certificates[$id] = {subject:$subject, certName:$certName, source:$source,
+      validation:$validation, autoRenew: ($autoRenew == "true"), updatedAt:$now}' \
+    "$META_FILE" >"$tmp"
+  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+}
+
+# Migration functions — use only raw helpers, NEVER call ensure_meta
+meta_mark_migration() {
+  init_meta_base
+  meta_mark_migration_raw "$1"
+}
+
 migration_done() {
-  jq -r --arg name "$1" '.migrations[$name] // false' "$META_FILE" 2>/dev/null | grep -qx true
+  init_meta_base
+  meta_migration_done_raw "$1"
 }
 
 migrate_legacy_certificates_v1() {
   migration_done "legacyCertScanV1" && return 0
   if [[ -d $CERT_DIR ]]; then
-    local crt key identifier migrated=0
+    local crt key identifier ok=1
     for crt in "$CERT_DIR"/*.crt; do
       [[ -e $crt ]] || continue
       identifier=$(basename "$crt" .crt)
       key="${CERT_DIR}/${identifier}.key"
       [[ -r $key ]] || continue
-      meta_cert_exists "$identifier" && continue
+      meta_cert_exists_raw "$identifier" && continue
       local subject
       subject=$(certificate_server_names "$crt" | head -1)
       [[ -z $subject ]] && subject="$identifier"
-      meta_cert_set "$identifier" "$subject" "$identifier" "legacy" "legacy" "false"
-      ((migrated+=1))
+      if meta_cert_set_raw "$identifier" "$subject" "$identifier" "legacy" "legacy" "false"; then
+        info "已迁移旧版证书：${identifier}"
+      else
+        warn "迁移旧版证书失败：${identifier}"
+        ok=0
+      fi
     done
-    ((migrated > 0)) && info "已注册 ${migrated} 张旧版证书至 metadata。"
+    ((ok)) || return 1
   fi
-  meta_mark_migration "legacyCertScanV1"
+  meta_mark_migration_raw "legacyCertScanV1"
 }
 
 cleanup_legacy_certbot_symlink_v1() {
@@ -542,7 +592,7 @@ cleanup_legacy_certbot_symlink_v1() {
       info "已清理旧版 xrayctl Certbot 全局软链接。"
     fi
   fi
-  meta_mark_migration "legacyCertbotSymlinkV1"
+  meta_mark_migration_raw "legacyCertbotSymlinkV1"
 }
 
 run_metadata_migrations() {
@@ -550,26 +600,73 @@ run_metadata_migrations() {
   cleanup_legacy_certbot_symlink_v1
 }
 
-init_meta() {
-  mkdir -p "$CONFIG_DIR"
-  if [[ ! -s $META_FILE ]] || ! jq -e 'type=="object" and (.inbounds|type=="object")' "$META_FILE" >/dev/null 2>&1; then
-    printf '%s\n' '{"schema":3,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' >"$META_FILE"
-    chmod 600 "$META_FILE"
-    return 0
-  fi
-  local schema
-  schema=$(jq -r '.schema // 1' "$META_FILE")
-  if [[ $schema == 1 ]]; then
-    local tmp; tmp=$(temp_file)
-    jq '.schema = 3 | .certificates = (.certificates // {}) | .managedResources = (.managedResources // {}) | .migrations = (.migrations // {})' "$META_FILE" >"$tmp"
-    install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-    info "元数据已迁移至 schema 3。"
-  elif [[ $schema == 2 ]]; then
-    local tmp; tmp=$(temp_file)
-    jq '.schema = 3 | .managedResources = (.managedResources // {}) | .migrations = (.migrations // {})' "$META_FILE" >"$tmp"
-    install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-  fi
+ensure_meta() {
+  init_meta_base
   run_metadata_migrations
+}
+
+# Public metadata helpers — call ensure_meta (will only run migrations once)
+init_meta() { ensure_meta; }
+
+meta_cert_exists() {
+  ensure_meta
+  jq -e --arg id "$1" '.certificates[$id]' "$META_FILE" >/dev/null 2>&1
+}
+
+meta_cert_set() {
+  local identifier=$1 subject=$2 certName=$3 source=$4 validation=$5 autoRenew=${6:-true} tmp
+  ensure_meta; tmp=$(temp_file)
+  jq --arg id "$identifier" --arg subject "$subject" --arg certName "$certName" \
+     --arg source "$source" --arg validation "$validation" --arg autoRenew "$autoRenew" \
+     --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '.certificates[$id] = {subject:$subject, certName:$certName, source:$source,
+      validation:$validation, autoRenew: ($autoRenew == "true"), updatedAt:$now}' \
+    "$META_FILE" >"$tmp"
+  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+}
+
+meta_cert_delete() {
+  local identifier=$1 tmp
+  ensure_meta; tmp=$(temp_file)
+  jq --arg id "$identifier" 'del(.certificates[$id])' "$META_FILE" >"$tmp"
+  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+}
+
+meta_cert_get_field() {
+  local identifier=$1 field=$2
+  ensure_meta
+  jq -r --arg id "$identifier" --arg field "$field" \
+    '.certificates[$id][$field] // empty' "$META_FILE"
+}
+
+meta_cert_list() {
+  ensure_meta
+  jq -r '.certificates | keys[]' "$META_FILE" 2>/dev/null
+}
+
+meta_cert_auto_renew_certs() {
+  ensure_meta
+  jq -r '.certificates | to_entries[] | select(.value.autoRenew == true) | .key' "$META_FILE" 2>/dev/null
+}
+
+meta_resource_register() {
+  local key=$1 value=$2 tmp
+  ensure_meta; tmp=$(temp_file)
+  jq --arg key "$key" --arg value "$value" \
+    '.managedResources[$key] = $value' "$META_FILE" >"$tmp"
+  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+}
+
+meta_resource_get() {
+  ensure_meta
+  jq -r --arg key "$1" '.managedResources[$key] // empty' "$META_FILE"
+}
+
+meta_resource_remove() {
+  local key=$1 tmp
+  ensure_meta; tmp=$(temp_file)
+  jq --arg key "$key" 'del(.managedResources[$key])' "$META_FILE" >"$tmp"
+  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
 }
 
 write_default_config() {
@@ -2245,6 +2342,13 @@ print_all_share_links() {
 # ============================================================
 
 ensure_certbot_environment() {
+  # Idempotent: clean up legacy symlink if it points to our venv
+  if [[ -L /usr/local/bin/certbot ]]; then
+    local target
+    target=$(readlink -f /usr/local/bin/certbot 2>/dev/null || true)
+    [[ $target == "${CERTBOT_VENV}/bin/certbot" ]] && rm -f /usr/local/bin/certbot
+  fi
+
   local manager pip_timeout=${XRAYCTL_CERT_PIP_TIMEOUT:-120} apt_timeout=${XRAYCTL_CERT_APT_TIMEOUT:-60}
   local need_install=0
 
@@ -2337,49 +2441,54 @@ EOF
 
 sync_managed_certificate() {
   local identifier=$1 cert_name=${2:-$1} __changed_var=${3:-}
-  local certbot_live="${CERTBOT_CONFIG_DIR}/live/${cert_name}"
+  local source_cert="${CERTBOT_CONFIG_DIR}/live/${cert_name}/fullchain.pem"
+  local source_key="${CERTBOT_CONFIG_DIR}/live/${cert_name}/privkey.pem"
   local cert_target="${CERT_DIR}/${identifier}.crt"
   local key_target="${CERT_DIR}/${identifier}.key"
-  local cert_tmp="${cert_target}.new" key_tmp="${key_target}.new"
-  local old_cert_hash="" new_cert_hash=""
-  local old_key_hash="" new_key_hash=""
-  local changed_value=0
+  local cert_tmp="${cert_target}.new"   key_tmp="${key_target}.new"
+  local cert_bak="${cert_target}.old"   key_bak="${key_target}.old"
+  local changed_value=0 need_rollback=0
 
-  [[ -d $certbot_live ]] || { warn "Certbot 证书目录不存在：${certbot_live}"; return 1; }
-  [[ -r ${certbot_live}/fullchain.pem ]] || { warn "无法读取证书：${certbot_live}/fullchain.pem"; return 1; }
-  [[ -r ${certbot_live}/privkey.pem ]] || { warn "无法读取私钥：${certbot_live}/privkey.pem"; return 1; }
+  [[ -d ${CERTBOT_CONFIG_DIR}/live/${cert_name} ]] || { warn "Certbot 证书目录不存在：${cert_name}"; return 1; }
+  [[ -r $source_cert ]] || { warn "无法读取证书：${source_cert}"; return 1; }
+  [[ -r $source_key ]]  || { warn "无法读取私钥：${source_key}"; return 1; }
 
-  # Hash existing files for change detection
-  if [[ -f $cert_target ]]; then
-    old_cert_hash=$(sha256sum "$cert_target" | cut -d' ' -f1)
-  fi
-  if [[ -f $key_target ]]; then
-    old_key_hash=$(sha256sum "$key_target" | cut -d' ' -f1)
-  fi
-
-  # Write to .new temp files first (atomic)
+  # Stage new files
   setup_certificate_access
-  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" \
-    "${certbot_live}/fullchain.pem" "$cert_tmp"
-  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" \
-    "${certbot_live}/privkey.pem" "$key_tmp"
+  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$source_cert" "$cert_tmp" || return 1
+  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$source_key"  "$key_tmp"  || { rm -f "$cert_tmp"; return 1; }
 
-  # Validate the temp pair before swapping in
+  # Validate staged pair
   if ! validate_certificate_pair_files "$cert_tmp" "$key_tmp"; then
     rm -f "$cert_tmp" "$key_tmp"
     warn "新证书/私钥验证失败，已放弃替换。"
     return 1
   fi
 
-  mv -f "$cert_tmp" "$cert_target"
-  mv -f "$key_tmp" "$key_target"
+  # Backup current if they exist
+  if [[ -f $cert_target ]]; then cp -a "$cert_target" "$cert_bak"; fi
+  if [[ -f $key_target ]];  then cp -a "$key_target"  "$key_bak"; fi
 
-  # Check for actual changes
-  new_cert_hash=$(sha256sum "$cert_target" | cut -d' ' -f1)
-  new_key_hash=$(sha256sum "$key_target" | cut -d' ' -f1)
-  if [[ $old_cert_hash != "$new_cert_hash" || $old_key_hash != "$new_key_hash" ]]; then
+  # Replace
+  if ! mv -f "$cert_tmp" "$cert_target"; then need_rollback=1; fi
+  if ! mv -f "$key_tmp"  "$key_target";  then need_rollback=1; fi
+
+  if ((need_rollback)); then
+    rm -f "$cert_tmp" "$key_tmp"
+    [[ -f $cert_bak ]] && mv -f "$cert_bak" "$cert_target"
+    [[ -f $key_bak ]]  && mv -f "$key_bak"  "$key_target"
+    warn "证书替换失败，已恢复。"
+    return 1
+  fi
+
+  # Detect changes via cmp
+  if ! cmp -s "$source_cert" "$cert_target" 2>/dev/null ||
+     ! cmp -s "$source_key"  "$key_target"  2>/dev/null; then
     changed_value=1
   fi
+
+  # Clean up backups
+  rm -f "$cert_bak" "$key_bak"
 
   if [[ -n $__changed_var ]]; then
     printf -v "$__changed_var" '%s' "$changed_value"
@@ -2466,39 +2575,16 @@ cloudflare_dependent_certificates() {
   jq -r '.certificates | to_entries[] | select(.value.validation == "dns-cloudflare") | .key' "$META_FILE" 2>/dev/null
 }
 
-disable_cloudflare_auto_renew() {
-  local tmp count
-  tmp=$(temp_file)
-  count=$(jq -r '[.certificates | to_entries[] | select(.value.validation == "dns-cloudflare" and .value.autoRenew == true)] | length' "$META_FILE")
-  [[ $count -gt 0 ]] || { rm -f "$tmp"; return 0; }
-  jq '.certificates |= with_entries(if .value.validation == "dns-cloudflare" then .value.autoRenew = false else . end)' \
-    "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-  printf '%s' "$count"
-}
-
-enable_cloudflare_auto_renew() {
-  local tmp count
-  tmp=$(temp_file)
-  count=$(jq -r '[.certificates | to_entries[] | select(.value.validation == "dns-cloudflare" and .value.autoRenew == false)] | length' "$META_FILE")
-  [[ $count -gt 0 ]] || { rm -f "$tmp"; return 0; }
-  jq '.certificates |= with_entries(if .value.validation == "dns-cloudflare" then .value.autoRenew = true else . end)' \
-    "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-  printf '%s' "$count"
-}
-
 cf_credentials_summary() {
-  local deps dep_count auto_count=0 total=0
+  local deps dep_count=0
   deps=$(cloudflare_dependent_certificates)
-  if [[ -n $deps ]]; then
-    dep_count=$(printf '%s\n' "$deps" | grep -c .)
-    auto_count=$(jq -r '[.certificates | to_entries[] | select(.value.validation == "dns-cloudflare" and .value.autoRenew == true)] | length' "$META_FILE")
-  else
-    dep_count=0
-  fi
+  [[ -n $deps ]] && dep_count=$(printf '%s\n' "$deps" | grep -c .)
   printf '依赖证书: %s\n' "$dep_count"
-  printf '自动续期启用: %s\n' "$auto_count"
+  if load_cloudflare_credentials; then
+    printf '自动续期状态: 可用\n'
+  else
+    printf '自动续期状态: 阻塞（凭据缺失）\n'
+  fi
 }
 
 save_cloudflare_credentials() {
@@ -2518,16 +2604,10 @@ save_cloudflare_credentials() {
   printf '%s\n' "dns_cloudflare_email = ${email}" "dns_cloudflare_api_key = ${api_key}" >"$CLOUDFLARE_INI"
   chmod 600 "$CLOUDFLARE_INI"
   info "Cloudflare 凭据已保存至 ${CLOUDFLARE_INI}"
-
-  local disabled_count
-  disabled_count=$(enable_cloudflare_auto_renew)
-  if [[ -n $disabled_count && $disabled_count -gt 0 ]]; then
-    info "${disabled_count} 张 Cloudflare DNS 证书已恢复自动续期。"
-  fi
 }
 
 cloudflare_credentials_menu() {
-  local choice deps disabled_count
+  local choice deps
   while true; do
     clear_screen
     heading "Cloudflare 凭据管理"
@@ -2549,17 +2629,13 @@ cloudflare_credentials_menu() {
       2) if load_cloudflare_credentials; then
            deps=$(cloudflare_dependent_certificates)
            if [[ -n $deps ]]; then
-             printf '\n发现 %s 张依赖证书：\n\n' "$(printf '%s\n' "$deps" | grep -c .)"
+             printf '\n依赖证书（%s 张）：\n\n' "$(printf '%s\n' "$deps" | grep -c .)"
              printf '%s\n' "$deps" | sed 's/^/  - /'
-             printf '\n删除后自动续期将关闭。\n'
+             printf '\n删除凭据后这些证书将无法自动续期。\n'
            fi
            confirm "仍然删除 Cloudflare 凭据？" N || { info "已取消。"; pause; continue; }
            rm -f "$CLOUDFLARE_INI"
-           disabled_count=$(disable_cloudflare_auto_renew)
-           if [[ -n $disabled_count && $disabled_count -gt 0 ]]; then
-             info "${disabled_count} 张 Cloudflare DNS 证书已关闭自动续期。"
-           fi
-           info "Cloudflare 凭据已删除。"
+           info "Cloudflare 凭据已删除。下次自动续期将阻塞。"
          fi
          pause;;
       0) return;; *) warn "无效选项。"; pause;;
@@ -2778,7 +2854,7 @@ import_certificate() {
 }
 
 list_certificates() {
-  init_meta
+  ensure_meta
   local id cert found=0 source validation auto_renew subject cert_name
   while IFS= read -r id; do
     [[ -n $id ]] || continue
@@ -2789,28 +2865,32 @@ list_certificates() {
     source=$(meta_cert_get_field "$id" source)
     validation=$(meta_cert_get_field "$id" validation)
     auto_renew=$(meta_cert_get_field "$id" autoRenew)
-    printf '%s.crt\n' "$id"
-    [[ -n $subject && $subject != "$id" ]] && printf '  域名/IP: %s\n' "$subject"
-    [[ -n $cert_name && $cert_name != "$id" ]] && printf '  Certbot名称: %s\n' "$cert_name"
+    printf '标识: %s\n' "$id"
+    [[ -n $subject && $subject != "$id" ]] && printf '域名/IP: %s\n' "$subject"
+    [[ -n $cert_name && $cert_name != "$id" ]] && printf 'Certbot名称: %s\n' "$cert_name"
     case $source in
-      legacy)   printf '  来源: 旧版本迁移\n' ;;
-      imported) printf '  来源: 手动导入\n' ;;
-      letsencrypt) printf '  来源: Let'"'"'s Encrypt\n' ;;
-      *)        [[ -n $source ]] && printf '  来源: %s\n' "$source" ;;
+      legacy)   printf '来源: 旧版本迁移\n';;
+      imported) printf '来源: 手动导入\n';;
+      letsencrypt) printf '来源: Let'"'"'s Encrypt\n';;
+      *)        [[ -n $source ]] && printf '来源: %s\n' "$source";;
     esac
-    [[ -n $validation && $validation != "legacy" ]] && printf '  验证: %s\n' "$validation"
+    [[ -n $validation && $validation != "legacy" ]] && printf '验证: %s\n' "$validation"
     if [[ $auto_renew == "true" ]]; then
-      printf '  自动续期: 是\n'
+      if [[ $validation == dns-cloudflare ]] && ! load_cloudflare_credentials; then
+        printf '自动续期: 是（阻塞：Cloudflare 凭据缺失）\n'
+      else
+        printf '自动续期: 是\n'
+      fi
     else
-      printf '  自动续期: 否\n'
+      printf '自动续期: 否\n'
     fi
     case $source in
-      legacy) printf '  状态: 需重新签发以恢复自动续期\n' ;;
+      legacy) printf '状态: 需重新签发以恢复自动续期\n';;
     esac
     if [[ -r $cert ]]; then
       openssl x509 -in "$cert" -noout -subject -issuer -dates 2>/dev/null | sed 's/^/  /'
     else
-      printf '  [证书文件缺失]\n'
+      printf '[证书文件缺失]\n'
     fi
     printf '\n'
   done < <(meta_cert_list)
@@ -2831,62 +2911,105 @@ managed_certificate_count() {
 
 renew_one_certificate() {
   local identifier=$1 __result_var=${2:-}
-  local cert_name validation owner changed_value=0 result="failed"
-  local certbot_args=(renew --quiet)
-  meta_cert_exists "$identifier" || { warn "证书不在托管列表：${identifier}"; [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"; return 1; }
+  local cert_name validation owner result="failed"
+  local lineage_changed=0 sync_changed=0
+  local before_serial="" after_serial=""
+  local live_cert="${CERTBOT_CONFIG_DIR}/live"
+
+  meta_cert_exists "$identifier" || {
+    warn "证书不在托管列表：${identifier}"
+    [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"
+    return 1
+  }
   cert_name=$(meta_cert_get_field "$identifier" certName)
-  [[ -n $cert_name ]] || { warn "证书缺少 certName：${identifier}"; [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"; return 1; }
-  certbot_args+=(--cert-name "$cert_name")
+  [[ -n $cert_name ]] || {
+    warn "证书缺少 certName：${identifier}"
+    [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"
+    return 1
+  }
   validation=$(meta_cert_get_field "$identifier" validation)
+
+  # --- Dependency / block check ---
   case $validation in
+    dns-cloudflare)
+      if ! load_cloudflare_credentials; then
+        warn "${identifier}: Cloudflare 凭据缺失，续期阻塞。"
+        [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "blocked"
+        return 0
+      fi
+      ;;
     http-standalone)
       owner=$(detect_port80_owner)
       case $owner in
-        free) ;;
-        xray)
-          certbot_args+=(--pre-hook "systemctl stop ${SERVICE_NAME}" \
-            --post-hook "systemctl start ${SERVICE_NAME}")
-          ;;
+        free|xray) ;;
         *)
-          warn "${identifier} 续期失败：80 端口当前被 ${owner} 占用，与初始 standalone 配置不兼容。"
-          [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"
-          return 1
+          warn "${identifier}: 80 端口被 ${owner} 占用，续期阻塞。"
+          [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "blocked"
+          return 0
           ;;
       esac
       ;;
-    http-nginx|dns-cloudflare) ;;
     dns-manual)
-      warn "${identifier} 使用手动 DNS，无法自动续期。请手动重新签发。"
-      [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"
-      return 1
+      warn "${identifier}: 手动 DNS 无法自动续期。"
+      [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "blocked"
+      return 0
       ;;
   esac
 
+  # --- Build certbot args ---
+  local certbot_args=(renew --cert-name "$cert_name" --quiet)
+  if [[ $validation == http-standalone ]]; then
+    owner=$(detect_port80_owner)
+    [[ $owner == xray ]] && certbot_args+=(--pre-hook "systemctl stop ${SERVICE_NAME}" \
+      --post-hook "systemctl start ${SERVICE_NAME}")
+  fi
+
+  # --- Record fingerprint before ---
+  if [[ -r ${live_cert}/${cert_name}/fullchain.pem ]]; then
+    before_serial=$(openssl x509 -in "${live_cert}/${cert_name}/fullchain.pem" \
+      -noout -serial 2>/dev/null || true)
+  fi
+
+  # --- Renew ---
   if ! certbot_cmd "${certbot_args[@]}"; then
     warn "证书续期失败：${identifier}"
     [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"
     return 1
   fi
 
-  if ! sync_managed_certificate "$identifier" "$cert_name" changed_value; then
+  # --- Record fingerprint after ---
+  if [[ -r ${live_cert}/${cert_name}/fullchain.pem ]]; then
+    after_serial=$(openssl x509 -in "${live_cert}/${cert_name}/fullchain.pem" \
+      -noout -serial 2>/dev/null || true)
+  fi
+  if [[ -n $before_serial && -n $after_serial && $before_serial != "$after_serial" ]]; then
+    lineage_changed=1
+  fi
+
+  # --- Sync to Xray ---
+  if ! sync_managed_certificate "$identifier" "$cert_name" sync_changed; then
     warn "Let's Encrypt 已续期，但同步到 Xray 证书目录失败：${identifier}"
     [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"
     return 1
   fi
 
-  if [[ $changed_value == 1 ]]; then
+  # --- Determine result ---
+  if [[ $sync_changed == 1 ]]; then
     result="renewed"
-    if service_is_active; then
-      if restart_service; then
-        info "Xray 已重启以加载新证书。"
-      else
-        warn "证书已更新，但 Xray 重启失败。"
-        [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "renewed"
-        return 1
-      fi
-    fi
+  elif [[ $lineage_changed == 1 ]]; then
+    result="renewed"   # LE renewed but our copy was already current somehow
   else
     result="unchanged"
+  fi
+
+  # --- Restart Xray IFF CERT_DIR copy changed ---
+  if [[ $sync_changed == 1 ]] && service_is_active; then
+    if ! restart_service; then
+      warn "证书已更新，但 Xray 重启失败。"
+      [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "$result"
+      return 1
+    fi
+    info "Xray 已重启以加载新证书。"
   fi
 
   if [[ -n $__result_var ]]; then
@@ -2897,22 +3020,28 @@ renew_one_certificate() {
 
 renew_managed_certificates() {
   ensure_runtime_dependencies cert-renew
-  local renewed=0 unchanged=0 failed=0 id result
+  local renewed=0 unchanged=0 blocked=0 failed=0 id result
+  local blocked_list=""
   while IFS= read -r id; do
     [[ -n $id ]] || continue
     result=""
     renew_one_certificate "$id" result
     case $result in
-      renewed) ((renewed+=1));;
+      renewed)   ((renewed+=1));;
       unchanged) ((unchanged+=1));;
-      *) ((failed+=1));;
+      blocked)   ((blocked+=1)); blocked_list+="  - ${id}"$'\n';;
+      *)         ((failed+=1));;
     esac
   done < <(meta_cert_auto_renew_certs)
-  if ((renewed > 0 || unchanged > 0 || failed > 0)); then
+  if ((renewed > 0 || unchanged > 0 || blocked > 0 || failed > 0)); then
     printf '\n续期检查完成：\n'
-    [[ $renewed -gt 0 ]] && printf '  已续期: %s\n' "$renewed"
-    [[ $unchanged -gt 0 ]] && printf '  暂不需要续期: %s\n' "$unchanged"
-    [[ $failed -gt 0 ]] && printf '  失败: %s\n' "$failed"
+    [[ $renewed   -gt 0 ]] && printf '  已续期: %s\n' "$renewed"
+    [[ $unchanged -gt 0 ]] && printf '  无需续期: %s\n' "$unchanged"
+    [[ $blocked   -gt 0 ]] && printf '  阻塞: %s\n' "$blocked"
+    [[ $failed    -gt 0 ]] && printf '  失败: %s\n' "$failed"
+    if [[ -n $blocked_list ]]; then
+      printf '\n阻塞详情：\n%s' "$blocked_list"
+    fi
   else
     info "没有需要续期的证书。"
   fi
