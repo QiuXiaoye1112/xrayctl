@@ -1915,7 +1915,11 @@ issue_certificate() {
   cert_path=$(head -n1 <<<"$paths")
   write_certbot_deploy_hook "$domain"
   setup_certbot_renewal_timer
-  if ((was_active)); then rc-service "$SERVICE_NAME" start; CERT_STOPPED_SERVICE=0; fi
+  if ((was_active)); then
+    rc-service "$SERVICE_NAME" start; CERT_STOPPED_SERVICE=0
+  elif [[ $verify_method == dns ]] && service_is_active; then
+    rc-service "$SERVICE_NAME" restart || true
+  fi
   info "证书已保存：${cert_path}"
 }
 
