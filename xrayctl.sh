@@ -902,6 +902,8 @@ SupplementaryGroups=${RUNTIME_GROUP}
 EOF
   rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
   systemctl daemon-reload
+  meta_resource_register "configDir" "$CONFIG_DIR"
+  meta_resource_register "certDir" "$CERT_DIR"
   meta_resource_register "runtimeGroup" "$RUNTIME_GROUP"
 }
 
@@ -1045,6 +1047,20 @@ safe_remove_managed_dir() {
   rm -rf -- "$path"
 }
 
+safe_remove_managed_file() {
+  local resource_key=$1 path=$2 recorded
+  [[ -n $path && $path == /* ]] || return 1
+  case $path in
+    /|/etc|/usr|/usr/local|/var|/opt|/home|/root)
+      warn "拒绝删除危险路径：$path"; return 1 ;;
+  esac
+  recorded=$(_snapshot_meta_resource_get "$resource_key")
+  [[ -n $recorded ]] || { warn "缺少资产登记，拒绝删除：$path"; return 1; }
+  [[ $recorded == "$path" ]] || { warn "资产路径不匹配，拒绝删除：$path (登记: $recorded)"; return 1; }
+  [[ -e $path ]] || return 0
+  rm -f -- "$path"
+}
+
 meta_resource_remove_existing() {
   local key=$1 tmp
   [[ -f $META_FILE ]] || return 0
@@ -1133,17 +1149,15 @@ _uninstall_remove_certbot() {
 }
 
 _uninstall_remove_cloudflare() {
-  safe_remove_managed_dir "cloudflareCredentials" "$CLOUDFLARE_INI" 2>/dev/null || \
-    rm -f "$CLOUDFLARE_INI" 2>/dev/null || true
+  safe_remove_managed_file "cloudflareCredentials" "$CLOUDFLARE_INI"
   rmdir "$(dirname "$CLOUDFLARE_INI")" 2>/dev/null || true
   meta_resource_remove_existing "cloudflareCredentials"
 }
 
 _uninstall_remove_config() {
   [[ -f $CONFIG_FILE ]] && rm -f "$CONFIG_FILE"
-  rm -f "$SNAPSHOT_META"
-  [[ -f $META_FILE ]] && rm -f "$META_FILE"
   [[ -d $CERT_DIR ]] && safe_remove_managed_dir "certDir" "$CERT_DIR"
+  [[ -f $META_FILE ]] && rm -f "$META_FILE"
   [[ -d $CONFIG_DIR ]] && rmdir "$CONFIG_DIR" 2>/dev/null || true
 }
 
@@ -1385,6 +1399,7 @@ EOF
   printf '执行结果：失败步骤 %d，检测残留 %d\n' "$step_failures" "$residual_count"
   echo
   printf '未修改：\n  - 系统 Certbot\n  - /etc/letsencrypt\n  - 其他网站证书\n  - 系统软件包\n'
+  rm -f "$SNAPSHOT_META"
 }
 
 _xrayctl_uninstall_level_1() {
@@ -1420,6 +1435,7 @@ _xrayctl_uninstall_level_1() {
     warn "检测到 ${residual_count} 项残留，请手动检查。"
   fi
   info "完全卸载完成；备份保留在 ${BACKUP_DIR}。"
+  rm -f "$SNAPSHOT_META"
 }
 
 _xrayctl_uninstall_level_0() {
@@ -2094,7 +2110,7 @@ delete_client() {
   # HTTP: refuse to delete the last user on a non-localhost address
   if [[ $protocol == http ]]; then
     local total_users listen_addr
-    total_users=$(jq --arg tag "$tag" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])]|length' "$CONFIG_FILE")
+    total_users=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|length' "$CONFIG_FILE")
     if ((total_users == 1)); then
       listen_addr=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.listen // "0.0.0.0"' "$CONFIG_FILE")
       if [[ $listen_addr != "127.0.0.1" && $listen_addr != "::1" ]]; then
@@ -2392,10 +2408,9 @@ ensure_certbot_environment() {
   elif ! "$CERTBOT_VENV/bin/python" -c 'import certbot_nginx' >/dev/null 2>&1; then need_install=1
   fi
 
-  if ((need_install == 0)); then return 0; fi
-
-  manager=$(pkg_manager) || die "无法准备 Certbot 环境（未知的包管理器）。"
-  info "正在准备独立的 Certbot 环境。"
+  if ((need_install == 1)); then
+    manager=$(pkg_manager) || die "无法准备 Certbot 环境（未知的包管理器）。"
+    info "正在准备独立的 Certbot 环境。"
 
   case $manager in
     apt)
@@ -2434,6 +2449,7 @@ ensure_certbot_environment() {
     || die "当前安装的 Certbot 不支持 IP 证书。"
   "$CERTBOT_VENV/bin/pip" list 2>/dev/null | grep -q 'certbot-dns-cloudflare' \
     || warn "certbot-dns-cloudflare 插件安装可能失败，Cloudflare DNS 验证不可用。"
+  fi  # end of need_install == 1 block
 
   mkdir -p "$CERTBOT_CONFIG_DIR" "$CERTBOT_WORK_DIR" "$CERTBOT_LOGS_DIR"
   meta_resource_register "certbotVenv" "$CERTBOT_VENV"
@@ -2479,34 +2495,23 @@ EOF
   meta_resource_register "renewService" "xrayctl-certbot-renew.service"
 }
 
-sync_managed_certificate() {
-  local identifier=$1 cert_name=${2:-$1} __changed_var=${3:-}
-  local source_cert="${CERTBOT_CONFIG_DIR}/live/${cert_name}/fullchain.pem"
-  local source_key="${CERTBOT_CONFIG_DIR}/live/${cert_name}/privkey.pem"
-  local cert_target="${CERT_DIR}/${identifier}.crt"
-  local key_target="${CERT_DIR}/${identifier}.key"
-  local sync_changed_internal=0
-
-  [[ -d ${CERTBOT_CONFIG_DIR}/live/${cert_name} ]] || { warn "Certbot 证书目录不存在：${cert_name}"; return 1; }
-  [[ -r $source_cert ]] || { warn "无法读取证书：${source_cert}"; return 1; }
-  [[ -r $source_key ]]  || { warn "无法读取私钥：${source_key}"; return 1; }
+replace_certificate_pair() {
+  local source_cert=$1 source_key=$2 cert_target=$3 key_target=$4 __changed_var=${5:-}
+  local cert_tmp="${cert_target}.new"   key_tmp="${key_target}.new"
+  local cert_bak="${cert_target}.old"   key_bak="${key_target}.old"
+  local had_cert=0 had_key=0 need_rollback=0
+  local replace_changed=0
 
   # --- Compute change BEFORE any replacement ---
   if ! cmp -s "$source_cert" "$cert_target" 2>/dev/null ||
      ! cmp -s "$source_key"  "$key_target"  2>/dev/null; then
-    sync_changed_internal=1
+    replace_changed=1
   fi
 
-  # --- No change: skip everything ---
-  if [[ $sync_changed_internal == 0 ]]; then
+  if [[ $replace_changed == 0 ]]; then
     [[ -n $__changed_var ]] && printf -v "$__changed_var" '%s' "0"
     return 0
   fi
-
-  # --- Changed: staged replacement ---
-  local cert_tmp="${cert_target}.new"   key_tmp="${key_target}.new"
-  local cert_bak="${cert_target}.old"   key_bak="${key_target}.old"
-  local had_cert=0 had_key=0 need_rollback=0
 
   setup_certificate_access
 
@@ -2519,7 +2524,6 @@ sync_managed_certificate() {
     return 1
   fi
 
-  # Backup current
   if [[ -f $cert_target ]]; then
     had_cert=1
     if ! cp -a "$cert_target" "$cert_bak"; then
@@ -2537,16 +2541,13 @@ sync_managed_certificate() {
     fi
   fi
 
-  # Replace
   if ! mv -f "$cert_tmp" "$cert_target"; then need_rollback=1; fi
   if ! mv -f "$key_tmp"  "$key_target";  then need_rollback=1; fi
 
   if ((need_rollback)); then
     rm -f "$cert_tmp" "$key_tmp"
-    if ((had_cert)); then mv -f "$cert_bak" "$cert_target" || true
-    else rm -f "$cert_target"; fi
-    if ((had_key));  then mv -f "$key_bak"  "$key_target" || true
-    else rm -f "$key_target"; fi
+    if ((had_cert)); then mv -f "$cert_bak" "$cert_target" || true; else rm -f "$cert_target"; fi
+    if ((had_key));  then mv -f "$key_bak"  "$key_target" || true; else rm -f "$key_target"; fi
     warn "证书替换失败，已恢复原状态。"
     return 1
   fi
@@ -2554,9 +2555,33 @@ sync_managed_certificate() {
   rm -f "$cert_bak" "$key_bak"
 
   if [[ -n $__changed_var ]]; then
-    printf -v "$__changed_var" '%s' "$sync_changed_internal"
+    printf -v "$__changed_var" '%s' "$replace_changed"
   fi
   return 0
+}
+
+restart_xray_if_certificate_changed() {
+  local changed=$1
+  [[ $changed == 1 ]] || return 0
+  service_is_active || return 0
+  if ! restart_service; then
+    warn "证书已更新，但 Xray 重启失败。"
+    return 1
+  fi
+  info "Xray 已重启以加载新证书。"
+}
+
+sync_managed_certificate() {
+  local identifier=$1 cert_name=${2:-$1} __changed_var=${3:-}
+  local source_cert="${CERTBOT_CONFIG_DIR}/live/${cert_name}/fullchain.pem"
+  local source_key="${CERTBOT_CONFIG_DIR}/live/${cert_name}/privkey.pem"
+  local cert_target="${CERT_DIR}/${identifier}.crt"
+  local key_target="${CERT_DIR}/${identifier}.key"
+
+  [[ -r $source_cert ]] || { warn "无法读取证书：${source_cert}"; return 1; }
+  [[ -r $source_key ]]  || { warn "无法读取私钥：${source_key}"; return 1; }
+
+  replace_certificate_pair "$source_cert" "$source_key" "$cert_target" "$key_target" "$__changed_var"
 }
 
 hash_ipv6_identifier() {
@@ -2699,6 +2724,7 @@ cloudflare_credentials_menu() {
            fi
            confirm "仍然删除 Cloudflare 凭据？" N || { info "已取消。"; pause; continue; }
            rm -f "$CLOUDFLARE_INI"
+           meta_resource_remove "cloudflareCredentials"
            info "Cloudflare 凭据已删除。下次自动续期将阻塞。"
          fi
          pause;;
@@ -2893,6 +2919,7 @@ issue_certificate() {
   fi
   register_certificate_metadata "$identifier" "$domain" "$cert_name" "letsencrypt" "$validation" "$auto_renew"
   setup_certbot_renewal_timer
+  restart_xray_if_certificate_changed "$changed" || return 1
   info "证书已签发并托管：${identifier}"
 }
 
@@ -2912,9 +2939,16 @@ import_certificate() {
   [[ $domain =~ ^[A-Za-z0-9.-]+$ ]] || die "证书标识无效。"
   [[ -n $cert ]] || prompt_validated_value cert "证书文件路径" "" validate_readable_file "证书文件不存在或不可读，请重新输入。"
   [[ -n $key ]] || prompt_validated_value key "私钥文件路径" "" validate_readable_file "私钥文件不存在或不可读，请重新输入。"
-  paths=$(copy_certificate_pair "$domain" "$cert" "$key")
+  local changed=0
+  local cert_target="${CERT_DIR}/${domain}.crt"
+  local key_target="${CERT_DIR}/${domain}.key"
+  if ! replace_certificate_pair "$cert" "$key" "$cert_target" "$key_target" changed; then
+    warn "证书替换失败，导入未完成。"
+    return 1
+  fi
   meta_cert_set "$domain" "$domain" "$domain" "imported" "dns-manual" "false"
-  info "证书已导入：$(head -n1 <<<"$paths")"
+  restart_xray_if_certificate_changed "$changed" || return 1
+  info "证书已导入：${cert_target}"
 }
 
 list_certificates() {
@@ -3238,6 +3272,7 @@ backup_all() {
   tar -czf "$target" -C / "${paths[@]}" 2>/dev/null || { rm -f "$target"; die "备份失败。"; }
   chmod 600 "$target"
   info "备份已创建：$target"
+  meta_resource_register "backupDir" "$BACKUP_DIR"
   info "提示：备份包含 Xray 配置、metadata 和证书副本，不含 Certbot 账户/lineage 数据。"
 }
 
@@ -3288,6 +3323,22 @@ restore_backup() {
     die "恢复后服务失败，已回滚配置、元数据和证书。"
   fi
   rm -rf "$temp"; info "备份已恢复。"
+
+  # Warn if any Let's Encrypt certs lack Certbot lineage after restore
+  local id source auto_renew cert_name warned=0
+  while IFS= read -r id; do
+    [[ -n $id ]] || continue
+    source=$(meta_cert_get_field "$id" source)
+    [[ $source == letsencrypt ]] || continue
+    auto_renew=$(meta_cert_get_field "$id" autoRenew)
+    [[ $auto_renew == true ]] || continue
+    cert_name=$(meta_cert_get_field "$id" certName)
+    if [[ ! -d ${CERTBOT_CONFIG_DIR}/live/${cert_name} ]]; then
+      warn "证书 ${id}: 副本已恢复，但 Certbot lineage 缺失，无法自动续期。请重新签发。"
+      ((warned+=1))
+    fi
+  done < <(meta_cert_list)
+  ((warned > 0)) && warn "共 ${warned} 张 Let's Encrypt 证书缺少 Certbot 续期数据。"
 }
 
 show_status() {
