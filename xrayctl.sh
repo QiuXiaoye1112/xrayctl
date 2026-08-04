@@ -118,6 +118,17 @@ prompt_secret() {
   printf -v "$__var" '%s' "$secret_value"
 }
 
+prompt_hidden_secret() {
+  local __var=$1 prompt=$2 value=""
+  while [[ -z $value ]]; do
+    printf '%s: ' "$prompt"
+    if ! read -r -s value; then printf '\n'; warn "输入已中断。"; return 1; fi
+    printf '\n'
+    [[ -n $value ]] || warn "不能为空，请重新输入。"
+  done
+  printf -v "$__var" '%s' "$value"
+}
+
 choose() {
   local __var=$1 prompt=$2; shift 2
   local options=("$@") selected_value i
@@ -476,6 +487,38 @@ has_net_admin() {
   (( (16#$cap & 0x1000) != 0 ))
 }
 
+cleanup_legacy_certbot_symlink() {
+  if [[ -L /usr/local/bin/certbot ]]; then
+    local target
+    target=$(readlink -f /usr/local/bin/certbot 2>/dev/null || true)
+    if [[ $target == "${CERTBOT_VENV}/bin/certbot" ]]; then
+      rm -f /usr/local/bin/certbot
+      hash -r 2>/dev/null || true
+      info "已清理历史 certbot 软链接。"
+    fi
+  fi
+}
+
+migrate_legacy_certificates() {
+  [[ -d $CERT_DIR ]] || return 0
+  local crt key identifier found=0 migrated=0
+  for crt in "$CERT_DIR"/*.crt; do
+    [[ -e $crt ]] || continue
+    identifier=$(basename "$crt" .crt)
+    key="${CERT_DIR}/${identifier}.key"
+    [[ -r $key ]] || continue
+    meta_cert_exists "$identifier" && continue
+    local subject
+    subject=$(certificate_server_names "$crt" | head -1)
+    [[ -z $subject ]] && subject="$identifier"
+    meta_cert_set "$identifier" "$subject" "$identifier" "legacy" "legacy" "false"
+    ((migrated+=1))
+    found=1
+  done
+  ((migrated > 0)) && info "已注册 ${migrated} 张旧版证书至 metadata。"
+  cleanup_legacy_certbot_symlink
+}
+
 init_meta() {
   mkdir -p "$CONFIG_DIR"
   if [[ ! -s $META_FILE ]] || ! jq -e 'type=="object" and (.inbounds|type=="object")' "$META_FILE" >/dev/null 2>&1; then
@@ -490,6 +533,7 @@ init_meta() {
     jq '.schema = 3 | .certificates = (.certificates // {}) | .managedResources = (.managedResources // {})' "$META_FILE" >"$tmp"
     install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
     info "元数据已迁移至 schema 3。"
+    migrate_legacy_certificates
   elif [[ $schema == 2 ]]; then
     local tmp; tmp=$(temp_file)
     jq '.schema = 3 | .managedResources = (.managedResources // {})' "$META_FILE" >"$tmp"
@@ -1970,7 +2014,8 @@ ensure_certbot_environment() {
 
   if [[ ! -x $CERTBOT_BIN ]]; then need_install=1
   elif ! "$CERTBOT_BIN" --help all 2>/dev/null | grep -q -- '--ip-address'; then need_install=1
-  elif ! "$CERTBOT_VENV/bin/pip" list 2>/dev/null | grep -q 'certbot-dns-cloudflare'; then need_install=1
+  elif ! "$CERTBOT_VENV/bin/python" -c 'import certbot_dns_cloudflare' >/dev/null 2>&1; then need_install=1
+  elif ! "$CERTBOT_VENV/bin/python" -c 'import certbot_nginx' >/dev/null 2>&1; then need_install=1
   fi
 
   if ((need_install == 0)); then return 0; fi
@@ -2029,6 +2074,7 @@ certbot_cmd() {
 
 setup_certbot_renewal_timer() {
   local quick_command="${QUICK_COMMAND:-/usr/local/sbin/xrayctl}"
+  [[ -x $quick_command ]] || install_quick_command
   cat >/etc/systemd/system/xrayctl-certbot-renew.service <<EOF
 [Unit]
 Description=Renew certificates managed by xrayctl
@@ -2054,10 +2100,10 @@ EOF
 }
 
 sync_managed_certificate() {
-  local identifier=$1 certbot_live="${CERTBOT_CONFIG_DIR}/live/${identifier}"
+  local identifier=$1 __changed_var=${2:-} certbot_live="${CERTBOT_CONFIG_DIR}/live/${identifier}"
   local cert_target="${CERT_DIR}/${identifier}.crt"
   local key_target="${CERT_DIR}/${identifier}.key"
-  local old_cert_hash="" new_cert_hash=""
+  local old_cert_hash="" new_cert_hash="" changed=0
   [[ -d $certbot_live ]] || { warn "Certbot 证书目录不存在：${certbot_live}"; return 1; }
   [[ -r ${certbot_live}/fullchain.pem ]] || { warn "无法读取证书：${certbot_live}/fullchain.pem"; return 1; }
   [[ -r ${certbot_live}/privkey.pem ]] || { warn "无法读取私钥：${certbot_live}/privkey.pem"; return 1; }
@@ -2073,12 +2119,34 @@ sync_managed_certificate() {
   if [[ -f $cert_target ]]; then
     new_cert_hash=$(sha256sum "$cert_target" | cut -d' ' -f1)
   fi
-  [[ $old_cert_hash != "$new_cert_hash" ]]
+  [[ $old_cert_hash != "$new_cert_hash" ]] && changed=1
+  if [[ -n $__changed_var ]]; then
+    printf -v "$__changed_var" '%s' "$changed"
+  fi
+  return 0
 }
 
 hash_ipv6_identifier() {
   local ip=$1
   printf 'ip6-%s' "$(printf '%s' "$ip" | sha256sum | cut -c1-8)"
+}
+
+hash_ipv4_identifier() {
+  local ip=$1
+  printf 'ip4-%s' "$(printf '%s' "$ip" | sha256sum | cut -c1-8)"
+}
+
+certificate_identifier_for_subject() {
+  local subject=$1
+  if validate_ip_literal "$subject"; then
+    if [[ $subject == *:* ]]; then
+      hash_ipv6_identifier "$subject"
+    else
+      hash_ipv4_identifier "$subject"
+    fi
+  else
+    printf '%s' "$subject"
+  fi
 }
 
 detect_port80_owner() {
@@ -2132,6 +2200,11 @@ load_cloudflare_credentials() {
   grep -q 'dns_cloudflare_api_key' "$CLOUDFLARE_INI" 2>/dev/null
 }
 
+cloudflare_dependent_certificates() {
+  init_meta
+  jq -r '.certificates | to_entries[] | select(.value.validation == "dns-cloudflare") | .key' "$META_FILE" 2>/dev/null
+}
+
 save_cloudflare_credentials() {
   local email="" api_key=""
   while [[ -z $email ]]; do
@@ -2141,7 +2214,7 @@ save_cloudflare_credentials() {
     email=""
   done
   while [[ -z $api_key ]]; do
-    prompt_secret api_key "Cloudflare Global API Key"
+    prompt_hidden_secret api_key "Cloudflare Global API Key"
     [[ -n $api_key ]] && break
     warn "API Key 不能为空。"
   done
@@ -2152,7 +2225,7 @@ save_cloudflare_credentials() {
 }
 
 cloudflare_credentials_menu() {
-  local choice
+  local choice deps
   while true; do
     clear_screen
     heading "Cloudflare 凭据管理"
@@ -2169,7 +2242,13 @@ cloudflare_credentials_menu() {
     case $choice in
       1) save_cloudflare_credentials; pause;;
       2) if load_cloudflare_credentials; then
-           confirm "确认删除 Cloudflare 凭据？" N || { info "已取消。"; pause; continue; }
+           deps=$(cloudflare_dependent_certificates)
+           if [[ -n $deps ]]; then
+             printf '\n发现 %s 张依赖证书：\n\n' "$(printf '%s\n' "$deps" | grep -c .)"
+             printf '%s\n' "$deps" | sed 's/^/  - /'
+             printf '\n删除后自动续期将失败。\n'
+           fi
+           confirm "仍然删除 Cloudflare 凭据？" N || { info "已取消。"; pause; continue; }
            rm -f "$CLOUDFLARE_INI"; info "Cloudflare 凭据已删除。"
          fi
          pause;;
@@ -2218,6 +2297,11 @@ issue_domain_http() {
       [[ $force == 1 ]] && certbot_args+=(--force-renewal)
       certbot_cmd "${certbot_args[@]}"
       ;;
+    apache)
+      warn "80 端口被 Apache 占用，暂不支持 certbot --apache 自动验证。"
+      warn "建议使用 Cloudflare DNS 自动验证（无需占用端口）。"
+      return 1
+      ;;
     *)
       warn "80 端口被其他程序占用，无法使用 HTTP 验证。请选择 Cloudflare DNS 自动验证。"
       return 1
@@ -2235,7 +2319,7 @@ issue_domain_manual_dns() {
 
 issue_ip_certificate() {
   local ip=$1 email=$2 force=${3:-0} identifier owner was_active=0
-  identifier=$(hash_ipv6_identifier "$ip")
+  identifier=$(certificate_identifier_for_subject "$ip")
   owner=$(detect_port80_owner)
   local certbot_args=(certonly --standalone --non-interactive --agree-tos \
     --preferred-challenges http --cert-name "$identifier" -m "$email" \
@@ -2278,7 +2362,7 @@ issue_certificate() {
 
   # Determine cert_name / identifier
   if [[ $mode == ip ]]; then
-    identifier=$(hash_ipv6_identifier "$domain")
+    identifier=$(certificate_identifier_for_subject "$domain")
     cert_name="$identifier"
   else
     identifier="$domain"
@@ -2351,15 +2435,20 @@ issue_certificate() {
   fi
 
   # Sync cert to CERT_DIR and register metadata
-  sync_managed_certificate "$cert_name" || true
-  register_certificate_metadata "$identifier" "$domain" "letsencrypt" "$validation" "$auto_renew"
+  local changed
+  if ! sync_managed_certificate "$cert_name" changed; then
+    warn "证书已经由 Let's Encrypt 签发，但无法同步到 Xray 证书目录。"
+    warn "Certbot 原始证书仍保留在 ${CERTBOT_CONFIG_DIR}，可修复权限后重新同步。"
+    return 1
+  fi
+  register_certificate_metadata "$identifier" "$domain" "$cert_name" "letsencrypt" "$validation" "$auto_renew"
   setup_certbot_renewal_timer
   info "证书已签发并托管：${identifier}"
 }
 
 register_certificate_metadata() {
-  local identifier=$1 subject=$2 source=$3 validation=$4 auto_renew=$5
-  meta_cert_set "$identifier" "$subject" "$identifier" "$source" "$validation" "$auto_renew"
+  local identifier=$1 subject=$2 cert_name=$3 source=$4 validation=$5 auto_renew=$6
+  meta_cert_set "$identifier" "$subject" "$cert_name" "$source" "$validation" "$auto_renew"
 }
 
 # ============================================================
@@ -2416,18 +2505,21 @@ managed_certificate_count() {
 
 renew_one_certificate() {
   local cert_name=$1
-  local validation was_active=0 changed=0 rc=0
+  local validation owner changed=0 rc=0
+  local certbot_args=(renew --cert-name "$cert_name" --quiet)
   meta_cert_exists "$cert_name" || { warn "证书不在托管列表：${cert_name}"; return 1; }
   validation=$(meta_cert_get_field "$cert_name" validation)
   case $validation in
     http-standalone)
-      case $(detect_port80_owner) in
+      owner=$(detect_port80_owner)
+      case $owner in
         free) ;;
         xray)
-          service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
+          certbot_args+=(--pre-hook "systemctl stop ${SERVICE_NAME}" \
+            --post-hook "systemctl start ${SERVICE_NAME}")
           ;;
         *)
-          warn "${cert_name} 续期失败：80 端口当前被占用，与初始 standalone 配置不兼容。"
+          warn "${cert_name} 续期失败：80 端口当前被 ${owner} 占用，与初始 standalone 配置不兼容。"
           return 1
           ;;
       esac
@@ -2439,18 +2531,17 @@ renew_one_certificate() {
       ;;
   esac
 
-  if ! certbot_cmd renew --cert-name "$cert_name" --quiet; then
+  if ! certbot_cmd "${certbot_args[@]}"; then
     warn "证书续期失败：${cert_name}"
-    [[ $was_active == 1 ]] && { systemctl start "$SERVICE_NAME" || true; CERT_STOPPED_SERVICE=0; }
     return 1
   fi
 
-  sync_managed_certificate "$cert_name" && changed=1 || changed=0
-
-  if [[ $was_active == 1 ]]; then
-    systemctl start "$SERVICE_NAME"; CERT_STOPPED_SERVICE=0
+  if ! sync_managed_certificate "$cert_name" changed; then
+    warn "Let's Encrypt 已续期，但同步到 Xray 证书目录失败：${cert_name}"
+    return 1
   fi
-  if [[ $changed == 1 && $was_active == 0 ]] && service_is_active; then
+
+  if [[ $changed == 1 ]] && service_is_active; then
     service_restart; info "Xray 已重启以加载新证书。"
   fi
   info "证书续期成功：${cert_name}"
@@ -2510,7 +2601,7 @@ delete_managed_certificate() {
   meta_cert_exists "$identifier" || { warn "该证书不在 xrayctl 托管列表中，不予删除。"; return 0; }
   cert_path="${CERT_DIR}/${identifier}.crt"
   key_path="${CERT_DIR}/${identifier}.key"
-  [[ -e $cert_path || -e $key_path ]] || { warn "托管证书文件不存在：${identifier}"; return 0; }
+  [[ -e $cert_path || -e $key_path ]] || warn "证书副本已缺失，将清理 metadata 及 Certbot 记录。"
   users=$(certificate_inbound_users "$identifier")
   if [[ -n $users ]]; then
     warn "证书正在被以下 TLS 入站使用，不能删除："
