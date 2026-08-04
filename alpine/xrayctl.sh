@@ -1884,11 +1884,12 @@ issue_certificate() {
       --dns-cloudflare --dns-cloudflare-credentials "$CF_CREDENTIALS_FILE" -d "$domain")
   else
     service_is_active && { was_active=1; rc-service "$SERVICE_NAME" stop; CERT_STOPPED_SERVICE=1; }
-    certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email" --force-renewal -d "$domain")
-  fi
-
-  if [[ $mode == ip ]]; then
-    certbot_args+=(--preferred-profile shortlived --ip-address "$domain")
+    certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email" --force-renewal)
+    if [[ $mode == ip ]]; then
+      certbot_args+=(--preferred-profile shortlived --ip-address "$domain")
+    else
+      certbot_args+=(-d "$domain")
+    fi
   fi
   if ! certbot "${certbot_args[@]}"; then
     if ((was_active)); then rc-service "$SERVICE_NAME" start || true; CERT_STOPPED_SERVICE=0; fi
