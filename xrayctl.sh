@@ -1784,6 +1784,12 @@ issue_certificate() {
   validate_email_address "$email" || die "邮箱格式无效。"
   install_certbot "$mode"
   if [[ -f ${CERT_DIR}/${domain}.crt && -f ${CERT_DIR}/${domain}.key ]]; then
+    local using_inbounds
+    using_inbounds=$(jq -r --arg cert "${CERT_DIR}/${domain}.crt" \
+      '.inbounds[]?|select(.streamSettings.tlsSettings.certificates[0].certificateFile==$cert)|.tag' "$CONFIG_FILE" 2>/dev/null | paste -sd ',')
+    if [[ -n $using_inbounds ]]; then
+      info "证书 ${domain} 正在被入站使用：${using_inbounds}"
+    fi
     confirm "证书 ${domain} 已存在，是否强制重新签发？" N || { info "已取消。"; return 0; }
   fi
   service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
