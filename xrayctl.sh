@@ -1774,15 +1774,22 @@ update_tls_inbound_certificate() {
 CF_CREDENTIALS_FILE="${XRAYCTL_CF_CREDENTIALS:-/etc/letsencrypt/cloudflare.ini}"
 
 install_certbot_dns_plugin() {
-  if python3 -c 'import certbot_dns_cloudflare' 2>/dev/null; then return 0; fi
+  # 用 certbot 自己的插件系统检测，避免 Python 环境不一致
+  if certbot plugins 2>/dev/null | grep -q 'dns-cloudflare'; then return 0; fi
   info "正在安装 certbot-dns-cloudflare..."
-  # 优先用系统包，不行再用 pip
   local manager; manager=$(pkg_manager 2>/dev/null || true)
   case $manager in
     apt) DEBIAN_FRONTEND=noninteractive apt-get install -y python3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
     dnf) dnf install -y python3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
     apk) apk add --no-cache py3-certbot-dns-cloudflare >/dev/null 2>&1 && return 0 ;;
   esac
+  # 确保 certbot 本身可用，再用 pip 装插件到同一环境
+  local certbot_path; certbot_path=$(command -v certbot 2>/dev/null || true)
+  if [[ -n $certbot_path && -L $certbot_path ]]; then
+    # certbot 是符号链接（可能在 venv 里），用 pip 装到对应环境
+    local certbot_python; certbot_python=$(head -1 "$certbot_path" | sed 's/^#!//')
+    [[ -x $certbot_python ]] && "$certbot_python" -m pip install certbot-dns-cloudflare >/dev/null 2>&1 && return 0
+  fi
   command_exists pip3 || install_packages python3-pip
   pip3 install certbot-dns-cloudflare >/dev/null 2>&1 || { warn "certbot-dns-cloudflare 安装失败，请检查 pip 和网络。"; return 1; }
 }
