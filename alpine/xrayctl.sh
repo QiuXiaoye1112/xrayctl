@@ -1862,19 +1862,21 @@ issue_certificate() {
   validate_email_address "$email" || die "邮箱格式无效。"
   # 域名可选 DNS 验证，IP 只能用 HTTP
   if [[ $mode == domain ]]; then
-    choose verify_method "选择验证方式" "DNS (Cloudflare, 推荐)" "HTTP (需要 80 端口可访问)"
-    if [[ $verify_method == 1 ]]; then
-      install_certbot_dns_plugin || return 0
-      local cf_email cf_key
-      prompt_value cf_email "Cloudflare 邮箱"
-      [[ -n $cf_email ]] || { warn "邮箱不能为空。"; return 0; }
-      prompt_value cf_key "Cloudflare Global API Key"
-      [[ -n $cf_key ]] || { warn "API Key 不能为空。"; return 0; }
-      mkdir -p "$(dirname "$CF_CREDENTIALS_FILE")"
-      printf 'dns_cloudflare_email = %s\ndns_cloudflare_api_key = %s\n' "$cf_email" "$cf_key" >"$CF_CREDENTIALS_FILE"
-      chmod 600 "$CF_CREDENTIALS_FILE"
-      verify_method=dns
-    fi
+    choose verify_method "选择验证方式" "DNS (Cloudflare, 自动)" "DNS (手动, 通用)" "HTTP (需要 80 端口可访问)"
+    case $verify_method in
+      1) install_certbot_dns_plugin || return 0
+        local cf_email cf_key
+        prompt_value cf_email "Cloudflare 邮箱"
+        [[ -n $cf_email ]] || { warn "邮箱不能为空。"; return 0; }
+        prompt_value cf_key "Cloudflare Global API Key"
+        [[ -n $cf_key ]] || { warn "API Key 不能为空。"; return 0; }
+        mkdir -p "$(dirname "$CF_CREDENTIALS_FILE")"
+        printf 'dns_cloudflare_email = %s\ndns_cloudflare_api_key = %s\n' "$cf_email" "$cf_key" >"$CF_CREDENTIALS_FILE"
+        chmod 600 "$CF_CREDENTIALS_FILE"
+        verify_method=dns-cf
+        ;;
+      2) verify_method=dns-manual ;;
+    esac
   fi
 
   [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。"
@@ -1891,22 +1893,30 @@ issue_certificate() {
     fi
   fi
   local certbot_args
-  if [[ $verify_method == dns ]]; then
-    certbot_args=(certonly --non-interactive --agree-tos -m "$email" --force-renewal
-      --dns-cloudflare --dns-cloudflare-credentials "$CF_CREDENTIALS_FILE" -d "$domain")
-  else
-    service_is_active && { was_active=1; rc-service "$SERVICE_NAME" stop; CERT_STOPPED_SERVICE=1; }
-    certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email" --force-renewal)
-    if [[ $mode == ip ]]; then
-      certbot_args+=(--preferred-profile shortlived --ip-address "$domain")
-    else
-      certbot_args+=(-d "$domain")
-    fi
-  fi
+  case $verify_method in
+    dns-cf)
+      certbot_args=(certonly --non-interactive --agree-tos -m "$email" --force-renewal
+        --dns-cloudflare --dns-cloudflare-credentials "$CF_CREDENTIALS_FILE" -d "$domain")
+      ;;
+    dns-manual)
+      info "Certbot 将提示添加 TXT 记录，请在 DNS 面板添加后回车继续。"
+      certbot_args=(certonly --manual --agree-tos -m "$email" --force-renewal
+        --preferred-challenges dns -d "$domain")
+      ;;
+    *)
+      service_is_active && { was_active=1; rc-service "$SERVICE_NAME" stop; CERT_STOPPED_SERVICE=1; }
+      certbot_args=(certonly --standalone --non-interactive --agree-tos --preferred-challenges http -m "$email" --force-renewal)
+      if [[ $mode == ip ]]; then
+        certbot_args+=(--preferred-profile shortlived --ip-address "$domain")
+      else
+        certbot_args+=(-d "$domain")
+      fi
+      ;;
+  esac
   if ! certbot "${certbot_args[@]}"; then
     if ((was_active)); then rc-service "$SERVICE_NAME" start || true; CERT_STOPPED_SERVICE=0; fi
     warn "证书签发失败，请查看上方 Certbot 输出的具体原因。"
-    if [[ $verify_method == dns ]]; then
+    if [[ $verify_method == dns-cf ]]; then
       warn "提示：确认 Cloudflare 邮箱和 Global API Key 正确，且域名在账户中。"
     fi
     return 0
@@ -1917,7 +1927,7 @@ issue_certificate() {
   setup_certbot_renewal_timer
   if ((was_active)); then
     rc-service "$SERVICE_NAME" start; CERT_STOPPED_SERVICE=0
-  elif [[ $verify_method == dns ]] && service_is_active; then
+  elif [[ $verify_method == dns-cf || $verify_method == dns-manual ]] && service_is_active; then
     rc-service "$SERVICE_NAME" restart || true
   fi
   info "证书已保存：${cert_path}"
