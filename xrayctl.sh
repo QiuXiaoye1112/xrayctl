@@ -1810,13 +1810,15 @@ issue_certificate() {
     if [[ $verify_method == 1 ]]; then
       install_certbot_dns_plugin || return 0
       if [[ ! -f $CF_CREDENTIALS_FILE ]]; then
-        local cf_token
-        prompt_secret cf_token "Cloudflare API Token (Zone:DNS:Edit 权限)"
-        [[ -n $cf_token ]] || { warn "API Token 不能为空。"; return 0; }
+        local cf_email cf_key
+        prompt_value cf_email "Cloudflare 邮箱"
+        [[ -n $cf_email ]] || { warn "邮箱不能为空。"; return 0; }
+        prompt_secret cf_key "Cloudflare Global API Key"
+        [[ -n $cf_key ]] || { warn "API Key 不能为空。"; return 0; }
         mkdir -p "$(dirname "$CF_CREDENTIALS_FILE")"
-        printf 'dns_cloudflare_api_token = %s\n' "$cf_token" >"$CF_CREDENTIALS_FILE"
+        printf 'dns_cloudflare_email = %s\ndns_cloudflare_api_key = %s\n' "$cf_email" "$cf_key" >"$CF_CREDENTIALS_FILE"
         chmod 600 "$CF_CREDENTIALS_FILE"
-        info "API Token 已保存至 ${CF_CREDENTIALS_FILE}"
+        info "凭据已保存至 ${CF_CREDENTIALS_FILE}"
       fi
       verify_method=dns
     fi
@@ -1853,7 +1855,7 @@ issue_certificate() {
     if ((was_active)); then systemctl start "$SERVICE_NAME" || true; CERT_STOPPED_SERVICE=0; fi
     warn "证书签发失败，请查看上方 Certbot 输出的具体原因。"
     if [[ $verify_method == dns ]]; then
-      warn "提示：确认 API Token 有 Zone:DNS:Edit 权限，且域名在 Cloudflare 账户中。"
+      warn "提示：确认 Cloudflare 邮箱和 Global API Key 正确，且域名在账户中。"
     fi
     return 0
   fi

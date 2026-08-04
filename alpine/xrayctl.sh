@@ -1906,7 +1906,7 @@ issue_certificate() {
     if ((was_active)); then rc-service "$SERVICE_NAME" start || true; CERT_STOPPED_SERVICE=0; fi
     warn "证书签发失败，请查看上方 Certbot 输出的具体原因。"
     if [[ $verify_method == dns ]]; then
-      warn "提示：确认 API Token 有 Zone:DNS:Edit 权限，且域名在 Cloudflare 账户中。"
+      warn "提示：确认 Cloudflare 邮箱和 Global API Key 正确，且域名在账户中。"
     fi
     return 0
   fi
