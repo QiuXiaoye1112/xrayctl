@@ -2496,29 +2496,43 @@ sync_managed_certificate() {
   local source_key="${CERTBOT_CONFIG_DIR}/live/${cert_name}/privkey.pem"
   local cert_target="${CERT_DIR}/${identifier}.crt"
   local key_target="${CERT_DIR}/${identifier}.key"
-  local cert_tmp="${cert_target}.new"   key_tmp="${key_target}.new"
-  local cert_bak="${cert_target}.old"   key_bak="${key_target}.old"
-  local sync_changed_internal=0 need_rollback=0
+  local sync_changed_internal=0
 
   [[ -d ${CERTBOT_CONFIG_DIR}/live/${cert_name} ]] || { warn "Certbot 证书目录不存在：${cert_name}"; return 1; }
   [[ -r $source_cert ]] || { warn "无法读取证书：${source_cert}"; return 1; }
   [[ -r $source_key ]]  || { warn "无法读取私钥：${source_key}"; return 1; }
 
-  # Stage new files
+  # --- Compute change BEFORE any replacement ---
+  if ! cmp -s "$source_cert" "$cert_target" 2>/dev/null ||
+     ! cmp -s "$source_key"  "$key_target"  2>/dev/null; then
+    sync_changed_internal=1
+  fi
+
+  # --- No change: skip everything ---
+  if [[ $sync_changed_internal == 0 ]]; then
+    [[ -n $__changed_var ]] && printf -v "$__changed_var" '%s' "0"
+    return 0
+  fi
+
+  # --- Changed: staged replacement ---
+  local cert_tmp="${cert_target}.new"   key_tmp="${key_target}.new"
+  local cert_bak="${cert_target}.old"   key_bak="${key_target}.old"
+  local had_cert=0 had_key=0 need_rollback=0
+
   setup_certificate_access
+
   install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$source_cert" "$cert_tmp" || return 1
   install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$source_key"  "$key_tmp"  || { rm -f "$cert_tmp"; return 1; }
 
-  # Validate staged pair
   if ! validate_certificate_pair_files "$cert_tmp" "$key_tmp"; then
     rm -f "$cert_tmp" "$key_tmp"
     warn "新证书/私钥验证失败，已放弃替换。"
     return 1
   fi
 
-  # Backup current if they exist
-  if [[ -f $cert_target ]]; then cp -a "$cert_target" "$cert_bak"; fi
-  if [[ -f $key_target ]];  then cp -a "$key_target"  "$key_bak"; fi
+  # Backup current
+  if [[ -f $cert_target ]]; then had_cert=1; cp -a "$cert_target" "$cert_bak"; fi
+  if [[ -f $key_target ]];  then had_key=1;  cp -a "$key_target"  "$key_bak"; fi
 
   # Replace
   if ! mv -f "$cert_tmp" "$cert_target"; then need_rollback=1; fi
@@ -2526,19 +2540,14 @@ sync_managed_certificate() {
 
   if ((need_rollback)); then
     rm -f "$cert_tmp" "$key_tmp"
-    [[ -f $cert_bak ]] && mv -f "$cert_bak" "$cert_target"
-    [[ -f $key_bak ]]  && mv -f "$key_bak"  "$key_target"
-    warn "证书替换失败，已恢复。"
+    if ((had_cert)); then mv -f "$cert_bak" "$cert_target" || true
+    else rm -f "$cert_target"; fi
+    if ((had_key));  then mv -f "$key_bak"  "$key_target" || true
+    else rm -f "$key_target"; fi
+    warn "证书替换失败，已恢复原状态。"
     return 1
   fi
 
-  # Detect changes via cmp
-  if ! cmp -s "$source_cert" "$cert_target" 2>/dev/null ||
-     ! cmp -s "$source_key"  "$key_target"  2>/dev/null; then
-    sync_changed_internal=1
-  fi
-
-  # Clean up backups
   rm -f "$cert_bak" "$key_bak"
 
   if [[ -n $__changed_var ]]; then
@@ -3045,10 +3054,8 @@ renew_one_certificate() {
     return 1
   fi
 
-  # --- Determine result ---
-  if [[ $sync_changed == 1 ]]; then
-    renewal_result_internal="renewed"
-  elif [[ $lineage_changed == 1 ]]; then
+  # --- Determine result: lineage_changed = renewal happened ---
+  if [[ $lineage_changed == 1 ]]; then
     renewal_result_internal="renewed"
   else
     renewal_result_internal="unchanged"
@@ -3057,7 +3064,7 @@ renew_one_certificate() {
   # --- Restart Xray IFF CERT_DIR copy changed ---
   if [[ $sync_changed == 1 ]] && service_is_active; then
     if ! restart_service; then
-      warn "证书已更新，但 Xray 重启失败。"
+      warn "证书副本已更新，但 Xray 重启失败。"
       [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "$renewal_result_internal"
       return 1
     fi
@@ -3077,14 +3084,18 @@ renew_managed_certificates() {
   while IFS= read -r id; do
     [[ -n $id ]] || continue
     result=""
-    renew_one_certificate "$id" result
+
+    if ! renew_one_certificate "$id" result; then
+      [[ -n $result ]] || result="failed"
+    fi
+
     case $result in
       renewed)   ((renewed+=1));;
       unchanged) ((unchanged+=1));;
-      blocked)   ((blocked+=1)); blocked_list+="  - ${id}"$'\n';;
+      blocked)   ((blocked+=1)); blocked_list+="${id}"$'\n';;
       failed)    ((failed+=1));;
       *)
-        warn "未知续期状态：${result:-empty}（${id}）"
+        warn "证书 ${id} 返回未知续期状态：${result:-empty}"
         ((failed+=1))
         ;;
     esac
