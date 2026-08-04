@@ -1862,16 +1862,14 @@ issue_certificate() {
     choose verify_method "选择验证方式" "DNS (Cloudflare, 推荐)" "HTTP (需要 80 端口可访问)"
     if [[ $verify_method == 1 ]]; then
       install_certbot_dns_plugin || return 0
-      if [[ ! -f $CF_CREDENTIALS_FILE ]]; then
-        local cf_token
-        prompt_secret cf_token "Cloudflare API Token (Zone:DNS:Edit 权限)"
-        [[ -n $cf_token ]] || { warn "API Token 不能为空。"; return 0; }
-        mkdir -p "$(dirname "$CF_CREDENTIALS_FILE")"
-        printf 'dns_cloudflare_api_token = %s
-' "$cf_token" >"$CF_CREDENTIALS_FILE"
-        chmod 600 "$CF_CREDENTIALS_FILE"
-        info "API Token 已保存至 ${CF_CREDENTIALS_FILE}"
-      fi
+      local cf_email cf_key
+      prompt_value cf_email "Cloudflare 邮箱"
+      [[ -n $cf_email ]] || { warn "邮箱不能为空。"; return 0; }
+      prompt_value cf_key "Cloudflare Global API Key"
+      [[ -n $cf_key ]] || { warn "API Key 不能为空。"; return 0; }
+      mkdir -p "$(dirname "$CF_CREDENTIALS_FILE")"
+      printf 'dns_cloudflare_email = %s\ndns_cloudflare_api_key = %s\n' "$cf_email" "$cf_key" >"$CF_CREDENTIALS_FILE"
+      chmod 600 "$CF_CREDENTIALS_FILE"
       verify_method=dns
     fi
   fi
