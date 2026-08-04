@@ -2335,46 +2335,6 @@ print_links() {
   share_separator
 }
 
-generate_share_links_raw() {
-  local tag=$1 uri_host port link protocol
-  uri_host=$(public_host_for_tag "$tag")
-  port=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.port' "$CONFIG_FILE")
-  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
-  case $protocol in
-    vless|vmess|trojan)
-      jq -r --arg tag "$tag" --arg host "$uri_host" --arg port "$port" \
-        --arg proto "$protocol" '
-        .inbounds[] | select(.tag==$tag) |
-        .settings.clients[]? |
-        "\($proto)://\(.id // .password // "")@\($host):\($port)?\(
-          if $proto=="vless" then "encryption=none&security=&type=&host="
-          elif $proto=="vmess" then "encryption=none"
-          else ""
-          end
-        )#\($tag)-\(.email)"' "$CONFIG_FILE" 2>/dev/null || true
-      ;;
-    *) return 0 ;;
-  esac
-}
-
-print_subscription() {
-  ensure_config; init_meta
-  local tag=${1-} links current_tag
-  if [[ -n $tag ]]; then
-    links=$(generate_share_links_raw "$tag")
-  else
-    links=""
-    while IFS= read -r current_tag; do
-      [[ -n $current_tag ]] || continue
-      links+="$(generate_share_links_raw "$current_tag")"$'\n'
-    done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan)$"))|.tag' "$CONFIG_FILE")
-    links=${links%$'\n'}
-  fi
-  [[ -n $links ]] || die "没有可生成订阅的代理分享链接。"
-  printf '%s' "$links" | base64_nowrap
-  printf '\n'
-}
-
 print_all_share_links() {
   ensure_config; init_meta
   local tag found=0
@@ -4041,7 +4001,6 @@ xrayctl - Xray Linux 管理脚本
   xrayctl client rotate [标签] [用户]
   xrayctl client delete [标签] [用户] [--yes]
   xrayctl link [标签] [用户]      输出分享链接
-  xrayctl subscription [标签]     输出 Base64 订阅内容
   xrayctl config check|show|edit
   xrayctl backup [文件.tar.gz]
   xrayctl restore [文件.tar.gz]
@@ -4091,7 +4050,6 @@ dispatch() {
         delete|remove) delete_client "${2-}" "${3-}" "$([[ ${4-} == --yes ]] && printf 1 || printf 0)";;
         *) die "未知 client 子命令：${1}";; esac;;
     link|links|share) ensure_config; print_links "${1-}" "${2-}";;
-    subscription|subscribe|sub) ensure_config; print_subscription "${1-}";;
     config)
       case ${1:-check} in check|test) check_config;; show) ensure_config; jq . "$CONFIG_FILE";; edit) edit_config;; *) die "未知 config 子命令。";; esac;;
     backup) backup_all "${1-}";; restore) restore_backup "${1-}";;
