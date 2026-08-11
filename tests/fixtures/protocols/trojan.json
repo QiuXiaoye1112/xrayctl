@@ -1,0 +1,34 @@
+{
+  "listen": "0.0.0.0",
+  "port": 443,
+  "protocol": "trojan",
+  "settings": {
+    "clients": [
+      {
+        "email": "alice",
+        "level": 0,
+        "password": "fixed-password"
+      }
+    ]
+  },
+  "sniffing": {
+    "destOverride": [
+      "http",
+      "tls",
+      "quic"
+    ],
+    "enabled": true,
+    "routeOnly": true
+  },
+  "streamSettings": {
+    "method": "raw",
+    "rawSettings": {
+      "acceptProxyProtocol": false,
+      "header": {
+        "type": "none"
+      }
+    },
+    "security": "none"
+  },
+  "tag": "trojan-node"
+}

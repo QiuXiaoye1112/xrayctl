@@ -1,0 +1,45 @@
+xrayctl - Xray Linux 管理脚本
+
+用法:
+  xrayctl                         打开交互菜单
+  xrayctl install [版本]          安装/修复（版本示例: 25.6.8）
+  xrayctl update [版本]           升级 Xray
+  xrayctl uninstall                 卸载 Xray 核心（保留配置）
+  xrayctl uninstall --purge          完全卸载（保留备份）
+  xrayctl uninstall --erase          彻底删除（清除全部 xrayctl 数据）
+  xrayctl status                  查看状态
+  xrayctl start|stop|restart      服务控制
+  xrayctl logs [行数]             查看 systemd 日志
+  xrayctl inbound list            列出入站
+  xrayctl inbound add             交互新增入站
+  xrayctl inbound show <标签>     查看入站 JSON
+  xrayctl inbound rename <旧标签> <新标签>
+  xrayctl inbound modify <标签>   修改监听端口/地址
+  xrayctl inbound transport <标签> 修改传输与安全方式
+  xrayctl inbound delete <标签> [--yes]
+  xrayctl outbound list
+  xrayctl outbound add
+  xrayctl outbound assign <入站> <出站标签|direct>
+  xrayctl outbound delete <出站标签>
+  xrayctl client list [标签]
+  xrayctl client add [标签]
+  xrayctl client rename [标签] [旧名称] [新名称]
+  xrayctl client rotate [标签] [用户]
+  xrayctl client delete [标签] [用户] [--yes]
+  xrayctl link [标签] [用户]      输出分享链接
+  xrayctl config check|show|edit
+  xrayctl backup [文件.tar.gz]
+  xrayctl restore [文件.tar.gz]
+  xrayctl cert list                 列出托管证书
+  xrayctl cert issue [域名] [邮箱]   Let's Encrypt 自动签发
+  xrayctl cert import [标识] [证书] [私钥]  导入已有证书
+  xrayctl cert delete <标识> [--yes] 删除托管证书
+  xrayctl cert renew-auto            立即续期所有托管证书
+  xrayctl cert renew <标识>          续期单个证书
+  xrayctl cert cloudflare            管理 Cloudflare DNS 凭据
+  xrayctl bbr                        管理 BBR（交互式开启/关闭）
+  xrayctl diagnose                系统诊断
+  xrayctl version
+
+支持协议: VLESS、VMess、Trojan、SOCKS5、HTTP
+支持传输: RAW、XHTTP、WebSocket、gRPC；支持 TLS 和 REALITY。
