@@ -2,7 +2,8 @@ inbound_exists() { jq -e --arg tag "$1" '.inbounds[] | select(.tag==$tag)' "$CON
 
 port_in_config() {
   local port=$1 except=${2-}
-  jq -e --argjson port "$port" --arg except "$except" '.inbounds[] | select(.port==$port and .tag!=$except)' "$CONFIG_FILE" >/dev/null
+  [[ -r $CONFIG_FILE ]] || return 1
+  jq -e --argjson port "$port" --arg except "$except" '.inbounds[] | select(.port==$port and .tag!=$except)' "$CONFIG_FILE" >/dev/null 2>&1
 }
 
 port_in_use_os() {
@@ -30,6 +31,20 @@ sbctl_port_conflict_reason() {
       return 0
     fi
   done < <(jq -r '.inbounds[]? | select(.hysteria2PortHopping.enabled==true) | .hysteria2PortHopping.range // empty' "$SBCTL_META_FILE" 2>/dev/null || true)
+  return 1
+}
+
+suggest_available_port() {
+  local __var=$1 candidate hex i
+  for ((i=0; i<128; i++)); do
+    hex=$(random_hex 2)
+    candidate=$((10000 + (16#$hex % 55536)))
+    port_in_config "$candidate" && continue
+    sbctl_port_conflict_reason "$candidate" >/dev/null && continue
+    port_in_use_os "$candidate" && continue
+    printf -v "$__var" '%s' "$candidate"
+    return 0
+  done
   return 1
 }
 

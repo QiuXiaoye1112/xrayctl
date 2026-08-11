@@ -40,13 +40,26 @@ assert_eq 'sbctl/sing-box 入站正在使用该端口' "$(sbctl_port_conflict_re
 assert_eq '该端口位于 sbctl Hysteria2 UDP 跳跃范围 30000-40000 内' "$(sbctl_port_conflict_reason 35000)" "HY2 hopping conflict was not detected"
 if sbctl_port_conflict_reason 25002 >/dev/null; then fail 'free port was reported as a peer conflict'; fi
 
+random_file="$TEST_ROOT/random-values"
+printf '%s\n' 3a99 61a8 3a9a >"$random_file"
+random_hex() {
+  local value
+  IFS= read -r value <"$random_file"
+  tail -n +2 "$random_file" >"$random_file.next"
+  mv "$random_file.next" "$random_file"
+  printf '%s' "$value"
+}
+port_in_use_os() { return 1; }
+automatic_port=""
+suggest_available_port automatic_port
+assert_eq 25002 "$automatic_port" "automatic port did not skip sing-box and HY2 conflicts"
+
 prompt_values=(25001 35000 25002)
 prompt_index=0
 prompt_value() {
   printf -v "$1" '%s' "${prompt_values[$prompt_index]}"
   ((prompt_index+=1)) || true
 }
-port_in_use_os() { return 1; }
 selected=""
 prompt_port selected 25001
 assert_eq 25002 "$selected" "prompt did not skip peer-owned ports"

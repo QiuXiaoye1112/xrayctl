@@ -111,7 +111,7 @@ protocol_build() {
 
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
-  local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host=""
+  local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
   choose choice "选择入站协议" \
     "VLESS" "VMess" "Trojan" "SOCKS5" "HTTP"
   case $choice in
@@ -126,7 +126,8 @@ build_inbound() {
 
   prompt_tag tag "${protocol}-$(random_hex 2)"
   prompt_value listen "监听地址" "0.0.0.0"
-  prompt_port port 443
+  suggest_available_port suggested_port || suggested_port=443
+  prompt_port port "$suggested_port"
   if [[ -n $suggested_host ]]; then
     public_host=$suggested_host
     info "客户端连接地址：${public_host}"
