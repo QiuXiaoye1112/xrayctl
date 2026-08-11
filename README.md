@@ -1,10 +1,10 @@
 # xrayctl
 
-`xrayctl` 是一个面向 systemd Linux 服务器的单文件 Xray 管理脚本。交互界面按“先看对象、再直接操作”设计：进入入站管理就能看到全部入站，选中入站后可在同一页管理分享信息、用户、端口和传输方式。它使用 XTLS 官方安装器安装核心，使用 Xray 自带的 `run -test` 检查每次配置变更，并在服务重启失败时自动回滚配置。
+`xrayctl` 是一个同时支持 systemd 与 Alpine/OpenRC 的 Xray 管理工具。开发源码按领域保存在 `src/`，发布时构建为单文件 `dist/xrayctl`。交互界面按“先看对象、再直接操作”设计；每次生产配置变更都会先创建 candidate，执行 JSON/Xray 校验，再联合提交 config 与 metadata，服务重启失败时一起回滚。
 
 当前版本：`1.2.29`
 
-> Alpine Linux 使用独立的 OpenRC 包，不会覆盖本页的 systemd 版。请查看 [Alpine/OpenRC 安装说明](alpine/README.md)。
+> Alpine Linux 使用兼容 bootstrap，但安装的是同一个 `dist/xrayctl`。平台差异由 `platform.sh` 统一处理。参见 [Alpine/OpenRC 安装说明](alpine/README.md)。
 
 ## 功能
 
@@ -21,10 +21,10 @@
 - 更换凭据时支持自定义输入；UUID 格式错误会要求重试，密码或 UUID 留空则自动生成
 - 密码输入过程可见；留空时自动生成并在添加完成后显示（请避免在共享终端或录屏中操作）
 - SOCKS5、HTTP 出站新增、入站绑定和删除
-- VLESS、VMess、Trojan 分享链接
+- VLESS、VMess、Trojan 分享链接与 Base64 订阅输出
 - Let's Encrypt 域名/公网 IP 签发、自动续期、已有证书导入和安全删除
 - IP 证书优先免 APT 创建 Certbot 环境；证书依赖安装均带硬超时，避免 NAT 主机无限等待软件源
-- 配置校验、日志级别、systemd 服务与日志管理
+- 配置校验、systemd/OpenRC 服务与日志管理
 - 配置校验失败时显示 Xray 核心的原始错误，便于准确定位问题
 - BBR 环境检测和开启/关闭、系统诊断
 - 安装后通过 `xrayctl` 快捷命令启动
@@ -70,14 +70,14 @@ Xray Linux 管理脚本
 
 ## 支持环境
 
-- 使用 systemd 的 Linux
-- Debian、Ubuntu、RHEL、CentOS、Rocky Linux、AlmaLinux、Fedora、Arch Linux、openSUSE
-- x86_64、ARM 等具体架构范围由 XTLS 官方安装器决定
+- 使用 systemd 的 Linux：Debian、Ubuntu、RHEL、CentOS、Rocky Linux、AlmaLinux、Fedora、Arch Linux、openSUSE
+- Alpine Linux + OpenRC
+- systemd 平台的架构范围由 XTLS 官方安装器决定；Alpine/OpenRC 内置 x86_64、aarch64、armv7 release asset 映射
 - 以 root 身份运行写操作
 
 ## 快速开始
 
-安装后两个版本都使用 `xrayctl` 进入管理菜单，但安装命令不同，请根据系统选择。
+安装后所有平台都使用 `xrayctl` 进入管理菜单。两个 bootstrap 最终下载同一个发行文件。
 
 ### Debian、Ubuntu、CentOS 等 systemd 系统
 
@@ -99,7 +99,7 @@ wget -qO- https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/in
 curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
 ```
 
-> systemd 版和 Alpine/OpenRC 版使用不同的服务管理方式，请勿交叉使用安装命令。
+> Alpine bootstrap 会先通过 `apk` 准备 Bash、curl、证书和解压工具；业务代码与 systemd 版完全共用。
 
 ### systemd 版的其他安装方式
 
@@ -112,9 +112,9 @@ curl -fsSL https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/install.
 如果希望先检查脚本再执行，可以手动下载：
 
 ```bash
-curl -fLO https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/xrayctl.sh
-chmod +x xrayctl.sh
-sudo ./xrayctl.sh install
+curl -fLO https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/dist/xrayctl
+chmod +x xrayctl
+sudo ./xrayctl install
 xrayctl
 ```
 
@@ -149,6 +149,7 @@ xrayctl client rename TAG OLD NEW
 xrayctl client rotate TAG USER   # 重置 UUID/密码
 xrayctl client delete TAG USER
 xrayctl link TAG                 # 分享链接
+xrayctl subscription [TAG]      # Base64 订阅内容
 xrayctl config check             # JSON + Xray 核心检查
 xrayctl logs 100                 # 最近 100 行日志
 xrayctl cert issue example.com admin@example.com
@@ -170,6 +171,7 @@ xrayctl help
 | 管理元数据 | `/usr/local/etc/xray/xrayctl.meta.json` |
 | 托管证书 | `/usr/local/etc/xray/certs/` |
 | 手动备份 | `/var/backups/xrayctl/` |
+| Xray 日志 | `/var/log/xray/` |
 | 快捷命令 | `/usr/local/sbin/xrayctl`，并链接到 `/usr/local/bin/xrayctl` |
 
 路径可通过 `XRAYCTL_*` 环境变量覆盖，脚本顶部列出了全部变量。
@@ -187,14 +189,44 @@ xrayctl help
 
 ## 回滚与卸载
 
-新增、修改和删除不会创建永久备份。新配置通过核心检查后才会替换当前配置；如果原服务正在运行且重启失败，脚本会使用临时副本恢复旧配置，回滚完成后立即删除临时副本。
+新增、修改和删除不会创建永久备份。新配置与 metadata 通过结构/Xray 检查后才会联合替换；如果 metadata 写入或服务重启失败，脚本会使用临时快照一起恢复 config 与 metadata，完成后删除临时快照。
 
 ```bash
 xrayctl uninstall               # 卸载核心，保留配置
-xrayctl uninstall --purge       # 删除 Xray 配置、证书和日志
+xrayctl uninstall --purge       # 完全卸载，保留备份
+xrayctl uninstall --erase       # 删除 xrayctl 创建的全部资源（含备份）
 ```
 
-两种卸载方式都会先创建备份；备份目录默认保留，便于恢复。
+普通卸载和完全卸载都会先创建备份。删除操作通过 metadata 资产登记和固定路径检查限制在 xrayctl 自己创建的资源。
+
+## 开发、构建与测试
+
+源码领域固定为 12 个模块：
+
+```text
+core + platform
+state
+security + certificate
+protocols
+inbound + outbound + share
+service + uninstall
+menu
+```
+
+`xrayctl.sh` 只是开发入口，所有模块加载集中在这里。模块自身禁止 `source` 其他文件。构建单文件：
+
+```bash
+bash scripts/build.sh
+bash -n dist/xrayctl
+```
+
+完整检查：
+
+```bash
+bash tests/run.sh
+```
+
+测试覆盖 Bash syntax、ShellCheck、重复函数、模块 source 依赖、validator、协议 fixture、config/metadata 联合事务、migration 幂等、inbound/client/outbound 生命周期、CLI 与单文件构建。重构前审计见 [`architecture-audit.md`](architecture-audit.md)。
 
 ## 安装卡在 APT
 

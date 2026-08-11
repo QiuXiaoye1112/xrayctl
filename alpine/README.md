@@ -1,18 +1,14 @@
-# xrayctl Alpine/OpenRC 版
+# xrayctl Alpine/OpenRC 安装说明
 
-这是与仓库根目录 systemd 版完全分离的 Alpine Linux 包。它使用 `apk` 管理依赖、使用 OpenRC 管理 Xray 服务，不会改动根目录的 `install.sh` 和 `xrayctl.sh`。
-
-当前版本：`1.0.19-alpine`
+Alpine Linux 不再维护独立业务脚本。`alpine/install.sh` 只负责通过 `apk` 准备运行环境，然后安装仓库统一生成的 `dist/xrayctl`。
 
 ## 一键安装
-
-Alpine 默认自带 BusyBox `wget`，可直接运行：
 
 ```sh
 wget -qO- https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
 ```
 
-如果已经安装 curl：
+已经安装 curl 时也可以运行：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
@@ -24,19 +20,12 @@ curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/i
 xrayctl
 ```
 
-## 支持范围
+## 平台实现
 
-- Alpine Linux + OpenRC
-- x86_64、aarch64、armv7
-- VLESS、VMess、Trojan、SOCKS5、HTTP
-- RAW、XHTTP、WebSocket、gRPC、TLS、REALITY
-- 自动识别 IPv4/IPv6；双栈创建入站时同时列出两个公网地址
-- 入站创建顺序调整为协议、加密、传输，再填写其他参数
-- TLS 从证书读取 SNI，并直接作为客户端连接地址；未启用防火墙时不再询问放行端口
-- 证书同时包含具体域名和通配符域名时，只使用具体域名
-- 支持删除未被 TLS 入站使用的托管证书
-- 新建 TLS 入站时选择托管证书；已有 TLS 入站在入站页面内更换证书
-- OpenRC 服务管理、用户流量、出站、证书、UFW、BBR 能力检测
-- 首页显示全部入站信息及每个入站的上传、下载和总流量
+- 依赖安装：`apk`
+- 服务管理：OpenRC (`rc-service` / `rc-update`)
+- Xray core：下载官方 release asset 并校验 SHA-256
+- 支持架构：x86_64、aarch64、armv7
+- 配置、协议、用户、出站、分享、证书、事务和卸载逻辑：与 systemd 平台共用同一份源码和发行文件
 
-Alpine LXC/NAT 主机上的防火墙和 BBR 是否可用取决于宿主机授予的内核权限。
+Alpine LXC/NAT 主机上的端口与 BBR 管理能力取决于宿主机授予的内核权限。
