@@ -13,34 +13,17 @@ port_in_use_os() {
   else return 1; fi
 }
 
-sbctl_port_conflict_reason() {
-  local port=$1 range start end
-  validate_port "$port" || return 1
-  if [[ -r $SBCTL_CONFIG_FILE ]] && jq -e --argjson port "$port" \
-    '.inbounds[]? | select(.listen_port==$port)' "$SBCTL_CONFIG_FILE" >/dev/null 2>&1; then
-    printf 'sbctl/sing-box 入站正在使用该端口'
-    return 0
-  fi
-  [[ -r $SBCTL_META_FILE ]] || return 1
-  while IFS= read -r range; do
-    [[ $range =~ ^([0-9]{1,5})-([0-9]{1,5})$ ]] || continue
-    start=${BASH_REMATCH[1]}; end=${BASH_REMATCH[2]}
-    if ! validate_port "$start" || ! validate_port "$end"; then continue; fi
-    if ((10#$port >= 10#$start && 10#$port <= 10#$end)); then
-      printf '该端口位于 sbctl Hysteria2 UDP 跳跃范围 %s 内' "$range"
-      return 0
-    fi
-  done < <(jq -r '.inbounds[]? | select(.hysteria2PortHopping.enabled==true) | .hysteria2PortHopping.range // empty' "$SBCTL_META_FILE" 2>/dev/null || true)
-  return 1
-}
-
 suggest_available_port() {
-  local __var=$1 candidate hex i
+  local __var=$1 candidate hex offset i
   for ((i=0; i<128; i++)); do
     hex=$(random_hex 2)
-    candidate=$((10000 + (16#$hex % 55536)))
+    offset=$((16#$hex % 35535))
+    if ((offset < 20000)); then
+      candidate=$((10000 + offset))
+    else
+      candidate=$((50001 + offset - 20000))
+    fi
     port_in_config "$candidate" && continue
-    sbctl_port_conflict_reason "$candidate" >/dev/null && continue
     port_in_use_os "$candidate" && continue
     printf -v "$__var" '%s' "$candidate"
     return 0
@@ -59,18 +42,15 @@ prompt_tag() {
 }
 
 prompt_port() {
-  local __var=$1 default=${2:-443} except=${3-} value current_port="" peer_reason=""
+  local __var=$1 default=${2:-443} except=${3-} value current_port=""
   while true; do
     prompt_value value "监听端口" "$default"
     validate_port "$value" || { warn "端口必须是 1-65535。"; continue; }
     port_in_config "$value" "$except" && { warn "该端口已被另一条 Xray 入站使用。"; continue; }
-    if peer_reason=$(sbctl_port_conflict_reason "$value"); then
-      warn "端口 ${value} 与 sbctl 冲突：${peer_reason}。"
-      continue
-    fi
     [[ -z $except ]] || current_port=$(jq -r --arg tag "$except" '.inbounds[]|select(.tag==$tag)|.port // empty' "$CONFIG_FILE")
     if port_in_use_os "$value" && ! { [[ -n $except && $value == "$current_port" ]] && service_is_active; }; then
-      confirm "系统检测到端口 ${value} 已被占用，仍然继续吗？" N || continue
+      warn "系统检测到端口 ${value} 已被占用，请换一个端口。"
+      continue
     fi
     printf -v "$__var" '%s' "$value"; return
   done

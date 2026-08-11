@@ -10,23 +10,15 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 export XRAYCTL_CONFIG_DIR="${TEST_ROOT}/xray"
 export XRAYCTL_CONFIG_FILE="${XRAYCTL_CONFIG_DIR}/config.json"
 export XRAYCTL_META_FILE="${XRAYCTL_CONFIG_DIR}/meta.json"
-export XRAYCTL_SBCTL_CONFIG_FILE="${TEST_ROOT}/sing-box/config.json"
-export XRAYCTL_SBCTL_META_FILE="${TEST_ROOT}/sbctl-meta.json"
 export XRAYCTL_BBR_CONFIG="${TEST_ROOT}/99-xrayctl-bbr.conf"
 export XRAYCTL_SBCTL_BBR_CONFIG="${TEST_ROOT}/99-sbctl-bbr.conf"
 export XRAYCTL_CERTBOT_VENV="${TEST_ROOT}/certbot-venv"
 export XRAYCTL_CERTBOT_SHARED_LOCK="${TEST_ROOT}/certbot.lock"
 export XRAYCTL_CERTBOT_SHARED_LOCK_WAIT=0
 
-mkdir -p "$XRAYCTL_CONFIG_DIR" "$(dirname "$XRAYCTL_SBCTL_CONFIG_FILE")"
+mkdir -p "$XRAYCTL_CONFIG_DIR"
 cat >"$XRAYCTL_CONFIG_FILE" <<'JSON'
-{"inbounds":[],"outbounds":[],"routing":{"rules":[]}}
-JSON
-cat >"$XRAYCTL_SBCTL_CONFIG_FILE" <<'JSON'
-{"inbounds":[{"type":"socks","tag":"peer","listen_port":25001}]}
-JSON
-cat >"$XRAYCTL_SBCTL_META_FILE" <<'JSON'
-{"inbounds":{"hy2":{"hysteria2PortHopping":{"enabled":true,"range":"30000-40000"}}}}
+{"inbounds":[{"tag":"existing","port":10000,"protocol":"socks"}],"outbounds":[],"routing":{"rules":[]}}
 JSON
 
 # shellcheck source=../helpers/assert.sh
@@ -36,12 +28,8 @@ source "${REPO_ROOT}/xrayctl.sh"
 trap - ERR
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
-assert_eq 'sbctl/sing-box 入站正在使用该端口' "$(sbctl_port_conflict_reason 25001)" "sing-box port conflict was not detected"
-assert_eq '该端口位于 sbctl Hysteria2 UDP 跳跃范围 30000-40000 内' "$(sbctl_port_conflict_reason 35000)" "HY2 hopping conflict was not detected"
-if sbctl_port_conflict_reason 25002 >/dev/null; then fail 'free port was reported as a peer conflict'; fi
-
 random_file="$TEST_ROOT/random-values"
-printf '%s\n' 3a99 61a8 3a9a >"$random_file"
+printf '%s\n' 0000 0001 4e20 >"$random_file"
 random_hex() {
   local value
   IFS= read -r value <"$random_file"
@@ -49,20 +37,21 @@ random_hex() {
   mv "$random_file.next" "$random_file"
   printf '%s' "$value"
 }
-port_in_use_os() { return 1; }
+port_in_use_os() { [[ $1 == 10001 ]]; }
 automatic_port=""
 suggest_available_port automatic_port
-assert_eq 25002 "$automatic_port" "automatic port did not skip sing-box and HY2 conflicts"
+assert_eq 50001 "$automatic_port" "automatic port did not skip own/listening ports"
+((automatic_port < 30000 || automatic_port > 50000)) || fail 'automatic port entered the default HY2 hopping range'
 
-prompt_values=(25001 35000 25002)
+prompt_values=(10000 10001 10002)
 prompt_index=0
 prompt_value() {
   printf -v "$1" '%s' "${prompt_values[$prompt_index]}"
   ((prompt_index+=1)) || true
 }
 selected=""
-prompt_port selected 25001
-assert_eq 25002 "$selected" "prompt did not skip peer-owned ports"
+prompt_port selected 10000
+assert_eq 10002 "$selected" "prompt did not reject own/listening ports"
 
 touch "$SBCTL_BBR_CONFIG"
 assert_eq sbctl "$(bbr_manager)" "sbctl BBR ownership was not detected"
@@ -100,4 +89,4 @@ certbot_cmd certonly --cert-name stale >/dev/null
 if CERTBOT_STUB_FAIL=1 certbot_cmd certonly --cert-name failed >/dev/null 2>&1; then fail 'Certbot failure was not propagated'; fi
 [[ ! -e $CERTBOT_SHARED_LOCK ]] || fail 'xrayctl did not release the lock after Certbot failure'
 
-printf 'ok - xrayctl protects sbctl ports, HY2 ranges, BBR, and Certbot operations\n'
+printf 'ok - xrayctl checks active ports and coordinates BBR and Certbot operations\n'

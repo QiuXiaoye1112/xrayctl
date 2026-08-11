@@ -399,11 +399,6 @@ system_diagnostics() {
   printf '系统: %s\n内核: %s\n架构: %s\n时间: %s\n' "$os_name" "$(uname -r)" "$(uname -m)" "$(date -Is)"
   printf '拥塞控制: %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
   printf 'BBR 持久化来源: %s\n' "$(bbr_manager)"
-  if [[ -r $SBCTL_CONFIG_FILE ]]; then
-    printf 'sbctl 共存: 已检测到（sing-box 入站 %s）\n' "$(jq '.inbounds|length' "$SBCTL_CONFIG_FILE" 2>/dev/null || printf '?')"
-  else
-    printf 'sbctl 共存: 未检测到配置\n'
-  fi
   printf 'IPv4 转发: %s\n' "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || printf unknown)"
   if command_exists timedatectl; then timedatectl show -p NTPSynchronized -p Timezone 2>/dev/null || true; fi
   if command_exists ss; then heading "Xray 监听端口"; ss -lntup 2>/dev/null | grep -E 'xray|State|Netid' || true; fi
