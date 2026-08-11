@@ -109,15 +109,16 @@ print_links() {
 
 print_subscription() {
   ensure_config; init_meta
-  local tag=${1-} links current_tag
+  local tag=${1-} links="" current_tag current_links
   if [[ -n $tag ]]; then
-    links=$(print_links "$tag" "" | grep -E '^(vless|vmess|trojan)://' || true)
+    links=$(print_links "$tag" "" | awk '/^链接: (vless|vmess|trojan):\/\// {sub(/^链接: /, ""); print}')
   else
-    links=""
     while IFS= read -r current_tag; do
-      links+="$(print_links "$current_tag" "" | grep -E '^(vless|vmess|trojan)://' || true)"$'\n'
+      current_links=$(print_links "$current_tag" "" | awk '/^链接: (vless|vmess|trojan):\/\// {sub(/^链接: /, ""); print}')
+      [[ -n $current_links ]] || continue
+      [[ -z $links ]] || links+=$'\n'
+      links+=$current_links
     done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan)$"))|.tag' "$CONFIG_FILE")
-    links=${links%$'\n'}
   fi
   [[ -n $links ]] || die "没有可生成订阅的代理分享链接。"
   printf '%s' "$links" | base64_nowrap
