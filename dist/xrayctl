@@ -5,8 +5,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.32"
-readonly XRAYCTL_BUILD_COMMIT="a1ed8190c26f"
+readonly XRAYCTL_VERSION="1.2.33"
+readonly XRAYCTL_BUILD_COMMIT="38fcbd720d10"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -47,8 +47,8 @@ CERTBOT_BIN="${CERTBOT_VENV}/bin/certbot"
 CERTBOT_CONFIG_DIR="${XRAYCTL_CERTBOT_CONFIG_DIR:-/var/lib/xrayctl/letsencrypt}"
 CERTBOT_WORK_DIR="${XRAYCTL_CERTBOT_WORK_DIR:-/var/lib/xrayctl/certbot-work}"
 CERTBOT_LOGS_DIR="${XRAYCTL_CERTBOT_LOGS_DIR:-/var/log/xrayctl/certbot}"
-_default_certbot_shared_lock=/run/lock/xrayctl-sbctl-certbot.lock
-if [[ ${XRAYCTL_TESTING:-0} == 1 ]]; then _default_certbot_shared_lock="${LOCK_FILE%/*}/xrayctl-sbctl-certbot.lock"; fi
+_default_certbot_shared_lock=/run/lock/certbot.lock
+if [[ ${XRAYCTL_TESTING:-0} == 1 ]]; then _default_certbot_shared_lock="${LOCK_FILE%/*}/certbot.lock"; fi
 CERTBOT_SHARED_LOCK="${XRAYCTL_CERTBOT_SHARED_LOCK:-$_default_certbot_shared_lock}"
 unset _default_certbot_shared_lock
 CERTBOT_SHARED_LOCK_WAIT="${XRAYCTL_CERTBOT_SHARED_LOCK_WAIT:-300}"
@@ -1388,7 +1388,7 @@ ensure_certbot_environment() {
 
 _certbot_shared_lock_acquire() {
   local waited=0 owner="" lock=$CERTBOT_SHARED_LOCK parent
-  [[ ${lock##*/} == xrayctl-sbctl-certbot.lock ]] || { error "Certbot 共享锁路径不安全：${lock}"; return 1; }
+  [[ ${lock##*/} == certbot.lock ]] || { error "Certbot 共享锁路径不安全：${lock}"; return 1; }
   [[ $CERTBOT_SHARED_LOCK_WAIT =~ ^[0-9]+$ ]] || { error "Certbot 共享锁等待时间无效。"; return 1; }
   parent=${lock%/*}; [[ $parent == "$lock" ]] && parent=.
   mkdir -p "$parent" || { warn "无法创建 Certbot 共享锁目录：${parent}"; return 1; }
