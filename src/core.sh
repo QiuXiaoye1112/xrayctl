@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.29"
+readonly XRAYCTL_VERSION="1.2.30"
 readonly XRAYCTL_BUILD_COMMIT="${XRAYCTL_BUILD_COMMIT:-development}"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -35,6 +35,10 @@ RUNTIME_GROUP="${XRAYCTL_RUNTIME_GROUP:-xrayctl}"
 SYSTEMD_OVERRIDE_DIR="${XRAYCTL_SYSTEMD_OVERRIDE_DIR:-/etc/systemd/system/${SYSTEMD_UNIT}.d}"
 LOCK_FILE="${XRAYCTL_LOCK_FILE:-/run/lock/xrayctl.lock}"
 JQ_INSTALL_PATH="${XRAYCTL_JQ_INSTALL_PATH:-/usr/local/bin/jq}"
+SBCTL_CONFIG_FILE="${XRAYCTL_SBCTL_CONFIG_FILE:-/etc/sing-box/config.json}"
+SBCTL_META_FILE="${XRAYCTL_SBCTL_META_FILE:-/var/lib/sbctl/meta.json}"
+BBR_CONFIG="${XRAYCTL_BBR_CONFIG:-/etc/sysctl.d/99-xrayctl-bbr.conf}"
+SBCTL_BBR_CONFIG="${XRAYCTL_SBCTL_BBR_CONFIG:-/etc/sysctl.d/99-sbctl-bbr.conf}"
 CERT_STOPPED_SERVICE=0
 APT_IPV4_AVAILABLE_CACHE=""
 
@@ -43,6 +47,11 @@ CERTBOT_BIN="${CERTBOT_VENV}/bin/certbot"
 CERTBOT_CONFIG_DIR="${XRAYCTL_CERTBOT_CONFIG_DIR:-/var/lib/xrayctl/letsencrypt}"
 CERTBOT_WORK_DIR="${XRAYCTL_CERTBOT_WORK_DIR:-/var/lib/xrayctl/certbot-work}"
 CERTBOT_LOGS_DIR="${XRAYCTL_CERTBOT_LOGS_DIR:-/var/log/xrayctl/certbot}"
+_default_certbot_shared_lock=/run/lock/xrayctl-sbctl-certbot.lock
+if [[ ${XRAYCTL_TESTING:-0} == 1 ]]; then _default_certbot_shared_lock="${LOCK_FILE%/*}/xrayctl-sbctl-certbot.lock"; fi
+CERTBOT_SHARED_LOCK="${XRAYCTL_CERTBOT_SHARED_LOCK:-$_default_certbot_shared_lock}"
+unset _default_certbot_shared_lock
+CERTBOT_SHARED_LOCK_WAIT="${XRAYCTL_CERTBOT_SHARED_LOCK_WAIT:-300}"
 CLOUDFLARE_INI="${XRAYCTL_CLOUDFLARE_INI:-/etc/xrayctl/cloudflare.ini}"
 CERT_RENEW_HOOK="${XRAYCTL_CERT_RENEW_HOOK:-/etc/periodic/daily/xrayctl-certbot-renew}"
 

@@ -300,8 +300,34 @@ _check_bbr_available() {
   return 0
 }
 
+bbr_manager() {
+  local own=0 peer=0 current=""
+  [[ -f $BBR_CONFIG ]] && own=1
+  [[ -f $SBCTL_BBR_CONFIG ]] && peer=1
+  if ((own && peer)); then printf 'both'; return; fi
+  if ((own)); then printf 'xrayctl'; return; fi
+  if ((peer)); then printf 'sbctl'; return; fi
+  [[ -r /proc/sys/net/ipv4/tcp_congestion_control ]] && current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  if [[ $current == bbr ]]; then printf 'external'; else printf 'none'; fi
+}
+
 _enable_bbr() {
-  local qdisc_enabled=0 config=/etc/sysctl.d/99-xrayctl-bbr.conf
+  local qdisc_enabled=0 config=$BBR_CONFIG manager
+  manager=$(bbr_manager)
+  case $manager in
+    sbctl)
+      info "BBR 已由 sbctl 管理；xrayctl 不会创建重复配置。"
+      return 0
+      ;;
+    both)
+      warn "同时检测到 xrayctl 与 sbctl 的 BBR 配置，请先保留一个管理方。"
+      return 1
+      ;;
+    external)
+      warn "BBR 已由其他系统配置启用；xrayctl 不会接管。"
+      return 1
+      ;;
+  esac
   command_exists modprobe && run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true
   if [[ -e /proc/sys/net/core/default_qdisc ]]; then
     if run_bounded 5 sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then qdisc_enabled=1;
@@ -325,7 +351,28 @@ _enable_bbr() {
 }
 
 _disable_bbr() {
-  local current default_cc config=/etc/sysctl.d/99-xrayctl-bbr.conf
+  local current default_cc config=$BBR_CONFIG manager
+  manager=$(bbr_manager)
+  case $manager in
+    sbctl)
+      warn "BBR 由 sbctl 管理，xrayctl 拒绝关闭全局拥塞控制。"
+      return 1
+      ;;
+    both)
+      rm -f "$config"
+      meta_resource_remove_existing "bbrConfig"
+      info "已移除重复的 xrayctl BBR 配置；BBR 继续由 sbctl 管理。"
+      return 0
+      ;;
+    external)
+      warn "BBR 不是由 xrayctl 管理，拒绝关闭全局拥塞控制。"
+      return 1
+      ;;
+    none)
+      info "BBR 当前未启用，无需关闭。"
+      return 0
+      ;;
+  esac
   current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
   if [[ $current != bbr ]]; then info "BBR 当前未启用，无需关闭。"; return 0; fi
   default_cc=$(sed 's/ /\n/g' /proc/sys/net/ipv4/tcp_available_congestion_control | grep -vF bbr | head -1)
@@ -346,10 +393,15 @@ _disable_bbr() {
 manage_bbr() {
   ensure_system_context bbr
   _check_bbr_available || return 0
-  local current
+  local current manager
   current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  manager=$(bbr_manager)
   if [[ $current == bbr ]]; then
-    info "当前拥塞控制: BBR"
+    info "当前拥塞控制: BBR（管理方：${manager}）"
+    if [[ $manager == sbctl || $manager == external ]]; then
+      warn "xrayctl 不会关闭其他管理方启用的 BBR。"
+      return 0
+    fi
     if [[ -t 0 ]]; then
       if confirm "BBR 已启用，是否关闭？" N; then
         _disable_bbr
@@ -376,6 +428,12 @@ system_diagnostics() {
   heading "系统诊断"
   printf '系统: %s\n内核: %s\n架构: %s\n时间: %s\n' "$os_name" "$(uname -r)" "$(uname -m)" "$(date -Is)"
   printf '拥塞控制: %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
+  printf 'BBR 管理方: %s\n' "$(bbr_manager)"
+  if [[ -r $SBCTL_CONFIG_FILE ]]; then
+    printf 'sbctl 共存: 已检测到（sing-box 入站 %s）\n' "$(jq '.inbounds|length' "$SBCTL_CONFIG_FILE" 2>/dev/null || printf '?')"
+  else
+    printf 'sbctl 共存: 未检测到配置\n'
+  fi
   printf 'IPv4 转发: %s\n' "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || printf unknown)"
   if command_exists timedatectl; then timedatectl show -p NTPSynchronized -p Timezone 2>/dev/null || true; fi
   if command_exists ss; then heading "Xray 监听端口"; ss -lntup 2>/dev/null | grep -E 'xray|State|Netid' || true; fi
