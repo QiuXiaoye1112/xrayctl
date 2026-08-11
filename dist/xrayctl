@@ -5,8 +5,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.30"
-readonly XRAYCTL_BUILD_COMMIT="feef97fa1050"
+readonly XRAYCTL_VERSION="1.2.31"
+readonly XRAYCTL_BUILD_COMMIT="fd2c6b8d57ba"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -2356,7 +2356,7 @@ protocol_build() {
 
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
-  local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host=""
+  local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
   choose choice "选择入站协议" \
     "VLESS" "VMess" "Trojan" "SOCKS5" "HTTP"
   case $choice in
@@ -2371,7 +2371,8 @@ build_inbound() {
 
   prompt_tag tag "${protocol}-$(random_hex 2)"
   prompt_value listen "监听地址" "0.0.0.0"
-  prompt_port port 443
+  suggest_available_port suggested_port || suggested_port=443
+  prompt_port port "$suggested_port"
   if [[ -n $suggested_host ]]; then
     public_host=$suggested_host
     info "客户端连接地址：${public_host}"
@@ -2406,7 +2407,8 @@ inbound_exists() { jq -e --arg tag "$1" '.inbounds[] | select(.tag==$tag)' "$CON
 
 port_in_config() {
   local port=$1 except=${2-}
-  jq -e --argjson port "$port" --arg except "$except" '.inbounds[] | select(.port==$port and .tag!=$except)' "$CONFIG_FILE" >/dev/null
+  [[ -r $CONFIG_FILE ]] || return 1
+  jq -e --argjson port "$port" --arg except "$except" '.inbounds[] | select(.port==$port and .tag!=$except)' "$CONFIG_FILE" >/dev/null 2>&1
 }
 
 port_in_use_os() {
@@ -2434,6 +2436,20 @@ sbctl_port_conflict_reason() {
       return 0
     fi
   done < <(jq -r '.inbounds[]? | select(.hysteria2PortHopping.enabled==true) | .hysteria2PortHopping.range // empty' "$SBCTL_META_FILE" 2>/dev/null || true)
+  return 1
+}
+
+suggest_available_port() {
+  local __var=$1 candidate hex i
+  for ((i=0; i<128; i++)); do
+    hex=$(random_hex 2)
+    candidate=$((10000 + (16#$hex % 55536)))
+    port_in_config "$candidate" && continue
+    sbctl_port_conflict_reason "$candidate" >/dev/null && continue
+    port_in_use_os "$candidate" && continue
+    printf -v "$__var" '%s' "$candidate"
+    return 0
+  done
   return 1
 }
 
