@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.29"
-readonly XRAYCTL_BUILD_COMMIT="a55ae44b0432"
+readonly XRAYCTL_BUILD_COMMIT="1d3884afefa5"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -1815,7 +1815,7 @@ register_certificate_metadata() {
 
 import_certificate() {
   ensure_runtime_dependencies cert-import
-  local domain=${1-} cert=${2-} key=${3-} paths
+  local domain=${1-} cert=${2-} key=${3-}
   [[ -n $domain ]] || prompt_validated_value domain "证书标识/域名" "" validate_certificate_identifier "证书标识只能包含字母、数字、点和横线。"
   [[ $domain =~ ^[A-Za-z0-9.-]+$ ]] || die "证书标识无效。"
   [[ -n $cert ]] || prompt_validated_value cert "证书文件路径" "" validate_readable_file "证书文件不存在或不可读，请重新输入。"
@@ -2073,7 +2073,9 @@ select_managed_certificate() {
 }
 
 certificate_inbound_users() {
-  local identifier=$1 cert_path="${CERT_DIR}/${identifier}.crt" key_path="${CERT_DIR}/${identifier}.key"
+  local identifier=$1 cert_path key_path
+  cert_path="${CERT_DIR}/${identifier}.crt"
+  key_path="${CERT_DIR}/${identifier}.key"
   [[ -r $CONFIG_FILE ]] || return 0
   jq -r --arg cert "$cert_path" --arg key "$key_path" '
     .inbounds[]? |
@@ -2380,9 +2382,10 @@ prompt_public_host() {
 
 add_inbound() {
   ensure_runtime_dependencies inbound-add; require_xray_installed; ensure_config
-  local inbound="" host="" public_key="" tag tmp listen_port
+  local inbound="" host="" public_key="" tag tmp
   build_inbound inbound host public_key
-  tag=$(jq -r '.tag' <<<"$inbound"); listen_port=$(jq -r '.port' <<<"$inbound")
+  : "$public_key"
+  tag=$(jq -r '.tag' <<<"$inbound")
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
   if state_commit_inbound_set "$tmp" "$tag" "$host"; then
@@ -2499,7 +2502,7 @@ modify_inbound_basic() {
 
 modify_inbound_transport() {
   ensure_runtime_dependencies inbound-transport; require_xray_installed; ensure_config
-  local tag=${1-} protocol stream public_key="" tmp host method security
+  local tag=${1-} protocol stream public_key="" tmp method security
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan)$' || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
@@ -2507,6 +2510,7 @@ modify_inbound_transport() {
   warn "修改传输后，所有客户端都要同步更新配置。"
   confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
   build_stream_settings "$protocol" stream public_key
+  : "$public_key"
   method=$(jq -r '.method' <<<"$stream"); security=$(jq -r '.security' <<<"$stream")
   tmp=$(temp_file)
   jq --arg tag "$tag" --argjson stream "$stream" --arg method "$method" --arg security "$security" '
@@ -2517,7 +2521,6 @@ modify_inbound_transport() {
       )
     else . end' "$CONFIG_FILE" >"$tmp"
   if state_commit_inbound_set "$tmp" "$tag" "$(public_host_for_tag "$tag")"; then
-    host=$(public_host_for_tag "$tag")
     info "传输已更新，请重新导出客户端分享链接。"
   fi
   rm -f "$tmp"
@@ -3407,7 +3410,8 @@ _check_bbr_available() {
     warn "当前 NAT/容器没有 NET_ADMIN 权限，无法修改内核拥塞控制。"
     return 1
   fi
-  local available=$(< /proc/sys/net/ipv4/tcp_available_congestion_control)
+  local available
+  available=$(< /proc/sys/net/ipv4/tcp_available_congestion_control)
   if [[ " $available " != *" bbr "* ]]; then
     warn "当前内核不支持 BBR。可用算法：${available}"
     return 1
@@ -3461,7 +3465,8 @@ _disable_bbr() {
 manage_bbr() {
   ensure_system_context bbr
   _check_bbr_available || return 0
-  local current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  local current
+  current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
   if [[ $current == bbr ]]; then
     info "当前拥塞控制: BBR"
     if [[ -t 0 ]]; then
