@@ -202,8 +202,6 @@ detect_local_ips() {
   fi
 }
 
-ensure_linux_systemd() { platform_require_supported; }
-
 pkg_manager() {
   if command_exists apt-get; then printf 'apt';
   elif command_exists apk; then printf 'apk';
@@ -237,11 +235,6 @@ apt_get_guarded() {
   else
     apt-get "${apt_options[@]}" "$@"
   fi
-}
-
-apt_package_index_available() {
-  [[ -d /var/lib/apt/lists ]] &&
-    find /var/lib/apt/lists -maxdepth 1 -type f -size +0c ! -name lock -print -quit 2>/dev/null | grep -q .
 }
 
 install_jq_standalone() {

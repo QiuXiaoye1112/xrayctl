@@ -28,19 +28,6 @@ safe_remove_dir() {
   rm -rf -- "$path"
 }
 
-safe_remove_file() {
-  local path=$1 allowed matched=0
-  [[ -n $path ]] || return 1
-  [[ $path == /* ]] || return 1
-  shift
-  for allowed in "$@"; do
-    [[ $path == "$allowed" ]] && { matched=1; break; }
-  done
-  ((matched)) || { warn "路径不在允许删除列表：$path"; return 1; }
-  [[ -e $path ]] || return 0
-  rm -f -- "$path"
-}
-
 safe_remove_managed_dir() {
   local resource_key=$1 path=$2 recorded
   [[ -n $path && $path == /* ]] || return 1
@@ -76,11 +63,6 @@ meta_resource_remove_existing() {
   tmp=$(temp_file)
   jq --arg key "$key" 'del(.managedResources[$key])' "$META_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
   install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-}
-
-meta_resource_get_existing() {
-  [[ -f $META_FILE ]] || return 1
-  jq -r --arg key "$1" '.managedResources[$key] // empty' "$META_FILE" 2>/dev/null
 }
 
 _uninstall_snapshot_metadata() {

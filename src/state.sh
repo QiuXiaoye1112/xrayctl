@@ -78,11 +78,6 @@ meta_cert_set_raw() {
 
 # --- Migration functions — use ONLY raw helpers, NEVER call ensure_meta / init_meta ---
 
-meta_mark_migration() {
-  init_meta_base
-  meta_mark_migration_raw "$1"
-}
-
 migration_done() {
   init_meta_base
   meta_migration_done_raw "$1"
@@ -197,11 +192,6 @@ meta_resource_register() {
   jq --arg key "$key" --arg value "$value" \
     '.managedResources[$key] = $value' "$META_FILE" >"$tmp"
   install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-}
-
-meta_resource_get() {
-  ensure_meta
-  jq -r --arg key "$1" '.managedResources[$key] // empty' "$META_FILE"
 }
 
 meta_resource_remove() {
@@ -414,15 +404,6 @@ edit_config() {
 check_config() {
   ensure_config
   if validate_candidate "$CONFIG_FILE"; then info "配置检查通过。"; else return 1; fi
-}
-
-set_log_level() {
-  ensure_runtime_dependencies config-loglevel; ensure_config
-  local choice level tmp
-  choose choice "日志级别" "warning" "info" "error" "debug" "none"
-  case $choice in 1) level=warning;; 2) level=info;; 3) level=error;; 4) level=debug;; 5) level=none;; esac
-  tmp=$(temp_file); jq --arg level "$level" '.log.loglevel=$level' "$CONFIG_FILE" >"$tmp"
-  apply_candidate "$tmp"; rm -f "$tmp"
 }
 
 backup_all() {

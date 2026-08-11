@@ -229,7 +229,6 @@ run_menu_action() {
   return 0
 }
 
-json_quote() { jq -Rn --arg value "$1" '$value'; }
 url_encode() { jq -rn --arg value "$1" '$value|@uri'; }
 base64_nowrap() { base64 | tr -d '\n'; }
 

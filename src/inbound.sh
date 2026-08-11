@@ -244,11 +244,6 @@ delete_inbound() {
   rm -f "$tmp"
 }
 
-client_array_path() {
-  local protocol=$1
-  case $protocol in vless|vmess|trojan) printf '.settings.clients';; socks|http) printf '.settings.accounts';; *) return 1;; esac
-}
-
 http_inbound_has_auth() {
   jq -e --arg tag "$1" '
     [.inbounds[]|select(.tag==$tag)|((.settings.accounts // .settings.users // [])|length)][0] > 0' \
@@ -479,4 +474,3 @@ public_host_for_tag() {
   fi
   printf '%s' "$host"
 }
-

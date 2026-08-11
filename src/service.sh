@@ -38,16 +38,6 @@ is_xrayctl_certbot_symlink() {
   [[ $target == "${CERTBOT_VENV}/bin/certbot" ]]
 }
 
-get_service_user() {
-  local user
-  if [[ $(platform_init_system) == openrc ]]; then
-    printf '%s' "$RUNTIME_USER"
-  else
-    user=$(systemctl show "$SERVICE_NAME" -p User --value 2>/dev/null || true)
-    printf '%s' "${user:-nobody}"
-  fi
-}
-
 setup_runtime_access() {
   local created_group=0 created_user=0
   if [[ $(platform_init_system) == openrc ]]; then
@@ -89,18 +79,6 @@ EOF
 }
 
 setup_certificate_access() { setup_runtime_access; }
-
-copy_certificate_pair() {
-  local domain=$1 cert_source=$2 key_source=$3 cert_target key_target
-  [[ -r $cert_source ]] || die "无法读取证书：$cert_source"
-  [[ -r $key_source ]] || die "无法读取私钥：$key_source"
-  validate_certificate_pair_files "$cert_source" "$key_source" || die "证书或私钥无效。"
-  setup_certificate_access
-  cert_target="${CERT_DIR}/${domain}.crt"; key_target="${CERT_DIR}/${domain}.key"
-  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$cert_source" "$cert_target"
-  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$key_source" "$key_target"
-  printf '%s\n%s\n' "$cert_target" "$key_target"
-}
 
 xray_release_asset() {
   case $(uname -m) in
@@ -361,13 +339,6 @@ manage_bbr() {
       _enable_bbr
     fi
   fi
-}
-
-enable_bbr() {
-  # 保留旧名称兼容非交互模式 CLI 调用
-  ensure_system_context bbr
-  _check_bbr_available || return 0
-  _enable_bbr
 }
 
 system_diagnostics() {
