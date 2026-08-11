@@ -265,9 +265,31 @@ validate_candidate() {
 
 timestamp() { date '+%Y%m%d-%H%M%S'; }
 
+ensure_backup_dir() {
+  local marker_tmp
+  [[ ! -L $BACKUP_DIR ]] || { error "备份目录不能是符号链接：$BACKUP_DIR"; return 1; }
+  if [[ -e $BACKUP_DIR && ! -d $BACKUP_DIR ]]; then
+    error "备份路径不是目录：$BACKUP_DIR"
+    return 1
+  fi
+  install -d -m 700 "$BACKUP_DIR" || return 1
+  if [[ -e $BACKUP_OWNERSHIP_MARKER ]]; then
+    [[ -f $BACKUP_OWNERSHIP_MARKER && ! -L $BACKUP_OWNERSHIP_MARKER ]] \
+      || { error "备份目录 ownership marker 不安全：$BACKUP_OWNERSHIP_MARKER"; return 1; }
+    [[ $(cat "$BACKUP_OWNERSHIP_MARKER") == "$BACKUP_OWNERSHIP_MAGIC" ]] \
+      || { error "备份目录 ownership marker 无效：$BACKUP_OWNERSHIP_MARKER"; return 1; }
+  else
+    marker_tmp=$(temp_file)
+    printf '%s\n' "$BACKUP_OWNERSHIP_MAGIC" >"$marker_tmp"
+    install -m 600 "$marker_tmp" "$BACKUP_OWNERSHIP_MARKER" || { rm -f "$marker_tmp"; return 1; }
+    rm -f "$marker_tmp"
+  fi
+  meta_resource_register "backupDir" "$BACKUP_DIR"
+}
+
 backup_config_quiet() {
   [[ -f $CONFIG_FILE ]] || return 0
-  mkdir -p "$BACKUP_DIR"
+  ensure_backup_dir || return 1
   local target
   target="${BACKUP_DIR}/config-$(timestamp).json"
   cp -a "$CONFIG_FILE" "$target"
@@ -356,6 +378,18 @@ state_commit() {
 
 apply_candidate() { state_commit "$1"; }
 
+state_apply_candidate_file() {
+  local candidate=$1 operation=$2 rc
+  shift 2
+  if "$operation" "$candidate" "$@"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  rm -f "$candidate"
+  return "$rc"
+}
+
 temp_file() { mktemp "${TMPDIR:-/tmp}/xrayctl.XXXXXX"; }
 
 _state_build_inbound_meta_set() {
@@ -397,8 +431,12 @@ edit_config() {
   local editor=${EDITOR:-vi} tmp
   tmp=$(temp_file); cp "$CONFIG_FILE" "$tmp"
   "$editor" "$tmp"
-  if cmp -s "$tmp" "$CONFIG_FILE"; then info "配置未更改。"; else apply_candidate "$tmp"; fi
-  rm -f "$tmp"
+  if cmp -s "$tmp" "$CONFIG_FILE"; then
+    rm -f "$tmp"
+    info "配置未更改。"
+  else
+    state_apply_candidate_file "$tmp" apply_candidate
+  fi
 }
 
 check_config() {
@@ -410,13 +448,13 @@ backup_all() {
   require_root backup; ensure_config
   local target=${1:-${BACKUP_DIR}/xrayctl-$(timestamp).tar.gz}
   local paths=("${CONFIG_FILE#/}")
-  mkdir -p "$BACKUP_DIR" "$(dirname "$target")"
+  ensure_backup_dir
+  mkdir -p "$(dirname "$target")"
   [[ ! -f $META_FILE ]] || paths+=("${META_FILE#/}")
   [[ ! -d $CERT_DIR ]] || paths+=("${CERT_DIR#/}")
   tar -czf "$target" -C / "${paths[@]}" 2>/dev/null || { rm -f "$target"; die "备份失败。"; }
   chmod 600 "$target"
   info "备份已创建：$target"
-  meta_resource_register "backupDir" "$BACKUP_DIR"
   info "提示：备份包含 Xray 配置、metadata 和证书副本，不含 Certbot 账户/lineage 数据。"
 }
 

@@ -77,12 +77,10 @@ add_inbound() {
   tag=$(jq -r '.tag' <<<"$inbound")
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
-  if state_commit_inbound_set "$tmp" "$tag" "$host"; then
-    heading "入站已创建"
-    show_inbound "$tag"
-    print_links "$tag" "" || true
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  heading "入站已创建"
+  show_inbound "$tag"
+  print_links "$tag" "" || true
 }
 
 list_inbounds() {
@@ -164,10 +162,8 @@ rename_inbound() {
       else . end |
       if (.ruleTag // "")==("xrayctl-outbound:"+$old) then .ruleTag=("xrayctl-outbound:"+$new) else . end
     ))' "$CONFIG_FILE" >"$tmp"
-  if state_commit_inbound_rename "$tmp" "$old_tag" "$new_tag"; then
-    info "入站已重命名：${old_tag} → ${new_tag}。"
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_rename "$old_tag" "$new_tag" || return
+  info "入站已重命名：${old_tag} → ${new_tag}。"
 }
 
 modify_inbound_basic() {
@@ -183,10 +179,8 @@ modify_inbound_basic() {
   tmp=$(temp_file)
   jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
     '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
-  if state_commit_inbound_set "$tmp" "$tag" "$host"; then
-    current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
 }
 
 modify_inbound_transport() {
@@ -209,10 +203,8 @@ modify_inbound_transport() {
         if $method=="raw" and $security!="none" then .flow="xtls-rprx-vision" else del(.flow) end
       )
     else . end' "$CONFIG_FILE" >"$tmp"
-  if state_commit_inbound_set "$tmp" "$tag" "$(public_host_for_tag "$tag")"; then
-    info "传输已更新，请重新导出客户端分享链接。"
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" || return
+  info "传输已更新，请重新导出客户端分享链接。"
 }
 
 delete_inbound() {
@@ -239,10 +231,8 @@ delete_inbound() {
         else true end
       )
     ]' "$CONFIG_FILE" >"$tmp"
-  if state_commit_inbound_delete "$tmp" "$tag"; then
-    info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_delete "$tag" || return
+  info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
 }
 
 http_inbound_has_auth() {
@@ -357,8 +347,9 @@ add_client() {
       ) |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else jq --arg tag "$tag" --argjson user "$user" '(.inbounds[]|select(.tag==$tag)|.settings.clients) += [$user]' "$CONFIG_FILE" >"$tmp"; fi
-  if apply_candidate "$tmp"; then info "用户 ${label} 已添加。"; print_links "$tag" "$label" || true; fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "用户 ${label} 已添加。"
+  print_links "$tag" "$label" || true
 }
 
 delete_client() {
@@ -399,7 +390,7 @@ delete_client() {
     ((count > 0)) || die "找不到用户：$label"
     jq --arg tag "$tag" --arg client_label "$label" '(.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(select(.email!=$client_label))' "$CONFIG_FILE" >"$tmp"
   fi
-  apply_candidate "$tmp"; rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate
 }
 
 rotate_client_credential() {
@@ -428,7 +419,7 @@ rotate_client_credential() {
         del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp" ;;
     *) die "不支持此协议。";;
   esac
-  apply_candidate "$tmp"; rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
   info "新凭据：$value"
 }
 
@@ -461,7 +452,7 @@ rename_client() {
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
     jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$old)|.email)=$new' "$CONFIG_FILE" >"$tmp"
   fi
-  apply_candidate "$tmp"; rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
   info "用户已重命名：${old_label} -> ${new_label}"
 }
 

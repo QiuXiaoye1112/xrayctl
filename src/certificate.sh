@@ -322,10 +322,8 @@ update_tls_inbound_certificate() {
         certificates:[{certificateFile:$cert,keyFile:$key}]
       }
     )' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then
-    info "证书已更新：${tag}"
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "证书已更新：${tag}"
 }
 
 # ============================================================

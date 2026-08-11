@@ -194,8 +194,22 @@ _uninstall_remove_quick_command() {
   hash -r 2>/dev/null || true
 }
 
+_backup_dir_has_ownership_marker() {
+  [[ -d $BACKUP_DIR && ! -L $BACKUP_DIR ]] || return 1
+  [[ -f $BACKUP_OWNERSHIP_MARKER && ! -L $BACKUP_OWNERSHIP_MARKER ]] || return 1
+  [[ $(cat "$BACKUP_OWNERSHIP_MARKER" 2>/dev/null) == "$BACKUP_OWNERSHIP_MAGIC" ]]
+}
+
 _uninstall_remove_backups() {
-  safe_remove_managed_dir "backupDir" "$BACKUP_DIR"
+  local recorded
+  [[ -e $BACKUP_DIR ]] || return 0
+  recorded=$(_snapshot_meta_resource_get "backupDir")
+  if [[ $recorded == "$BACKUP_DIR" ]] || _backup_dir_has_ownership_marker; then
+    safe_remove_dir "$BACKUP_DIR" "$BACKUP_DIR"
+  else
+    warn "备份目录缺少有效资产登记或 ownership marker，拒绝删除：$BACKUP_DIR"
+    return 1
+  fi
 }
 
 _uninstall_remove_logs() {
@@ -292,7 +306,7 @@ _uninstall_remove_owned_jq() {
 }
 
 _scan_xrayctl_residuals() {
-  local __count_var=${1:-} count=0
+  local __count_var=${1:-} scan_backups=${2:-1} count=0
   local paths=(
     "$XRAY_BIN"
     /usr/local/bin/xray-linux-*
@@ -304,7 +318,6 @@ _scan_xrayctl_residuals() {
     "$CERTBOT_CONFIG_DIR"
     "$CERTBOT_WORK_DIR"
     "$CERTBOT_LOGS_DIR"
-    "$BACKUP_DIR"
     /etc/systemd/system/xrayctl-certbot-renew.timer
     /etc/systemd/system/xrayctl-certbot-renew.service
     /etc/systemd/system/xray.service
@@ -315,6 +328,7 @@ _scan_xrayctl_residuals() {
     /etc/sysctl.d/99-xrayctl-bbr.conf
     /var/log/xray
   )
+  ((scan_backups == 0)) || paths+=("$BACKUP_DIR")
 
   for p in "${paths[@]}"; do
     if compgen -G "$p" >/dev/null 2>&1 || [[ -e $p ]]; then
@@ -451,7 +465,7 @@ _xrayctl_uninstall_level_1() {
   _uninstall_remove_config            || ((step_failures+=1))
   _uninstall_remove_logs              || ((step_failures+=1))
 
-  _scan_xrayctl_residuals residual_count
+  _scan_xrayctl_residuals residual_count 0
 
   if ((step_failures > 0)); then
     warn "完全卸载有 ${step_failures} 个清理步骤失败，请结合残留检查确认。"

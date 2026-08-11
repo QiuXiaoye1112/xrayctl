@@ -91,6 +91,21 @@ assign_outbound vless-node proxy-out >/dev/null
 assert_eq proxy-out "$(jq -r '.routing.rules[]|select(.ruleTag=="xrayctl-outbound:vless-node")|.outboundTag' "$CONFIG_FILE")" \
   "outbound assignment failed"
 
+before_failed_assignment=$(jq -S . "$CONFIG_FILE")
+service_is_active() { return 0; }
+restart_service() { return 1; }
+assert_failure assign_outbound vless-node direct
+assert_eq "$before_failed_assignment" "$(jq -S . "$CONFIG_FILE")" \
+  "failed outbound assignment did not preserve the previous config"
+service_is_active() { return 1; }
+
+preserved_config=$(temp_file)
+cp "$CONFIG_FILE" "$preserved_config"
+printf '%s\n' '{"inbounds":[],"outbounds":[]}' >"$CONFIG_FILE"
+_service_restore_or_initialize_config "$preserved_config"
+assert_eq "$before_failed_assignment" "$(jq -S . "$CONFIG_FILE")" \
+  "reinstall did not restore the config preserved before core installation"
+
 delete_client vless-node robert 1 >/dev/null
 assert_eq 1 "$(jq '.inbounds[0].settings.clients|length' "$CONFIG_FILE")" "client delete failed"
 
@@ -100,5 +115,18 @@ assert_eq null "$(jq -r '.inbounds["vless-node"]' "$META_FILE")" "inbound metada
 assert_eq 0 "$(jq '[.routing.rules[]?|select(.ruleTag=="xrayctl-outbound:vless-node")]|length' "$CONFIG_FILE")" \
   "inbound delete left routing state"
 
-rm -f "$candidate"
+ensure_backup_dir
+assert_eq xrayctl-backup-directory-v1 "$(cat "$BACKUP_OWNERSHIP_MARKER")" \
+  "backup ownership marker was not created"
+SNAPSHOT_META=$(temp_file)
+printf '%s\n' '{"certificates":{},"managedResources":{}}' >"$SNAPSHOT_META"
+_uninstall_remove_backups
+[[ ! -e $BACKUP_DIR ]] || fail "owned backup directory survived erase without metadata"
+
+mkdir -p "$BACKUP_DIR"
+printf '%s\n' foreign >"${BACKUP_DIR}/foreign.txt"
+assert_failure _uninstall_remove_backups
+[[ -f ${BACKUP_DIR}/foreign.txt ]] || fail "unowned backup directory was removed"
+
+rm -f "$candidate" "$SNAPSHOT_META"
 pass "inbound, client, metadata, and outbound lifecycle remains consistent"

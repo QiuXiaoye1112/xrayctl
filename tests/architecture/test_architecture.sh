@@ -37,6 +37,10 @@ if [[ -d ${REPO_ROOT}/src ]]; then
   if rg -n '^[[:space:]]*(source|\.)[[:space:]]+' "${REPO_ROOT}/src"; then
     fail "src modules must not source one another"
   fi
+  if rg -n '(apply_candidate|state_commit_inbound_[a-z_]+)[[:space:]]+"\$tmp"' \
+      "${REPO_ROOT}/src/inbound.sh" "${REPO_ROOT}/src/outbound.sh" "${REPO_ROOT}/src/certificate.sh"; then
+    fail "business modules must preserve candidate failures through temporary-file cleanup"
+  fi
   if find "${REPO_ROOT}/src" -maxdepth 1 -type f \
       \( -name '*_guard.sh' -o -name '*_fix.sh' -o -name '*_compat.sh' -o -name '*_legacy.sh' \) \
       | grep -q .; then

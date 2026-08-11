@@ -153,10 +153,34 @@ install_xray_core_openrc() {
   rmdir "$work"
 }
 
+_service_snapshot_existing_config() {
+  local __var=$1 snapshot=""
+  if [[ -f $CONFIG_FILE ]]; then
+    validate_candidate "$CONFIG_FILE" || return 1
+    snapshot=$(temp_file)
+    cp -p "$CONFIG_FILE" "$snapshot" || { rm -f "$snapshot"; return 1; }
+  fi
+  printf -v "$__var" '%s' "$snapshot"
+}
+
+_service_restore_or_initialize_config() {
+  local preserved_config=${1-}
+  if [[ -n $preserved_config ]]; then
+    [[ -f $preserved_config ]] || { error "安装前配置快照丢失，拒绝覆盖现有配置。"; return 1; }
+    validate_candidate "$preserved_config" || { rm -f "$preserved_config"; return 1; }
+    install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR"
+    install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$preserved_config" "$CONFIG_FILE"
+    rm -f "$preserved_config"
+    ensure_config
+  else
+    write_default_config
+  fi
+}
+
 install_or_update_xray() {
   ensure_runtime_dependencies install
-  local mode=${1:-install} version=${2:-} installer installed_before=0
-  xray_installed && installed_before=1
+  local mode=${1:-install} version=${2:-} installer preserved_config=""
+  _service_snapshot_existing_config preserved_config
   if [[ $(platform_init_system) == openrc ]]; then
     install_xray_core_openrc "$version"
   else
@@ -168,8 +192,8 @@ install_or_update_xray() {
     else TERM="${TERM:-xterm}" bash "$installer" install; fi
     rm -f "$installer"
   fi
-  [[ -x $XRAY_BIN ]] || die "Xray 安装后未找到：$XRAY_BIN"
-  if ((installed_before == 0)) || [[ ! -f $CONFIG_FILE ]]; then write_default_config; else ensure_config; fi
+  [[ -x $XRAY_BIN ]] || { rm -f "$preserved_config"; die "Xray 安装后未找到：$XRAY_BIN"; }
+  _service_restore_or_initialize_config "$preserved_config"
   setup_runtime_access
   [[ $(platform_init_system) != openrc ]] || write_openrc_service
   install_quick_command

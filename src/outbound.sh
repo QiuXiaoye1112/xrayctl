@@ -12,13 +12,11 @@ _ensure_freedom_outbound() {
   jq --arg tag "$tag" --arg ip "$ip" \
     '.outbounds += [{tag:$tag,protocol:"freedom",sendThrough:$ip,settings:{domainStrategy:"UseIP"}}]' \
     "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp" >&2; then
+  if state_apply_candidate_file "$tmp" apply_candidate >&2; then
     printf '%s' "$tag"
   else
-    rm -f "$tmp"
     return 1
   fi
-  rm -f "$tmp"
 }
 
 outbound_exists() { jq -e --arg tag "$1" '.outbounds[]?|select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
@@ -111,8 +109,8 @@ add_outbound() {
     '{tag:$tag,protocol:$protocol,settings:$settings}')
   tmp=$(temp_file)
   jq --argjson outbound "$outbound" '.outbounds += [$outbound]' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then info "出站 ${tag} 已添加。"; fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "出站 ${tag} 已添加。"
 }
 
 select_outbound() {
@@ -187,8 +185,8 @@ assign_outbound() {
       [{type:"field",inboundTag:[$inbound],outboundTag:$outbound,ruleTag:$ruleTag}] +
       [$rules[] | select((.outboundTag // "") != "blocked")]
     )' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then info "入站 ${inbound} 已使用出站 ${outbound}。"; fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "入站 ${inbound} 已使用出站 ${outbound}。"
 }
 
 delete_outbound() {
@@ -203,6 +201,6 @@ delete_outbound() {
   jq --arg tag "$tag" '
     .outbounds |= map(select(.tag!=$tag)) |
     .routing.rules=((.routing.rules // []) | map(select(.outboundTag!=$tag)))' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then info "出站 ${tag} 已删除。"; fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "出站 ${tag} 已删除。"
 }
