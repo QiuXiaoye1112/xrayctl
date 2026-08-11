@@ -1,1 +1,0 @@
-xrayctl 1.0.19-alpine

@@ -107,6 +107,23 @@ print_links() {
   share_separator
 }
 
+print_subscription() {
+  ensure_config; init_meta
+  local tag=${1-} links current_tag
+  if [[ -n $tag ]]; then
+    links=$(print_links "$tag" "" | grep -E '^(vless|vmess|trojan)://' || true)
+  else
+    links=""
+    while IFS= read -r current_tag; do
+      links+="$(print_links "$current_tag" "" | grep -E '^(vless|vmess|trojan)://' || true)"$'\n'
+    done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan)$"))|.tag' "$CONFIG_FILE")
+    links=${links%$'\n'}
+  fi
+  [[ -n $links ]] || die "没有可生成订阅的代理分享链接。"
+  printf '%s' "$links" | base64_nowrap
+  printf '\n'
+}
+
 print_all_share_links() {
   ensure_config; init_meta
   local tag found=0
@@ -122,4 +139,3 @@ print_all_share_links() {
 # Unified Certbot environment — all certbot calls go through
 # the isolated venv at /opt/xrayctl/certbot (see certbot_cmd).
 # ============================================================
-

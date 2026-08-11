@@ -17,13 +17,9 @@ source "${REPO_ROOT}/tests/helpers/assert.sh"
 
 NO_COLOR=1 bash "${REPO_ROOT}/xrayctl.sh" help >"${TEST_ROOT}/help.txt"
 NO_COLOR=1 bash "${REPO_ROOT}/xrayctl.sh" version >"${TEST_ROOT}/version.txt"
-NO_COLOR=1 bash "${REPO_ROOT}/alpine/xrayctl.sh" help >"${TEST_ROOT}/alpine-help.txt"
-NO_COLOR=1 bash "${REPO_ROOT}/alpine/xrayctl.sh" version >"${TEST_ROOT}/alpine-version.txt"
 
 assert_file_eq "${REPO_ROOT}/tests/fixtures/cli/help.txt" "${TEST_ROOT}/help.txt" "systemd help changed"
 assert_file_eq "${REPO_ROOT}/tests/fixtures/cli/version.txt" "${TEST_ROOT}/version.txt" "systemd version changed"
-assert_file_eq "${REPO_ROOT}/tests/fixtures/cli/alpine-help.txt" "${TEST_ROOT}/alpine-help.txt" "Alpine help changed"
-assert_file_eq "${REPO_ROOT}/tests/fixtures/cli/alpine-version.txt" "${TEST_ROOT}/alpine-version.txt" "Alpine version changed"
 
 if NO_COLOR=1 bash "${REPO_ROOT}/xrayctl.sh" definitely-unknown >"${TEST_ROOT}/unknown.out" 2>"${TEST_ROOT}/unknown.err"; then
   fail "unknown CLI command unexpectedly succeeded"

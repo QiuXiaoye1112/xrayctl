@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_URL="https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/xrayctl.sh"
+readonly SCRIPT_URL="${XRAYCTL_SCRIPT_URL:-https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/dist/xrayctl}"
 readonly TARGET="/usr/local/sbin/xrayctl"
 
 info() { printf '[xrayctl] %s\n' "$*"; }

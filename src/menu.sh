@@ -287,7 +287,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl uninstall --erase          彻底删除（清除全部 xrayctl 数据）
   xrayctl status                  查看状态
   xrayctl start|stop|restart      服务控制
-  xrayctl logs [行数]             查看 systemd 日志
+  xrayctl logs [行数]             查看服务日志
   xrayctl inbound list            列出入站
   xrayctl inbound add             交互新增入站
   xrayctl inbound show <标签>     查看入站 JSON
@@ -305,6 +305,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl client rotate [标签] [用户]
   xrayctl client delete [标签] [用户] [--yes]
   xrayctl link [标签] [用户]      输出分享链接
+  xrayctl subscription [标签]     输出 Base64 订阅内容
   xrayctl config check|show|edit
   xrayctl backup [文件.tar.gz]
   xrayctl restore [文件.tar.gz]
@@ -329,7 +330,11 @@ dispatch() {
   case $command in
     menu) main_menu;;
     help|-h|--help) show_help;;
-    version|-v|--version) printf 'xrayctl %s\n' "$XRAYCTL_VERSION";;
+    version|-v|--version)
+      printf 'xrayctl %s' "$XRAYCTL_VERSION"
+      [[ $XRAYCTL_BUILD_COMMIT == development ]] || printf ' (commit %s)' "$XRAYCTL_BUILD_COMMIT"
+      printf '\n'
+      ;;
     install) install_or_update_xray install "${1-}";;
     update|upgrade) install_or_update_xray upgrade "${1-}";;
     uninstall) if [[ ${1-} == --purge ]]; then uninstall_xray 1; elif [[ ${1-} == --erase ]]; then uninstall_xray 2; else uninstall_xray 0; fi;;
@@ -354,6 +359,7 @@ dispatch() {
         delete|remove) delete_client "${2-}" "${3-}" "$([[ ${4-} == --yes ]] && printf 1 || printf 0)";;
         *) die "未知 client 子命令：${1}";; esac;;
     link|links|share) ensure_config; print_links "${1-}" "${2-}";;
+    subscription|subscribe|sub) ensure_config; print_subscription "${1-}";;
     config)
       case ${1:-check} in check|test) check_config;; show) ensure_config; jq . "$CONFIG_FILE";; edit) edit_config;; *) die "未知 config 子命令。";; esac;;
     backup) backup_all "${1-}";; restore) restore_backup "${1-}";;

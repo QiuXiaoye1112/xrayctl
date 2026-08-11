@@ -1,9 +1,9 @@
 #!/bin/sh
-# Bootstrap installer for the standalone xrayctl Alpine/OpenRC edition.
+# Alpine compatibility bootstrap for the unified xrayctl distribution.
 
 set -eu
 
-SCRIPT_URL="${XRAYCTL_ALPINE_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/xrayctl.sh}"
+SCRIPT_URL="${XRAYCTL_ALPINE_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/dist/xrayctl}"
 TARGET="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"
 
 info() { printf '[xrayctl-alpine] %s\n' "$*"; }
@@ -24,10 +24,10 @@ temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-alpine-bootstrap.XXXXXX")
 cleanup() { rm -rf "$temp_dir"; }
 trap cleanup EXIT HUP INT TERM
 
-info "正在下载 Alpine 管理脚本。"
+info "正在下载统一 xrayctl 发行版。"
 curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
   --connect-timeout 15 --max-time 120 "$SCRIPT_URL" -o "${temp_dir}/xrayctl"
-grep -q '^# xrayctl - Xray Alpine Linux terminal manager' "${temp_dir}/xrayctl" \
+grep -q '^# xrayctl - Xray Linux terminal manager' "${temp_dir}/xrayctl" \
   || die "下载内容校验失败。"
 
 install -d -m 755 "$(dirname "$TARGET")"
