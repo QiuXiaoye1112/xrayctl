@@ -11,6 +11,7 @@ tests=(
   "tests/unit/test_platform.sh"
   "tests/unit/test_protocol_builders.sh"
   "tests/integration/test_state.sh"
+  "tests/integration/test_lifecycle.sh"
   "tests/smoke/test_cli.sh"
   "tests/smoke/test_build.sh"
 )
