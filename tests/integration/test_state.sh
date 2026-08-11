@@ -60,6 +60,25 @@ jq '.log.loglevel="info"' "$CONFIG_FILE" >"$candidate"
 apply_candidate "$candidate" >/dev/null
 assert_eq info "$(jq -r '.log.loglevel' "$CONFIG_FILE")" "valid candidate was not committed"
 
+jq '.log.loglevel="debug"' "$CONFIG_FILE" >"$candidate"
+state_commit_inbound_set "$candidate" test-node edge.example.com >/dev/null
+assert_eq debug "$(jq -r '.log.loglevel' "$CONFIG_FILE")" "joint config candidate was not committed"
+assert_eq edge.example.com "$(jq -r '.inbounds["test-node"].host' "$META_FILE")" "joint metadata candidate was not committed"
+
+before_restart_config=$(jq -S . "$CONFIG_FILE")
+before_restart_meta=$(jq -S . "$META_FILE")
+jq '.log.loglevel="error"' "$CONFIG_FILE" >"$candidate"
+service_is_active() { return 0; }
+restart_calls=0
+restart_service() {
+  restart_calls=$((restart_calls + 1))
+  ((restart_calls > 1))
+}
+assert_failure state_commit_inbound_set "$candidate" test-node changed.example.com
+assert_eq "$before_restart_config" "$(jq -S . "$CONFIG_FILE")" "restart failure did not roll back config"
+assert_eq "$before_restart_meta" "$(jq -S . "$META_FILE")" "restart failure did not roll back metadata"
+service_is_active() { return 1; }
+
 before_invalid=$(jq -S . "$CONFIG_FILE")
 printf '%s\n' '{"inbounds":"invalid","outbounds":[]}' >"$candidate"
 assert_failure apply_candidate "$candidate"

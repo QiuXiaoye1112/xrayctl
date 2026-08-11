@@ -986,8 +986,7 @@ add_inbound() {
   tag=$(jq -r '.tag' <<<"$inbound"); listen_port=$(jq -r '.port' <<<"$inbound")
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then
-    meta_set_inbound "$tag" "$host"
+  if state_commit_inbound_set "$tmp" "$tag" "$host"; then
     heading "入站已创建"
     show_inbound "$tag"
     print_links "$tag" "" || true
@@ -1074,8 +1073,7 @@ rename_inbound() {
       else . end |
       if (.ruleTag // "")==("xrayctl-outbound:"+$old) then .ruleTag=("xrayctl-outbound:"+$new) else . end
     ))' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then
-    meta_rename_inbound "$old_tag" "$new_tag"
+  if state_commit_inbound_rename "$tmp" "$old_tag" "$new_tag"; then
     info "入站已重命名：${old_tag} → ${new_tag}。"
   fi
   rm -f "$tmp"
@@ -1094,8 +1092,7 @@ modify_inbound_basic() {
   tmp=$(temp_file)
   jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
     '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then
-    meta_set_inbound "$tag" "$host"
+  if state_commit_inbound_set "$tmp" "$tag" "$host"; then
     current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
   fi
   rm -f "$tmp"
@@ -1120,9 +1117,8 @@ modify_inbound_transport() {
         if $method=="raw" and $security!="none" then .flow="xtls-rprx-vision" else del(.flow) end
       )
     else . end' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then
+  if state_commit_inbound_set "$tmp" "$tag" "$(public_host_for_tag "$tag")"; then
     host=$(public_host_for_tag "$tag")
-    meta_set_inbound "$tag" "$host"
     info "传输已更新，请重新导出客户端分享链接。"
   fi
   rm -f "$tmp"
@@ -1152,8 +1148,7 @@ delete_inbound() {
         else true end
       )
     ]' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then
-    meta_delete_inbound "$tag"
+  if state_commit_inbound_delete "$tmp" "$tag"; then
     info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
   fi
   rm -f "$tmp"

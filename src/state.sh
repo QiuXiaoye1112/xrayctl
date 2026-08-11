@@ -277,58 +277,121 @@ backup_config_quiet() {
   printf '%s' "$target"
 }
 
-apply_candidate() {
-  local candidate=$1 rollback="" old_active=0
+state_validate_metadata_candidate() {
+  local candidate=$1 validation_output
+  if ! validation_output=$(jq -e '
+    type=="object" and
+    ((.schema // 1) | type=="number") and
+    ((.inbounds // {}) | type=="object") and
+    ((.certificates // {}) | type=="object") and
+    ((.managedResources // {}) | type=="object") and
+    ((.migrations // {}) | type=="object")
+  ' "$candidate" 2>&1); then
+    error "metadata JSON 结构检查失败。"
+    [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+    return 1
+  fi
+}
+
+_state_restore_snapshot() {
+  local config_snapshot=$1 meta_snapshot=$2
+  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$config_snapshot" "$CONFIG_FILE" || return 1
+  install -m 600 "$meta_snapshot" "$META_FILE" || return 1
+}
+
+_state_cleanup_transaction_files() {
+  local path
+  for path in "$@"; do
+    [[ -z $path ]] || rm -f "$path"
+  done
+}
+
+state_commit() {
+  local candidate=$1 meta_mutator=${2-} old_active=0
+  local config_snapshot meta_snapshot meta_candidate=""
+  if [[ -n $meta_mutator ]]; then shift 2; else shift; fi
   ensure_config
   validate_candidate "$candidate" || return 1
   service_is_active && old_active=1
-  setup_runtime_access
-  rollback=$(temp_file)
-  cp -p "$CONFIG_FILE" "$rollback"
-  if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$CONFIG_FILE"; then
-    rm -f "$rollback"
-    return 1
-  fi
-  if ((old_active)) && ! restart_service; then
-    error "重启失败，正在回滚配置。"
-    if [[ -f $rollback ]]; then
-      install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$rollback" "$CONFIG_FILE"
-      restart_service || true
+  setup_runtime_access || return 1
+
+  if [[ -n $meta_mutator ]]; then
+    meta_candidate=$(temp_file)
+    if ! "$meta_mutator" "$META_FILE" "$meta_candidate" "$@"; then
+      _state_cleanup_transaction_files "$meta_candidate"
+      return 1
     fi
-    rm -f "$rollback"
+    if ! state_validate_metadata_candidate "$meta_candidate"; then
+      _state_cleanup_transaction_files "$meta_candidate"
+      return 1
+    fi
+  fi
+
+  config_snapshot=$(temp_file)
+  meta_snapshot=$(temp_file)
+  cp -p "$CONFIG_FILE" "$config_snapshot"
+  cp -p "$META_FILE" "$meta_snapshot"
+
+  if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$CONFIG_FILE"; then
+    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
   fi
-  rm -f "$rollback"
+
+  if [[ -n $meta_candidate ]] && ! install -m 600 "$meta_candidate" "$META_FILE"; then
+    error "metadata 提交失败，正在回滚配置和 metadata。"
+    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
+    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+    return 1
+  fi
+
+  if ((old_active)) && ! restart_service; then
+    error "重启失败，正在回滚配置和 metadata。"
+    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
+    restart_service || true
+    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+    return 1
+  fi
+
+  _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
   info "配置已应用。"
 }
 
+apply_candidate() { state_commit "$1"; }
+
 temp_file() { mktemp "${TMPDIR:-/tmp}/xrayctl.XXXXXX"; }
 
-meta_set_inbound() {
-  local tag=$1 host=$2 tmp
-  init_meta; tmp=$(temp_file)
+_state_build_inbound_meta_set() {
+  local current=$1 candidate=$2 tag=$3 host=$4
   jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now}) |
      del(.inbounds[$tag].realityPublicKey)' \
-    "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+    "$current" >"$candidate"
 }
 
-meta_delete_inbound() {
-  local tag=$1 tmp; init_meta; tmp=$(temp_file)
-  jq --arg tag "$tag" 'del(.inbounds[$tag])' "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+_state_build_inbound_meta_delete() {
+  local current=$1 candidate=$2 tag=$3
+  jq --arg tag "$tag" 'del(.inbounds[$tag])' "$current" >"$candidate"
 }
 
-meta_rename_inbound() {
-  local old_tag=$1 new_tag=$2 tmp
-  init_meta; tmp=$(temp_file)
+_state_build_inbound_meta_rename() {
+  local current=$1 candidate=$2 old_tag=$3 new_tag=$4
   jq --arg old "$old_tag" --arg new "$new_tag" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '
     if .inbounds[$old] then
       .inbounds[$new]=(.inbounds[$old] + {updatedAt:$now}) | del(.inbounds[$old])
     else . end' \
-    "$META_FILE" >"$tmp"
-  install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
+    "$current" >"$candidate"
+}
+
+state_commit_inbound_set() {
+  state_commit "$1" _state_build_inbound_meta_set "$2" "$3"
+}
+
+state_commit_inbound_delete() {
+  state_commit "$1" _state_build_inbound_meta_delete "$2"
+}
+
+state_commit_inbound_rename() {
+  state_commit "$1" _state_build_inbound_meta_rename "$2" "$3"
 }
 
 edit_config() {
@@ -436,4 +499,3 @@ restore_backup() {
   fi
   return 0
 }
-
