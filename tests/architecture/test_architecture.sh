@@ -24,6 +24,9 @@ if [[ -d ${REPO_ROOT}/src ]]; then
     production_files+=("$file")
   done < <(find "${REPO_ROOT}/src" -maxdepth 1 -type f -name '*.sh' | sort)
   ((${#production_files[@]} > 0)) || fail "src exists but contains no modules"
+  expected_modules=$'certificate.sh\ncore.sh\ninbound.sh\nmenu.sh\noutbound.sh\nplatform.sh\nprotocols.sh\nsecurity.sh\nservice.sh\nshare.sh\nstate.sh\nuninstall.sh'
+  actual_modules=$(printf '%s\n' "${production_files[@]##*/}")
+  assert_eq "$expected_modules" "$actual_modules" "production domain module set changed"
   duplicates=$(definition_stream "${production_files[@]}" | sort | awk -F '\t' '
     seen[$1] { print $1 "\n  " first[$1] "\n  " $2 }
     !seen[$1] { first[$1]=$2 }
@@ -34,11 +37,25 @@ if [[ -d ${REPO_ROOT}/src ]]; then
   if rg -n '^[[:space:]]*(source|\.)[[:space:]]+' "${REPO_ROOT}/src"; then
     fail "src modules must not source one another"
   fi
+  if find "${REPO_ROOT}/src" -maxdepth 1 -type f \
+      \( -name '*_guard.sh' -o -name '*_fix.sh' -o -name '*_compat.sh' -o -name '*_legacy.sh' \) \
+      | grep -q .; then
+    fail "patch-chain module names are forbidden"
+  fi
 else
   for script in "${REPO_ROOT}/xrayctl.sh" "${REPO_ROOT}/alpine/xrayctl.sh"; do
     duplicates=$(definition_stream "$script" | cut -f1 | sort | uniq -d)
     [[ -z $duplicates ]] || fail "duplicate functions in ${script}: ${duplicates}"
   done
 fi
+
+for protocol in vless vmess trojan socks http; do
+  rg -q "^protocol_build_${protocol}\\(\\)" "${REPO_ROOT}/src/protocols.sh" \
+    || fail "missing protocol builder: ${protocol}"
+done
+
+rg -q 'dist/xrayctl' "${REPO_ROOT}/install.sh" || fail "root installer does not install dist/xrayctl"
+rg -q 'dist/xrayctl' "${REPO_ROOT}/alpine/install.sh" || fail "Alpine installer does not install dist/xrayctl"
+[[ ! -e ${REPO_ROOT}/alpine/xrayctl.sh ]] || fail "parallel Alpine business script still exists"
 
 pass "production functions are unique and modules do not self-source"

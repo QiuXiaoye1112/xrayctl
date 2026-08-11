@@ -613,7 +613,7 @@ register_certificate_metadata() {
 
 import_certificate() {
   ensure_runtime_dependencies cert-import
-  local domain=${1-} cert=${2-} key=${3-} paths
+  local domain=${1-} cert=${2-} key=${3-}
   [[ -n $domain ]] || prompt_validated_value domain "证书标识/域名" "" validate_certificate_identifier "证书标识只能包含字母、数字、点和横线。"
   [[ $domain =~ ^[A-Za-z0-9.-]+$ ]] || die "证书标识无效。"
   [[ -n $cert ]] || prompt_validated_value cert "证书文件路径" "" validate_readable_file "证书文件不存在或不可读，请重新输入。"
@@ -871,7 +871,9 @@ select_managed_certificate() {
 }
 
 certificate_inbound_users() {
-  local identifier=$1 cert_path="${CERT_DIR}/${identifier}.crt" key_path="${CERT_DIR}/${identifier}.key"
+  local identifier=$1 cert_path key_path
+  cert_path="${CERT_DIR}/${identifier}.crt"
+  key_path="${CERT_DIR}/${identifier}.key"
   [[ -r $CONFIG_FILE ]] || return 0
   jq -r --arg cert "$cert_path" --arg key "$key_path" '
     .inbounds[]? |

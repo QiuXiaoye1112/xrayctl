@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # xrayctl development entrypoint. Business code lives in src/.
 
-readonly XRAYCTL_SOURCE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+XRAYCTL_SOURCE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+readonly XRAYCTL_SOURCE_DIR
 # shellcheck source=src/core.sh
 source "${XRAYCTL_SOURCE_DIR}/src/core.sh"
 

@@ -14,6 +14,7 @@ tests=(
   "tests/integration/test_lifecycle.sh"
   "tests/smoke/test_cli.sh"
   "tests/smoke/test_build.sh"
+  "tests/smoke/test_docs.sh"
 )
 
 for test_file in "${tests[@]}"; do

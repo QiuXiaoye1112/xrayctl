@@ -267,7 +267,8 @@ _check_bbr_available() {
     warn "当前 NAT/容器没有 NET_ADMIN 权限，无法修改内核拥塞控制。"
     return 1
   fi
-  local available=$(< /proc/sys/net/ipv4/tcp_available_congestion_control)
+  local available
+  available=$(< /proc/sys/net/ipv4/tcp_available_congestion_control)
   if [[ " $available " != *" bbr "* ]]; then
     warn "当前内核不支持 BBR。可用算法：${available}"
     return 1
@@ -321,7 +322,8 @@ _disable_bbr() {
 manage_bbr() {
   ensure_system_context bbr
   _check_bbr_available || return 0
-  local current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  local current
+  current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
   if [[ $current == bbr ]]; then
     info "当前拥塞控制: BBR"
     if [[ -t 0 ]]; then

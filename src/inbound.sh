@@ -71,9 +71,10 @@ prompt_public_host() {
 
 add_inbound() {
   ensure_runtime_dependencies inbound-add; require_xray_installed; ensure_config
-  local inbound="" host="" public_key="" tag tmp listen_port
+  local inbound="" host="" public_key="" tag tmp
   build_inbound inbound host public_key
-  tag=$(jq -r '.tag' <<<"$inbound"); listen_port=$(jq -r '.port' <<<"$inbound")
+  : "$public_key"
+  tag=$(jq -r '.tag' <<<"$inbound")
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
   if state_commit_inbound_set "$tmp" "$tag" "$host"; then
@@ -190,7 +191,7 @@ modify_inbound_basic() {
 
 modify_inbound_transport() {
   ensure_runtime_dependencies inbound-transport; require_xray_installed; ensure_config
-  local tag=${1-} protocol stream public_key="" tmp host method security
+  local tag=${1-} protocol stream public_key="" tmp method security
   [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan)$' || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
@@ -198,6 +199,7 @@ modify_inbound_transport() {
   warn "修改传输后，所有客户端都要同步更新配置。"
   confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
   build_stream_settings "$protocol" stream public_key
+  : "$public_key"
   method=$(jq -r '.method' <<<"$stream"); security=$(jq -r '.security' <<<"$stream")
   tmp=$(temp_file)
   jq --arg tag "$tag" --argjson stream "$stream" --arg method "$method" --arg security "$security" '
@@ -208,7 +210,6 @@ modify_inbound_transport() {
       )
     else . end' "$CONFIG_FILE" >"$tmp"
   if state_commit_inbound_set "$tmp" "$tag" "$(public_host_for_tag "$tag")"; then
-    host=$(public_host_for_tag "$tag")
     info "传输已更新，请重新导出客户端分享链接。"
   fi
   rm -f "$tmp"
