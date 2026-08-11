@@ -216,15 +216,23 @@ print_table_cell_clipped() {
 }
 
 run_menu_action() {
-  local action_status
+  local action_status previous_err_trap
+  previous_err_trap=$(trap -p ERR || true)
+  trap - ERR
   set +e
   (
     set -Eeuo pipefail
+    trap 'exit $?' ERR
     trap cleanup_on_exit EXIT
     "$@"
   )
   action_status=$?
   set -e
+  if [[ -n $previous_err_trap ]]; then
+    eval "$previous_err_trap"
+  else
+    trap - ERR
+  fi
   if ((action_status != 0)); then
     warn "操作未完成，脚本仍在运行，请检查输入后重试。"
   fi

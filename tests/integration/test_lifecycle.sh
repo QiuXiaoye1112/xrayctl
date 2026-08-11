@@ -91,6 +91,21 @@ assign_outbound vless-node proxy-out >/dev/null
 assert_eq proxy-out "$(jq -r '.routing.rules[]|select(.ruleTag=="xrayctl-outbound:vless-node")|.outboundTag' "$CONFIG_FILE")" \
   "outbound assignment failed"
 
+detect_local_ips() { printf '%s\t%s\t%s\n' '203.0.113.10 (IPv4)' 203.0.113.10 eth0; }
+selected_option_count=0
+choose() { selected_option_count=$#; printf -v "$1" '%s' 1; }
+tag=""
+select_outbound tag 0 0
+assert_eq proxy-out "$tag" "selected outbound was lost through local variable shadowing"
+assert_eq 3 "$selected_option_count" "delete selector included an unconfigured local IP outbound"
+
+_expected_menu_failure() { return 1; }
+trap on_error ERR
+menu_failure_output=$(run_menu_action _expected_menu_failure 2>&1)
+trap - ERR
+[[ $menu_failure_output != *"命令在第"* ]] || fail "expected menu failure triggered the global ERR trace"
+[[ $menu_failure_output == *"操作未完成"* ]] || fail "menu failure did not produce the concise retry warning"
+
 before_failed_assignment=$(jq -S . "$CONFIG_FILE")
 service_is_active() { return 0; }
 restart_service() { return 1; }

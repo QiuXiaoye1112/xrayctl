@@ -114,20 +114,20 @@ add_outbound() {
 }
 
 select_outbound() {
-  local __var=$1 include_direct=${2:-0} candidate_tag answer
+  local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} candidate_tag answer local_tag
   local tags=() local_ips=() local_ip_tags=() local_raw_ips=()
   ((include_direct == 0)) || tags+=("direct")
   while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || tags+=("$candidate_tag"); done < <(
     jq -r '.outbounds[]?|select((.protocol=="socks" or .protocol=="http" or .protocol=="freedom") and .tag!="direct" and .tag!="blocked")|.tag' "$CONFIG_FILE"
   )
   # 检测本地 IP，对已存在的 freedom 出站加备注
-  while IFS=$'\t' read -r label ip iface; do
-    local tag; tag=$(_freedom_tag_for_ip "$ip")
-    local_ip_tags+=("$tag")
+  while ((include_detected_local)) && IFS=$'\t' read -r label ip iface; do
+    local_tag=$(_freedom_tag_for_ip "$ip")
+    local_ip_tags+=("$local_tag")
     # 如果这个 freedom 出站不在列表里，追加到 tags
     local found=0
-    for t in "${tags[@]}"; do [[ $t == "$tag" ]] && { found=1; break; }; done
-    if ((!found)); then tags+=("$tag"); fi
+    for t in "${tags[@]}"; do [[ $t == "$local_tag" ]] && { found=1; break; }; done
+    if ((!found)); then tags+=("$local_tag"); fi
     local_ips+=("$label")
     local_raw_ips+=("$ip")
   done < <(ensure_config 2>/dev/null || true; detect_local_ips 2>/dev/null)
@@ -192,7 +192,7 @@ assign_outbound() {
 delete_outbound() {
   ensure_runtime_dependencies outbound-delete; ensure_config
   local tag=${1-} tmp assigned
-  [[ -n $tag ]] || select_outbound tag 0 || return
+  [[ -n $tag ]] || select_outbound tag 0 0 || return
   outbound_exists "$tag" || die "找不到出站：$tag"
   assigned=$(jq -r --arg tag "$tag" '[.routing.rules[]?|select(.outboundTag==$tag)|.inboundTag[]?]|unique|join(", ")' "$CONFIG_FILE")
   if [[ -n $assigned ]]; then warn "正在使用此出站的入站：${assigned}；删除后这些入站恢复 direct。"; fi

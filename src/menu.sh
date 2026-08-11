@@ -249,9 +249,9 @@ uninstall_menu() {
     printf '0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
-      1) uninstall_xray 0; pause;;
-      2) uninstall_xray 1; pause;;
-      3) uninstall_xray 2; pause;;
+      1) run_menu_action uninstall_xray 0; pause;;
+      2) run_menu_action uninstall_xray 1; pause;;
+      3) run_menu_action uninstall_xray 2; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
