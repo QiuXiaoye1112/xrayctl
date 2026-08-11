@@ -7,7 +7,9 @@ IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.29"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
-readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/xrayctl.sh}"
+readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
+readonly SCRIPT_DOWNLOAD_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/dist/xrayctl}"
 readonly JQ_VERSION="1.8.2"
 
 XRAY_BIN="${XRAYCTL_XRAY_BIN:-/usr/local/bin/xray}"
@@ -15,12 +17,17 @@ CONFIG_DIR="${XRAYCTL_CONFIG_DIR:-/usr/local/etc/xray}"
 CONFIG_FILE="${XRAYCTL_CONFIG_FILE:-${CONFIG_DIR}/config.json}"
 META_FILE="${XRAYCTL_META_FILE:-${CONFIG_DIR}/xrayctl.meta.json}"
 CERT_DIR="${XRAYCTL_CERT_DIR:-${CONFIG_DIR}/certs}"
+LOG_DIR="${XRAYCTL_LOG_DIR:-/var/log/xray}"
+XRAY_SHARE_DIR="${XRAYCTL_SHARE_DIR:-/usr/local/share/xray}"
+export XRAY_LOCATION_ASSET="$XRAY_SHARE_DIR"
 BACKUP_DIR="${XRAYCTL_BACKUP_DIR:-/var/backups/xrayctl}"
 QUICK_COMMAND="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"
 QUICK_SYMLINK="${XRAYCTL_SYMLINK_PATH:-/usr/local/bin/xrayctl}"
 SERVICE_NAME="${XRAYCTL_SERVICE_NAME:-xray}"
 SYSTEMD_UNIT="${SERVICE_NAME}.service"
+OPENRC_SERVICE="${XRAYCTL_OPENRC_SERVICE:-/etc/init.d/${SERVICE_NAME}}"
 RUNTIME_OWNER="${XRAYCTL_RUNTIME_OWNER:-root}"
+RUNTIME_USER="${XRAYCTL_RUNTIME_USER:-xray}"
 RUNTIME_GROUP="${XRAYCTL_RUNTIME_GROUP:-xrayctl}"
 SYSTEMD_OVERRIDE_DIR="${XRAYCTL_SYSTEMD_OVERRIDE_DIR:-/etc/systemd/system/${SYSTEMD_UNIT}.d}"
 LOCK_FILE="${XRAYCTL_LOCK_FILE:-/run/lock/xrayctl.lock}"
@@ -34,6 +41,7 @@ CERTBOT_CONFIG_DIR="${XRAYCTL_CERTBOT_CONFIG_DIR:-/var/lib/xrayctl/letsencrypt}"
 CERTBOT_WORK_DIR="${XRAYCTL_CERTBOT_WORK_DIR:-/var/lib/xrayctl/certbot-work}"
 CERTBOT_LOGS_DIR="${XRAYCTL_CERTBOT_LOGS_DIR:-/var/log/xrayctl/certbot}"
 CLOUDFLARE_INI="${XRAYCTL_CLOUDFLARE_INI:-/etc/xrayctl/cloudflare.ini}"
+CERT_RENEW_HOOK="${XRAYCTL_CERT_RENEW_HOOK:-/etc/periodic/daily/xrayctl-certbot-renew}"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
@@ -57,8 +65,8 @@ on_error() {
 trap on_error ERR
 
 cleanup_on_exit() {
-  if [[ ${CERT_STOPPED_SERVICE:-0} == 1 ]] && command_exists systemctl; then
-    systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
+  if [[ ${CERT_STOPPED_SERVICE:-0} == 1 ]]; then
+    platform_service_start >/dev/null 2>&1 || true
   fi
 }
 trap cleanup_on_exit EXIT
@@ -67,7 +75,6 @@ is_root() { [[ $(id -u) -eq 0 ]]; }
 require_root() { is_root || die "此操作需要 root 权限，请使用 sudo xrayctl $*."; }
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 is_linux() { [[ $(uname -s) == "Linux" ]]; }
-is_systemd() { command_exists systemctl && [[ -d /run/systemd/system || ${XRAYCTL_TESTING:-0} == 1 ]]; }
 
 pause() {
   [[ -t 0 ]] || return 0
@@ -233,4 +240,3 @@ generate_uuid() {
   local h; h=$(openssl rand -hex 16)
   printf '%s-%s-4%s-%x%s-%s\n' "${h:0:8}" "${h:8:4}" "${h:13:3}" "$(( (0x${h:16:1} & 3) | 8 ))" "${h:17:3}" "${h:20:12}"
 }
-

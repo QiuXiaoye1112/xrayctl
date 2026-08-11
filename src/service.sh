@@ -1,13 +1,12 @@
-service_exists() { command_exists systemctl && systemctl list-unit-files "$SYSTEMD_UNIT" --no-legend 2>/dev/null | grep -q "$SYSTEMD_UNIT"; }
-service_is_active() { command_exists systemctl && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; }
-service_is_enabled() { command_exists systemctl && systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; }
+service_exists() { platform_service_exists; }
+service_is_active() { platform_service_is_active; }
+service_is_enabled() { platform_service_is_enabled; }
 
 restart_service() {
   if service_exists; then
-    systemctl daemon-reload
-    systemctl restart "$SERVICE_NAME"
+    platform_service_restart
     if ! service_is_active; then
-      journalctl -u "$SERVICE_NAME" -n 20 --no-pager >&2 || true
+      platform_service_logs 20 >&2 || true
       return 1
     fi
   fi
@@ -41,28 +40,52 @@ is_xrayctl_certbot_symlink() {
 
 get_service_user() {
   local user
-  user=$(systemctl show "$SERVICE_NAME" -p User --value 2>/dev/null || true)
-  printf '%s' "${user:-nobody}"
+  if [[ $(platform_init_system) == openrc ]]; then
+    printf '%s' "$RUNTIME_USER"
+  else
+    user=$(systemctl show "$SERVICE_NAME" -p User --value 2>/dev/null || true)
+    printf '%s' "${user:-nobody}"
+  fi
 }
 
 setup_runtime_access() {
-  getent group "$RUNTIME_GROUP" >/dev/null 2>&1 || groupadd --system "$RUNTIME_GROUP"
+  local created_group=0 created_user=0
+  if [[ $(platform_init_system) == openrc ]]; then
+    if ! grep -qE "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null; then addgroup -S "$RUNTIME_GROUP"; created_group=1; fi
+    if ! id "$RUNTIME_USER" >/dev/null 2>&1; then
+      adduser -S -D -H -s /sbin/nologin -G "$RUNTIME_GROUP" "$RUNTIME_USER"
+      created_user=1
+    fi
+  else
+    if ! getent group "$RUNTIME_GROUP" >/dev/null 2>&1; then groupadd --system "$RUNTIME_GROUP"; created_group=1; fi
+  fi
   install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR"
   install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CERT_DIR"
+  if [[ $(platform_init_system) == openrc ]]; then
+    install -d -m 750 -o "$RUNTIME_USER" -g "$RUNTIME_GROUP" "$LOG_DIR"
+    touch "${LOG_DIR}/access.log" "${LOG_DIR}/error.log" "${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log"
+    chown "$RUNTIME_USER:$RUNTIME_GROUP" "${LOG_DIR}/access.log" "${LOG_DIR}/error.log" \
+      "${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log"
+    chmod 640 "${LOG_DIR}/access.log" "${LOG_DIR}/error.log" "${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log"
+  fi
   if [[ -f $CONFIG_FILE ]]; then
     chown "$RUNTIME_OWNER:$RUNTIME_GROUP" "$CONFIG_FILE"
     chmod 640 "$CONFIG_FILE"
   fi
-  install -d -m 755 "$SYSTEMD_OVERRIDE_DIR"
-  cat >"${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-access.conf" <<EOF
+  if [[ $(platform_init_system) == systemd ]]; then
+    install -d -m 755 "$SYSTEMD_OVERRIDE_DIR"
+    cat >"${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-access.conf" <<EOF
 [Service]
 SupplementaryGroups=${RUNTIME_GROUP}
 EOF
-  rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
-  systemctl daemon-reload
+    rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
+    platform_daemon_reload
+  fi
   meta_resource_register "configDir" "$CONFIG_DIR"
   meta_resource_register "certDir" "$CERT_DIR"
   meta_resource_register "runtimeGroup" "$RUNTIME_GROUP"
+  ((created_group == 0)) || meta_resource_register "runtimeGroupOwned" "$RUNTIME_GROUP"
+  ((created_user == 0)) || meta_resource_register "runtimeUserOwned" "$RUNTIME_USER"
 }
 
 setup_certificate_access() { setup_runtime_access; }
@@ -79,23 +102,101 @@ copy_certificate_pair() {
   printf '%s\n%s\n' "$cert_target" "$key_target"
 }
 
+xray_release_asset() {
+  case $(uname -m) in
+    x86_64|amd64) printf '%s\n' Xray-linux-64.zip ;;
+    aarch64|arm64) printf '%s\n' Xray-linux-arm64-v8a.zip ;;
+    armv7l|armv7|armhf) printf '%s\n' Xray-linux-arm32-v7a.zip ;;
+    *) die "暂不支持此 Alpine 架构：$(uname -m)" ;;
+  esac
+}
+
+write_openrc_service() {
+  cat >"$OPENRC_SERVICE" <<EOF
+#!/sbin/openrc-run
+name="Xray"
+description="Xray Service managed by xrayctl"
+command="${XRAY_BIN}"
+command_args="run -config ${CONFIG_FILE}"
+command_user="${RUNTIME_USER}:${RUNTIME_GROUP}"
+command_background=true
+pidfile="/run/${SERVICE_NAME}.pid"
+output_log="${LOG_DIR}/openrc.log"
+error_log="${LOG_DIR}/openrc-error.log"
+export XRAY_LOCATION_ASSET="${XRAY_SHARE_DIR}"
+
+depend() {
+  need net
+  after firewall
+}
+
+start_pre() {
+  checkpath --directory --mode 0750 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}"
+  "${XRAY_BIN}" run -test -format json -config "${CONFIG_FILE}"
+  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/access.log"
+  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/error.log"
+  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/openrc.log"
+  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/openrc-error.log"
+}
+EOF
+  chmod 755 "$OPENRC_SERVICE"
+}
+
+install_xray_core_openrc() {
+  local requested=${1-} version asset base archive digest expected actual work
+  install_packages unzip
+  asset=$(xray_release_asset)
+  if [[ -n $requested ]]; then
+    version="v${requested#v}"
+  else
+    version=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      --connect-timeout 15 --max-time 60 "$XRAY_RELEASE_API" | jq -r '.tag_name // empty')
+    [[ $version == v* ]] || die "无法获取 Xray 最新版本。"
+  fi
+  base="${XRAY_RELEASE_BASE}/${version}"
+  work=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-openrc.XXXXXX")
+  archive="${work}/${asset}"
+  digest="${archive}.dgst"
+  info "正在下载 Xray ${version}。"
+  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+    "${base}/${asset}" -o "$archive" || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray 下载失败。"; }
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 60 \
+    "${base}/${asset}.dgst" -o "$digest" || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray 校验文件下载失败。"; }
+  expected=$(awk -F'= ' '$1=="SHA2-256" {print $2; exit}' "$digest")
+  actual=$(sha256sum "$archive" | awk '{print $1}')
+  [[ -n $expected && $actual == "$expected" ]] \
+    || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray SHA-256 校验失败。"; }
+  unzip -q "$archive" -d "$work/unpacked"
+  install -d -m 755 "$(dirname "$XRAY_BIN")" "$XRAY_SHARE_DIR"
+  install -m 755 "$work/unpacked/xray" "$XRAY_BIN"
+  install -m 644 "$work/unpacked/geoip.dat" "${XRAY_SHARE_DIR}/geoip.dat"
+  install -m 644 "$work/unpacked/geosite.dat" "${XRAY_SHARE_DIR}/geosite.dat"
+  find "$work" -mindepth 1 -delete
+  rmdir "$work"
+}
+
 install_or_update_xray() {
   ensure_runtime_dependencies install
   local mode=${1:-install} version=${2:-} installer installed_before=0
   xray_installed && installed_before=1
-  installer=$(temp_file)
-  info "从 XTLS 官方仓库下载安装脚本。"
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
-  chmod 700 "$installer"
-  if [[ -n $version ]]; then TERM="${TERM:-xterm}" bash "$installer" install --version "${version#v}";
-  else TERM="${TERM:-xterm}" bash "$installer" install; fi
-  rm -f "$installer"
+  if [[ $(platform_init_system) == openrc ]]; then
+    install_xray_core_openrc "$version"
+  else
+    installer=$(temp_file)
+    info "从 XTLS 官方仓库下载安装脚本。"
+    curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
+    chmod 700 "$installer"
+    if [[ -n $version ]]; then TERM="${TERM:-xterm}" bash "$installer" install --version "${version#v}";
+    else TERM="${TERM:-xterm}" bash "$installer" install; fi
+    rm -f "$installer"
+  fi
   [[ -x $XRAY_BIN ]] || die "Xray 安装后未找到：$XRAY_BIN"
   if ((installed_before == 0)) || [[ ! -f $CONFIG_FILE ]]; then write_default_config; else ensure_config; fi
   setup_runtime_access
+  [[ $(platform_init_system) != openrc ]] || write_openrc_service
   install_quick_command
   validate_candidate "$CONFIG_FILE"
-  systemctl enable "$SERVICE_NAME" >/dev/null
+  platform_service_enable >/dev/null
   restart_service
   if [[ $mode == upgrade ]]; then
     info "Xray 已升级：$($XRAY_BIN version | sed -n '1p')"
@@ -153,20 +254,21 @@ install_quick_command() {
 show_status() {
   heading "Xray 状态"
   if xray_installed; then "$XRAY_BIN" version | sed -n '1,2p'; else printf 'Xray: 未安装\n'; fi
-  if service_exists; then
-    systemctl --no-pager --full status "$SERVICE_NAME" 2>/dev/null | sed -n '1,12p' || true
-  else printf 'systemd 服务: 未安装\n'; fi
+  if service_exists; then platform_service_status 2>/dev/null | sed -n '1,12p' || true
+  else printf '%s 服务: 未安装\n' "$(platform_init_system 2>/dev/null || printf unknown)"; fi
   [[ -f $CONFIG_FILE ]] && printf '入站数: %s\n配置: %s\n' "$(jq '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?')" "$CONFIG_FILE"
 }
 
 service_action() {
   ensure_runtime_dependencies service
   local action=$1
-  service_exists || die "Xray systemd 服务不存在。"
+  service_exists || die "Xray 服务不存在。"
   case $action in
-    start|stop|restart) systemctl "$action" "$SERVICE_NAME" ;;
-    enable) systemctl enable --now "$SERVICE_NAME" ;;
-    disable) systemctl disable --now "$SERVICE_NAME" ;;
+    start) platform_service_start ;;
+    stop) platform_service_stop ;;
+    restart) platform_service_restart ;;
+    enable) platform_service_enable; platform_service_start ;;
+    disable) platform_service_stop || true; platform_service_disable ;;
     *) die "未知服务操作：$action";;
   esac
   info "服务操作完成：$action"
@@ -175,7 +277,7 @@ service_action() {
 show_logs() {
   local lines=${1:-100}
   [[ $lines =~ ^[0-9]+$ ]] || die "日志行数必须是数字。"
-  journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
+  platform_service_logs "$lines"
 }
 
 _check_bbr_available() {
@@ -280,7 +382,7 @@ system_diagnostics() {
   printf 'IPv4 转发: %s\n' "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || printf unknown)"
   if command_exists timedatectl; then timedatectl show -p NTPSynchronized -p Timezone 2>/dev/null || true; fi
   if command_exists ss; then heading "Xray 监听端口"; ss -lntup 2>/dev/null | grep -E 'xray|State|Netid' || true; fi
-  heading "最近服务日志"; journalctl -u "$SERVICE_NAME" -n 20 --no-pager 2>/dev/null || true
+  heading "最近服务日志"; platform_service_logs 20 2>/dev/null || true
 }
 
 repair_quick_command() {
@@ -356,4 +458,3 @@ show_node_summary() {
   printf '协议: %s  |  端口: %s  |  传输: %s  |  安全: %s  |  监听: %s\n\n' \
     "$protocol" "$port" "$method" "$security" "$listen"
 }
-

@@ -112,11 +112,16 @@ can_remove_certbot_venv() {
 }
 
 _uninstall_disable_timers() {
-  systemctl disable --now xrayctl-certbot-renew.timer >/dev/null 2>&1 || true
-  systemctl stop xrayctl-certbot-renew.service >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/xrayctl-certbot-renew.service /etc/systemd/system/xrayctl-certbot-renew.timer
-  systemctl daemon-reload 2>/dev/null || true
-  meta_resource_remove_existing "renewTimer"; meta_resource_remove_existing "renewService"
+  if [[ $(platform_init_system) == openrc ]]; then
+    if [[ $(_snapshot_meta_resource_get "renewHook") == "$CERT_RENEW_HOOK" ]]; then rm -f "$CERT_RENEW_HOOK"; fi
+    meta_resource_remove_existing "renewHook"
+  else
+    systemctl disable --now xrayctl-certbot-renew.timer >/dev/null 2>&1 || true
+    systemctl stop xrayctl-certbot-renew.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/xrayctl-certbot-renew.service /etc/systemd/system/xrayctl-certbot-renew.timer
+    platform_daemon_reload
+    meta_resource_remove_existing "renewTimer"; meta_resource_remove_existing "renewService"
+  fi
 }
 
 _uninstall_remove_managed_certs() {
@@ -172,16 +177,32 @@ _uninstall_remove_config() {
 }
 
 _uninstall_remove_runtime_group() {
-  if [[ $RUNTIME_GROUP == xrayctl ]]; then
+  local owned_group owned_user
+  owned_group=$(_snapshot_meta_resource_get "runtimeGroupOwned")
+  owned_user=$(_snapshot_meta_resource_get "runtimeUserOwned")
+  if [[ -n $owned_user && $owned_user == "$RUNTIME_USER" ]] && id "$RUNTIME_USER" >/dev/null 2>&1; then
+    if [[ $(platform_init_system) == openrc ]]; then deluser "$RUNTIME_USER" 2>/dev/null || true; fi
+  fi
+  if [[ -n $owned_group && $owned_group == "$RUNTIME_GROUP" ]]; then
+    if [[ $(platform_init_system) == openrc ]]; then
+      grep -qE "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null && delgroup "$RUNTIME_GROUP" 2>/dev/null || true
+    else
+      getent group "$RUNTIME_GROUP" >/dev/null 2>&1 && groupdel "$RUNTIME_GROUP" 2>/dev/null || true
+    fi
+  elif [[ $(platform_init_system) == systemd && $RUNTIME_GROUP == xrayctl ]]; then
     getent group "$RUNTIME_GROUP" >/dev/null 2>&1 && groupdel "$RUNTIME_GROUP" 2>/dev/null || true
   fi
+  meta_resource_remove_existing "runtimeUserOwned"
+  meta_resource_remove_existing "runtimeGroupOwned"
   meta_resource_remove_existing "runtimeGroup"
 }
 
 _uninstall_remove_systemd_overrides() {
-  rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-access.conf" "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
-  rmdir "$SYSTEMD_OVERRIDE_DIR" 2>/dev/null || true
-  systemctl daemon-reload 2>/dev/null || true
+  if [[ $(platform_init_system) == systemd ]]; then
+    rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-access.conf" "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
+    rmdir "$SYSTEMD_OVERRIDE_DIR" 2>/dev/null || true
+    platform_daemon_reload
+  fi
 }
 
 _uninstall_remove_quick_command() {
@@ -196,7 +217,7 @@ _uninstall_remove_backups() {
 }
 
 _uninstall_remove_logs() {
-  safe_remove_dir /var/log/xray /var/log/xray
+  safe_remove_dir "$LOG_DIR" "$LOG_DIR"
 }
 
 _cleanup_legacy_resources() {
@@ -210,17 +231,23 @@ _cleanup_legacy_resources() {
 }
 
 _uninstall_xray_core_fallback() {
-  systemctl disable --now xray.service >/dev/null 2>&1 || true
-  systemctl disable --now xray@.service >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/xray.service /etc/systemd/system/xray@.service
-  rm -rf /etc/systemd/system/xray.service.d 2>/dev/null || true
+  platform_service_stop >/dev/null 2>&1 || true
+  platform_service_disable >/dev/null 2>&1 || true
+  if [[ $(platform_init_system) == openrc ]]; then
+    rm -f "$OPENRC_SERVICE"
+  else
+    systemctl disable --now xray@.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/xray.service /etc/systemd/system/xray@.service
+    rm -rf /etc/systemd/system/xray.service.d 2>/dev/null || true
+  fi
   rm -f /usr/local/bin/xray /usr/local/bin/xray-linux-*
   rm -rf /usr/local/share/xray 2>/dev/null || true
-  systemctl daemon-reload 2>/dev/null || true
+  platform_daemon_reload
 }
 
 _uninstall_xray_core() {
   local installer
+  if [[ $(platform_init_system) == openrc ]]; then _uninstall_xray_core_fallback; return 0; fi
   installer=$(temp_file)
   if curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
     "$OFFICIAL_INSTALLER_URL" -o "$installer" 2>/dev/null; then
@@ -238,6 +265,7 @@ _uninstall_xray_core() {
 
 _uninstall_xray_core_keep_config() {
   local installer
+  if [[ $(platform_init_system) == openrc ]]; then _uninstall_xray_core_fallback; return 0; fi
   installer=$(temp_file)
   if curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
     "$OFFICIAL_INSTALLER_URL" -o "$installer" 2>/dev/null; then
@@ -300,6 +328,8 @@ _scan_xrayctl_residuals() {
     /etc/systemd/system/xray.service
     /etc/systemd/system/xray@.service
     /etc/systemd/system/xray.service.d
+    "$OPENRC_SERVICE"
+    "$CERT_RENEW_HOOK"
     /etc/sysctl.d/99-xrayctl-bbr.conf
     /var/log/xray
   )
@@ -322,7 +352,7 @@ _scan_xrayctl_residuals() {
     ((count+=1))
   done
 
-  if systemctl list-unit-files 2>/dev/null | grep -qE 'xrayctl|xray[.]service'; then
+  if [[ $(platform_init_system) == systemd ]] && systemctl list-unit-files 2>/dev/null | grep -qE 'xrayctl|xray[.]service'; then
     printf '  ✗ 残留: systemd 单元仍存在\n'
     ((count+=1))
   fi
@@ -332,7 +362,7 @@ _scan_xrayctl_residuals() {
     ((count+=1))
   fi
 
-  if systemctl is-active xray.service >/dev/null 2>&1; then
+  if service_is_active; then
     printf '  ✗ 残留: xray.service 仍在运行\n'
     ((count+=1))
   fi
@@ -479,4 +509,3 @@ uninstall_xray() {
     *) die "无效卸载级别：$level";;
   esac
 }
-

@@ -186,12 +186,12 @@ toggle_service_running() {
 
 toggle_service_startup() {
   ensure_runtime_dependencies service
-  service_exists || die "Xray systemd 服务不存在。"
+  service_exists || die "Xray 服务不存在。"
   if service_is_enabled; then
-    systemctl disable "$SERVICE_NAME" >/dev/null
+    platform_service_disable >/dev/null
     info "开机自启已关闭；当前服务运行状态未改变。"
   else
-    systemctl enable "$SERVICE_NAME" >/dev/null
+    platform_service_enable >/dev/null
     info "开机自启已开启。"
   fi
 }

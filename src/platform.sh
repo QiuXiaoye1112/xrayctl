@@ -5,6 +5,125 @@ validate_ipv4() {
     && ((10#$a <= 255 && 10#$b <= 255 && 10#$c <= 255 && 10#$d <= 255))
 }
 
+is_systemd() {
+  command_exists systemctl && [[ -d /run/systemd/system || ${XRAYCTL_TESTING:-0} == 1 ]]
+}
+
+is_alpine() {
+  [[ -r /etc/os-release ]] && grep -q '^ID=alpine$' /etc/os-release
+}
+
+is_openrc() {
+  command_exists rc-service && command_exists rc-update
+}
+
+platform_init_system() {
+  if [[ -n ${XRAYCTL_PLATFORM:-} ]]; then
+    case $XRAYCTL_PLATFORM in systemd|openrc) printf '%s\n' "$XRAYCTL_PLATFORM"; return 0;; esac
+    return 1
+  fi
+  if is_openrc && is_alpine; then printf '%s\n' openrc
+  elif is_systemd; then printf '%s\n' systemd
+  else return 1
+  fi
+}
+
+platform_require_supported() {
+  is_linux || die "仅支持 Linux；当前系统是 $(uname -s)。"
+  platform_init_system >/dev/null || die "需要 systemd，或 Alpine Linux + OpenRC。"
+}
+
+platform_service_exists() {
+  case $(platform_init_system) in
+    systemd) systemctl list-unit-files "$SYSTEMD_UNIT" --no-legend 2>/dev/null | grep -q "$SYSTEMD_UNIT" ;;
+    openrc) [[ -x $OPENRC_SERVICE ]] ;;
+  esac
+}
+
+platform_service_is_active() {
+  case $(platform_init_system) in
+    systemd) systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null ;;
+    openrc) platform_service_exists && rc-service "$SERVICE_NAME" status >/dev/null 2>&1 ;;
+  esac
+}
+
+platform_service_is_enabled() {
+  case $(platform_init_system) in
+    systemd) systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null ;;
+    openrc) rc-update show default 2>/dev/null | grep -Eq "[[:space:]]${SERVICE_NAME}([[:space:]]|$)" ;;
+  esac
+}
+
+platform_service_start() {
+  case $(platform_init_system) in
+    systemd) systemctl start "$SERVICE_NAME" ;;
+    openrc) rc-service "$SERVICE_NAME" start ;;
+  esac
+}
+
+platform_service_stop() {
+  case $(platform_init_system) in
+    systemd) systemctl stop "$SERVICE_NAME" ;;
+    openrc) rc-service "$SERVICE_NAME" stop ;;
+  esac
+}
+
+platform_service_restart() {
+  case $(platform_init_system) in
+    systemd) systemctl daemon-reload; systemctl restart "$SERVICE_NAME" ;;
+    openrc)
+      if platform_service_is_active; then
+        rc-service "$SERVICE_NAME" restart
+      else
+        rc-service "$SERVICE_NAME" zap >/dev/null 2>&1 || true
+        rm -f "/run/${SERVICE_NAME}.pid"
+        rc-service "$SERVICE_NAME" start
+      fi
+      ;;
+  esac
+}
+
+platform_service_enable() {
+  case $(platform_init_system) in
+    systemd) systemctl enable "$SERVICE_NAME" ;;
+    openrc) rc-update add "$SERVICE_NAME" default ;;
+  esac
+}
+
+platform_service_disable() {
+  case $(platform_init_system) in
+    systemd) systemctl disable "$SERVICE_NAME" ;;
+    openrc) rc-update del "$SERVICE_NAME" default ;;
+  esac
+}
+
+platform_service_status() {
+  case $(platform_init_system) in
+    systemd) systemctl --no-pager --full status "$SERVICE_NAME" ;;
+    openrc) rc-service "$SERVICE_NAME" status ;;
+  esac
+}
+
+platform_service_logs() {
+  local lines=$1
+  case $(platform_init_system) in
+    systemd) journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager ;;
+    openrc) tail -n "$lines" "${LOG_DIR}/openrc-error.log" "${LOG_DIR}/openrc.log" ;;
+  esac
+}
+
+platform_service_hook_command() {
+  local action=$1
+  case $(platform_init_system) in
+    systemd) printf 'systemctl %s %s\n' "$action" "$SERVICE_NAME" ;;
+    openrc) printf 'rc-service %s %s\n' "$SERVICE_NAME" "$action" ;;
+  esac
+}
+
+platform_daemon_reload() {
+  [[ $(platform_init_system) == systemd ]] && systemctl daemon-reload || true
+}
+
 validate_ip_literal() {
   validate_ipv4 "$1" || [[ $1 == *:* && $1 =~ ^[0-9A-Fa-f:]+$ && ${#1} -le 45 ]]
 }
@@ -83,13 +202,11 @@ detect_local_ips() {
   fi
 }
 
-ensure_linux_systemd() {
-  is_linux || die "仅支持 Linux；当前系统是 $(uname -s)。"
-  is_systemd || die "需要使用 systemd 的 Linux 发行版。"
-}
+ensure_linux_systemd() { platform_require_supported; }
 
 pkg_manager() {
   if command_exists apt-get; then printf 'apt';
+  elif command_exists apk; then printf 'apk';
   elif command_exists dnf; then printf 'dnf';
   elif command_exists yum; then printf 'yum';
   elif command_exists pacman; then printf 'pacman';
@@ -188,6 +305,7 @@ install_packages() {
     yum) yum install -y "${missing[@]}" ;;
     pacman) pacman -Sy --noconfirm "${missing[@]}" ;;
     zypper) zypper --non-interactive install "${missing[@]}" ;;
+    apk) apk add --no-cache "${missing[@]}" ;;
   esac
 }
 
@@ -205,20 +323,23 @@ acquire_lock() {
 
 ensure_runtime_dependencies() {
   require_root "$@"
-  ensure_linux_systemd
+  platform_require_supported
   install_packages curl jq openssl
   acquire_lock
 }
 
 ensure_system_context() {
   require_root "$@"
-  ensure_linux_systemd
+  platform_require_supported
   acquire_lock
 }
 
 run_bounded() {
   local seconds=$1; shift
-  if command_exists timeout; then timeout --foreground "${seconds}s" "$@"; else "$@"; fi
+  if command_exists timeout; then
+    if timeout --help 2>&1 | grep -q -- '--foreground'; then timeout --foreground "${seconds}s" "$@"
+    else timeout "${seconds}s" "$@"; fi
+  else "$@"; fi
 }
 
 has_net_admin() {
@@ -247,4 +368,3 @@ has_net_admin() {
 #   Layer 2: *_raw helpers     — direct jq on $META_FILE, NEVER call init_meta
 #   Layer 3: ensure_meta       — init_meta_base + run_metadata_migrations
 # ============================================================
-

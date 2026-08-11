@@ -213,7 +213,7 @@ meta_resource_remove() {
 
 write_default_config() {
   local tmp
-  mkdir -p "$CONFIG_DIR" /var/log/xray
+  mkdir -p "$CONFIG_DIR" "$LOG_DIR"
   cat >"$CONFIG_FILE" <<'JSON'
 {
   "log": {
@@ -235,6 +235,14 @@ write_default_config() {
   }
 }
 JSON
+  if [[ $LOG_DIR != /var/log/xray ]]; then
+    tmp=$(temp_file)
+    jq --arg log_dir "$LOG_DIR" \
+      '.log.access=($log_dir+"/access.log") | .log.error=($log_dir+"/error.log")' \
+      "$CONFIG_FILE" >"$tmp"
+    install -m 640 "$tmp" "$CONFIG_FILE"
+    rm -f "$tmp"
+  fi
   chmod 640 "$CONFIG_FILE"
   init_meta
 }

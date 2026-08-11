@@ -138,7 +138,16 @@ certbot_cmd() {
 setup_certbot_renewal_timer() {
   local quick_command="${QUICK_COMMAND:-/usr/local/sbin/xrayctl}"
   [[ -x $quick_command ]] || install_quick_command
-  cat >/etc/systemd/system/xrayctl-certbot-renew.service <<EOF
+  if [[ $(platform_init_system) == openrc ]]; then
+    install -d -m 755 "$(dirname "$CERT_RENEW_HOOK")"
+    cat >"$CERT_RENEW_HOOK" <<EOF
+#!/bin/sh
+${quick_command} cert renew-auto >/dev/null 2>&1
+EOF
+    chmod 755 "$CERT_RENEW_HOOK"
+    meta_resource_register "renewHook" "$CERT_RENEW_HOOK"
+  else
+    cat >/etc/systemd/system/xrayctl-certbot-renew.service <<EOF
 [Unit]
 Description=Renew certificates managed by xrayctl
 
@@ -158,10 +167,11 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-  systemctl daemon-reload
-  systemctl enable --now xrayctl-certbot-renew.timer >/dev/null
-  meta_resource_register "renewTimer" "xrayctl-certbot-renew.timer"
-  meta_resource_register "renewService" "xrayctl-certbot-renew.service"
+    systemctl daemon-reload
+    systemctl enable --now xrayctl-certbot-renew.timer >/dev/null
+    meta_resource_register "renewTimer" "xrayctl-certbot-renew.timer"
+    meta_resource_register "renewService" "xrayctl-certbot-renew.service"
+  fi
 }
 
 replace_certificate_pair() {
@@ -427,13 +437,13 @@ issue_domain_http() {
       certbot_cmd "${certbot_args[@]}"
       ;;
     xray)
-      service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
+      service_is_active && { was_active=1; platform_service_stop; CERT_STOPPED_SERVICE=1; }
       if ! certbot_cmd "${certbot_args[@]}"; then
-        ((was_active)) && { systemctl start "$SERVICE_NAME" || true; CERT_STOPPED_SERVICE=0; }
+        ((was_active)) && { platform_service_start || true; CERT_STOPPED_SERVICE=0; }
         return 1
       fi
       if ((was_active)); then
-        systemctl start "$SERVICE_NAME"; CERT_STOPPED_SERVICE=0
+        platform_service_start; CERT_STOPPED_SERVICE=0
       fi
       ;;
     nginx)
@@ -474,13 +484,13 @@ issue_ip_certificate() {
   case $owner in
     free) certbot_cmd "${certbot_args[@]}";;
     xray)
-      service_is_active && { was_active=1; systemctl stop "$SERVICE_NAME"; CERT_STOPPED_SERVICE=1; }
+      service_is_active && { was_active=1; platform_service_stop; CERT_STOPPED_SERVICE=1; }
       if ! certbot_cmd "${certbot_args[@]}"; then
-        ((was_active)) && { systemctl start "$SERVICE_NAME" || true; CERT_STOPPED_SERVICE=0; }
+        ((was_active)) && { platform_service_start || true; CERT_STOPPED_SERVICE=0; }
         return 1
       fi
       if ((was_active)); then
-        systemctl start "$SERVICE_NAME"; CERT_STOPPED_SERVICE=0
+        platform_service_start; CERT_STOPPED_SERVICE=0
       fi
       ;;
     *) warn "80 端口被占用，IP 证书只能使用 HTTP 验证。"; return 1;;
@@ -728,8 +738,8 @@ renew_one_certificate() {
   local certbot_args=(renew --cert-name "$cert_name" --quiet)
   if [[ $validation == http-standalone ]]; then
     owner=$(detect_port80_owner)
-    [[ $owner == xray ]] && certbot_args+=(--pre-hook "systemctl stop ${SERVICE_NAME}" \
-      --post-hook "systemctl start ${SERVICE_NAME}")
+    [[ $owner == xray ]] && certbot_args+=(--pre-hook "$(platform_service_hook_command stop)" \
+      --post-hook "$(platform_service_hook_command start)")
   fi
 
   # --- Record fingerprint before ---
@@ -934,4 +944,3 @@ manage_inbound_certificate_menu() {
     esac
   done
 }
-

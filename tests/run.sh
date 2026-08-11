@@ -8,6 +8,7 @@ readonly REPO_ROOT=$(cd "${TEST_DIR}/.." && pwd)
 tests=(
   "tests/architecture/test_architecture.sh"
   "tests/unit/test_validators.sh"
+  "tests/unit/test_platform.sh"
   "tests/unit/test_protocol_builders.sh"
   "tests/integration/test_state.sh"
   "tests/smoke/test_cli.sh"
