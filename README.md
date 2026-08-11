@@ -2,7 +2,7 @@
 
 `xrayctl` 是一个同时支持 systemd 与 Alpine/OpenRC 的 Xray 管理工具。开发源码按领域保存在 `src/`，发布时构建为单文件 `dist/xrayctl`。交互界面按“先看对象、再直接操作”设计；每次生产配置变更都会先创建 candidate，执行 JSON/Xray 校验，再联合提交 config 与 metadata，服务重启失败时一起回滚。
 
-当前版本：`1.2.31`
+当前版本：`1.2.32`
 
 > Alpine Linux 使用兼容 bootstrap，但安装的是同一个 `dist/xrayctl`。平台差异由 `platform.sh` 统一处理。参见 [Alpine/OpenRC 安装说明](alpine/README.md)。
 
@@ -79,7 +79,7 @@ Xray Linux 管理脚本
 
 xrayctl 可以与 sbctl/sing-box 同时安装。两者使用独立的命令、服务、配置、metadata、备份和 Certbot 环境。新增 Xray 入站时会自动生成一个避开现有 Xray/sing-box 端口、sbctl Hysteria2 UDP 跳跃范围及系统监听端口的默认值；手动创建或修改时也会拒绝冲突端口。
 
-BBR 是主机全局状态。若检测到 `/etc/sysctl.d/99-sbctl-bbr.conf`，xrayctl 只显示 sbctl 为管理方，不会创建重复配置，也不会关闭 sbctl 管理的 BBR。两套证书环境保持隔离，但 Certbot 操作会通过 `/run/lock/xrayctl-sbctl-certbot.lock` 串行执行，避免同时操作 80 端口/nginx；同一个域名仍建议只交给一个工具自动签发和续期，避免重复申请。
+BBR 是主机全局开关，xrayctl 与 sbctl 都读取内核当前状态，也都可以开启或关闭。关闭时会清理两者的已知持久化文件，避免重启后被另一份配置重新开启；第三方 sysctl 配置不会被修改。两套证书环境保持隔离，但 Certbot 操作会通过 `/run/lock/xrayctl-sbctl-certbot.lock` 串行执行，避免同时操作 80 端口/nginx；同一个域名仍建议只交给一个工具自动签发和续期，避免重复申请。
 
 ## 快速开始
 

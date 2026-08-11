@@ -216,11 +216,7 @@ service_menu() {
 
 bbr_state_summary() {
   if [[ -r /proc/sys/net/ipv4/tcp_congestion_control ]]; then
-    if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) == bbr ]]; then
-      printf '已启用（%s 管理）' "$(bbr_manager)"
-    else
-      printf '未启用'
-    fi
+    if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) == bbr ]]; then printf '已启用'; else printf '未启用'; fi
   else
     printf '不可用'
   fi

@@ -66,14 +66,14 @@ assert_eq 25002 "$selected" "prompt did not skip peer-owned ports"
 
 touch "$SBCTL_BBR_CONFIG"
 assert_eq sbctl "$(bbr_manager)" "sbctl BBR ownership was not detected"
-if _disable_bbr >/dev/null 2>&1; then fail 'xrayctl disabled peer-managed BBR'; fi
-_enable_bbr >/dev/null
-[[ ! -e $BBR_CONFIG ]] || fail 'xrayctl created a duplicate BBR config'
-
 touch "$BBR_CONFIG"
 assert_eq both "$(bbr_manager)" "duplicate BBR ownership was not detected"
-rm -f "$SBCTL_BBR_CONFIG"
-assert_eq xrayctl "$(bbr_manager)" "xrayctl BBR ownership was not detected"
+external_bbr="$TEST_ROOT/third-party-bbr.conf"
+touch "$external_bbr"
+bbr_remove_known_persistence
+[[ ! -e $BBR_CONFIG && ! -e $SBCTL_BBR_CONFIG ]] || fail 'known BBR persistence was not removed'
+[[ -e $external_bbr ]] || fail 'unrelated BBR persistence was removed'
+if declare -f _disable_bbr | grep -Fq '拒绝关闭'; then fail 'global BBR disable is still ownership-gated'; fi
 
 mkdir -p "$CERTBOT_VENV/bin"
 cat >"$CERTBOT_BIN" <<'SH'
