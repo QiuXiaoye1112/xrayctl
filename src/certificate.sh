@@ -129,7 +129,7 @@ ensure_certbot_environment() {
 
 _certbot_shared_lock_acquire() {
   local waited=0 owner="" lock=$CERTBOT_SHARED_LOCK parent
-  [[ ${lock##*/} == xrayctl-sbctl-certbot.lock ]] || { error "Certbot 共享锁路径不安全：${lock}"; return 1; }
+  [[ ${lock##*/} == certbot.lock ]] || { error "Certbot 共享锁路径不安全：${lock}"; return 1; }
   [[ $CERTBOT_SHARED_LOCK_WAIT =~ ^[0-9]+$ ]] || { error "Certbot 共享锁等待时间无效。"; return 1; }
   parent=${lock%/*}; [[ $parent == "$lock" ]] && parent=.
   mkdir -p "$parent" || { warn "无法创建 Certbot 共享锁目录：${parent}"; return 1; }

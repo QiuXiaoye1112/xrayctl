@@ -15,7 +15,7 @@ export XRAYCTL_SBCTL_META_FILE="${TEST_ROOT}/sbctl-meta.json"
 export XRAYCTL_BBR_CONFIG="${TEST_ROOT}/99-xrayctl-bbr.conf"
 export XRAYCTL_SBCTL_BBR_CONFIG="${TEST_ROOT}/99-sbctl-bbr.conf"
 export XRAYCTL_CERTBOT_VENV="${TEST_ROOT}/certbot-venv"
-export XRAYCTL_CERTBOT_SHARED_LOCK="${TEST_ROOT}/xrayctl-sbctl-certbot.lock"
+export XRAYCTL_CERTBOT_SHARED_LOCK="${TEST_ROOT}/certbot.lock"
 export XRAYCTL_CERTBOT_SHARED_LOCK_WAIT=0
 
 mkdir -p "$XRAYCTL_CONFIG_DIR" "$(dirname "$XRAYCTL_SBCTL_CONFIG_FILE")"

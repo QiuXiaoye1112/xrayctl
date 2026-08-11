@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.32"
+readonly XRAYCTL_VERSION="1.2.33"
 readonly XRAYCTL_BUILD_COMMIT="${XRAYCTL_BUILD_COMMIT:-development}"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -47,8 +47,8 @@ CERTBOT_BIN="${CERTBOT_VENV}/bin/certbot"
 CERTBOT_CONFIG_DIR="${XRAYCTL_CERTBOT_CONFIG_DIR:-/var/lib/xrayctl/letsencrypt}"
 CERTBOT_WORK_DIR="${XRAYCTL_CERTBOT_WORK_DIR:-/var/lib/xrayctl/certbot-work}"
 CERTBOT_LOGS_DIR="${XRAYCTL_CERTBOT_LOGS_DIR:-/var/log/xrayctl/certbot}"
-_default_certbot_shared_lock=/run/lock/xrayctl-sbctl-certbot.lock
-if [[ ${XRAYCTL_TESTING:-0} == 1 ]]; then _default_certbot_shared_lock="${LOCK_FILE%/*}/xrayctl-sbctl-certbot.lock"; fi
+_default_certbot_shared_lock=/run/lock/certbot.lock
+if [[ ${XRAYCTL_TESTING:-0} == 1 ]]; then _default_certbot_shared_lock="${LOCK_FILE%/*}/certbot.lock"; fi
 CERTBOT_SHARED_LOCK="${XRAYCTL_CERTBOT_SHARED_LOCK:-$_default_certbot_shared_lock}"
 unset _default_certbot_shared_lock
 CERTBOT_SHARED_LOCK_WAIT="${XRAYCTL_CERTBOT_SHARED_LOCK_WAIT:-300}"
