@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.29"
-readonly XRAYCTL_BUILD_COMMIT="1d3884afefa5"
+readonly XRAYCTL_BUILD_COMMIT="7d41dd6112c8"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -22,6 +22,8 @@ LOG_DIR="${XRAYCTL_LOG_DIR:-/var/log/xray}"
 XRAY_SHARE_DIR="${XRAYCTL_SHARE_DIR:-/usr/local/share/xray}"
 export XRAY_LOCATION_ASSET="$XRAY_SHARE_DIR"
 BACKUP_DIR="${XRAYCTL_BACKUP_DIR:-/var/backups/xrayctl}"
+BACKUP_OWNERSHIP_MARKER="${BACKUP_DIR}/.xrayctl-owned"
+readonly BACKUP_OWNERSHIP_MAGIC="xrayctl-backup-directory-v1"
 QUICK_COMMAND="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"
 QUICK_SYMLINK="${XRAYCTL_SYMLINK_PATH:-/usr/local/bin/xrayctl}"
 SERVICE_NAME="${XRAYCTL_SERVICE_NAME:-xray}"
@@ -874,9 +876,31 @@ validate_candidate() {
 
 timestamp() { date '+%Y%m%d-%H%M%S'; }
 
+ensure_backup_dir() {
+  local marker_tmp
+  [[ ! -L $BACKUP_DIR ]] || { error "备份目录不能是符号链接：$BACKUP_DIR"; return 1; }
+  if [[ -e $BACKUP_DIR && ! -d $BACKUP_DIR ]]; then
+    error "备份路径不是目录：$BACKUP_DIR"
+    return 1
+  fi
+  install -d -m 700 "$BACKUP_DIR" || return 1
+  if [[ -e $BACKUP_OWNERSHIP_MARKER ]]; then
+    [[ -f $BACKUP_OWNERSHIP_MARKER && ! -L $BACKUP_OWNERSHIP_MARKER ]] \
+      || { error "备份目录 ownership marker 不安全：$BACKUP_OWNERSHIP_MARKER"; return 1; }
+    [[ $(cat "$BACKUP_OWNERSHIP_MARKER") == "$BACKUP_OWNERSHIP_MAGIC" ]] \
+      || { error "备份目录 ownership marker 无效：$BACKUP_OWNERSHIP_MARKER"; return 1; }
+  else
+    marker_tmp=$(temp_file)
+    printf '%s\n' "$BACKUP_OWNERSHIP_MAGIC" >"$marker_tmp"
+    install -m 600 "$marker_tmp" "$BACKUP_OWNERSHIP_MARKER" || { rm -f "$marker_tmp"; return 1; }
+    rm -f "$marker_tmp"
+  fi
+  meta_resource_register "backupDir" "$BACKUP_DIR"
+}
+
 backup_config_quiet() {
   [[ -f $CONFIG_FILE ]] || return 0
-  mkdir -p "$BACKUP_DIR"
+  ensure_backup_dir || return 1
   local target
   target="${BACKUP_DIR}/config-$(timestamp).json"
   cp -a "$CONFIG_FILE" "$target"
@@ -965,6 +989,18 @@ state_commit() {
 
 apply_candidate() { state_commit "$1"; }
 
+state_apply_candidate_file() {
+  local candidate=$1 operation=$2 rc
+  shift 2
+  if "$operation" "$candidate" "$@"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  rm -f "$candidate"
+  return "$rc"
+}
+
 temp_file() { mktemp "${TMPDIR:-/tmp}/xrayctl.XXXXXX"; }
 
 _state_build_inbound_meta_set() {
@@ -1006,8 +1042,12 @@ edit_config() {
   local editor=${EDITOR:-vi} tmp
   tmp=$(temp_file); cp "$CONFIG_FILE" "$tmp"
   "$editor" "$tmp"
-  if cmp -s "$tmp" "$CONFIG_FILE"; then info "配置未更改。"; else apply_candidate "$tmp"; fi
-  rm -f "$tmp"
+  if cmp -s "$tmp" "$CONFIG_FILE"; then
+    rm -f "$tmp"
+    info "配置未更改。"
+  else
+    state_apply_candidate_file "$tmp" apply_candidate
+  fi
 }
 
 check_config() {
@@ -1019,13 +1059,13 @@ backup_all() {
   require_root backup; ensure_config
   local target=${1:-${BACKUP_DIR}/xrayctl-$(timestamp).tar.gz}
   local paths=("${CONFIG_FILE#/}")
-  mkdir -p "$BACKUP_DIR" "$(dirname "$target")"
+  ensure_backup_dir
+  mkdir -p "$(dirname "$target")"
   [[ ! -f $META_FILE ]] || paths+=("${META_FILE#/}")
   [[ ! -d $CERT_DIR ]] || paths+=("${CERT_DIR#/}")
   tar -czf "$target" -C / "${paths[@]}" 2>/dev/null || { rm -f "$target"; die "备份失败。"; }
   chmod 600 "$target"
   info "备份已创建：$target"
-  meta_resource_register "backupDir" "$BACKUP_DIR"
   info "提示：备份包含 Xray 配置、metadata 和证书副本，不含 Certbot 账户/lineage 数据。"
 }
 
@@ -1524,10 +1564,8 @@ update_tls_inbound_certificate() {
         certificates:[{certificateFile:$cert,keyFile:$key}]
       }
     )' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then
-    info "证书已更新：${tag}"
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "证书已更新：${tag}"
 }
 
 # ============================================================
@@ -2388,12 +2426,10 @@ add_inbound() {
   tag=$(jq -r '.tag' <<<"$inbound")
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
-  if state_commit_inbound_set "$tmp" "$tag" "$host"; then
-    heading "入站已创建"
-    show_inbound "$tag"
-    print_links "$tag" "" || true
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  heading "入站已创建"
+  show_inbound "$tag"
+  print_links "$tag" "" || true
 }
 
 list_inbounds() {
@@ -2475,10 +2511,8 @@ rename_inbound() {
       else . end |
       if (.ruleTag // "")==("xrayctl-outbound:"+$old) then .ruleTag=("xrayctl-outbound:"+$new) else . end
     ))' "$CONFIG_FILE" >"$tmp"
-  if state_commit_inbound_rename "$tmp" "$old_tag" "$new_tag"; then
-    info "入站已重命名：${old_tag} → ${new_tag}。"
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_rename "$old_tag" "$new_tag" || return
+  info "入站已重命名：${old_tag} → ${new_tag}。"
 }
 
 modify_inbound_basic() {
@@ -2494,10 +2528,8 @@ modify_inbound_basic() {
   tmp=$(temp_file)
   jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
     '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
-  if state_commit_inbound_set "$tmp" "$tag" "$host"; then
-    current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
 }
 
 modify_inbound_transport() {
@@ -2520,10 +2552,8 @@ modify_inbound_transport() {
         if $method=="raw" and $security!="none" then .flow="xtls-rprx-vision" else del(.flow) end
       )
     else . end' "$CONFIG_FILE" >"$tmp"
-  if state_commit_inbound_set "$tmp" "$tag" "$(public_host_for_tag "$tag")"; then
-    info "传输已更新，请重新导出客户端分享链接。"
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" || return
+  info "传输已更新，请重新导出客户端分享链接。"
 }
 
 delete_inbound() {
@@ -2550,10 +2580,8 @@ delete_inbound() {
         else true end
       )
     ]' "$CONFIG_FILE" >"$tmp"
-  if state_commit_inbound_delete "$tmp" "$tag"; then
-    info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
-  fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_delete "$tag" || return
+  info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
 }
 
 http_inbound_has_auth() {
@@ -2668,8 +2696,9 @@ add_client() {
       ) |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else jq --arg tag "$tag" --argjson user "$user" '(.inbounds[]|select(.tag==$tag)|.settings.clients) += [$user]' "$CONFIG_FILE" >"$tmp"; fi
-  if apply_candidate "$tmp"; then info "用户 ${label} 已添加。"; print_links "$tag" "$label" || true; fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "用户 ${label} 已添加。"
+  print_links "$tag" "$label" || true
 }
 
 delete_client() {
@@ -2710,7 +2739,7 @@ delete_client() {
     ((count > 0)) || die "找不到用户：$label"
     jq --arg tag "$tag" --arg client_label "$label" '(.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(select(.email!=$client_label))' "$CONFIG_FILE" >"$tmp"
   fi
-  apply_candidate "$tmp"; rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate
 }
 
 rotate_client_credential() {
@@ -2739,7 +2768,7 @@ rotate_client_credential() {
         del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp" ;;
     *) die "不支持此协议。";;
   esac
-  apply_candidate "$tmp"; rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
   info "新凭据：$value"
 }
 
@@ -2772,7 +2801,7 @@ rename_client() {
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
     jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$old)|.email)=$new' "$CONFIG_FILE" >"$tmp"
   fi
-  apply_candidate "$tmp"; rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
   info "用户已重命名：${old_label} -> ${new_label}"
 }
 
@@ -2945,13 +2974,11 @@ _ensure_freedom_outbound() {
   jq --arg tag "$tag" --arg ip "$ip" \
     '.outbounds += [{tag:$tag,protocol:"freedom",sendThrough:$ip,settings:{domainStrategy:"UseIP"}}]' \
     "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp" >&2; then
+  if state_apply_candidate_file "$tmp" apply_candidate >&2; then
     printf '%s' "$tag"
   else
-    rm -f "$tmp"
     return 1
   fi
-  rm -f "$tmp"
 }
 
 outbound_exists() { jq -e --arg tag "$1" '.outbounds[]?|select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
@@ -3044,8 +3071,8 @@ add_outbound() {
     '{tag:$tag,protocol:$protocol,settings:$settings}')
   tmp=$(temp_file)
   jq --argjson outbound "$outbound" '.outbounds += [$outbound]' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then info "出站 ${tag} 已添加。"; fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "出站 ${tag} 已添加。"
 }
 
 select_outbound() {
@@ -3120,8 +3147,8 @@ assign_outbound() {
       [{type:"field",inboundTag:[$inbound],outboundTag:$outbound,ruleTag:$ruleTag}] +
       [$rules[] | select((.outboundTag // "") != "blocked")]
     )' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then info "入站 ${inbound} 已使用出站 ${outbound}。"; fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "入站 ${inbound} 已使用出站 ${outbound}。"
 }
 
 delete_outbound() {
@@ -3136,8 +3163,8 @@ delete_outbound() {
   jq --arg tag "$tag" '
     .outbounds |= map(select(.tag!=$tag)) |
     .routing.rules=((.routing.rules // []) | map(select(.outboundTag!=$tag)))' "$CONFIG_FILE" >"$tmp"
-  if apply_candidate "$tmp"; then info "出站 ${tag} 已删除。"; fi
-  rm -f "$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "出站 ${tag} 已删除。"
 }
 
 # --- src/service.sh ---
@@ -3296,10 +3323,34 @@ install_xray_core_openrc() {
   rmdir "$work"
 }
 
+_service_snapshot_existing_config() {
+  local __var=$1 snapshot=""
+  if [[ -f $CONFIG_FILE ]]; then
+    validate_candidate "$CONFIG_FILE" || return 1
+    snapshot=$(temp_file)
+    cp -p "$CONFIG_FILE" "$snapshot" || { rm -f "$snapshot"; return 1; }
+  fi
+  printf -v "$__var" '%s' "$snapshot"
+}
+
+_service_restore_or_initialize_config() {
+  local preserved_config=${1-}
+  if [[ -n $preserved_config ]]; then
+    [[ -f $preserved_config ]] || { error "安装前配置快照丢失，拒绝覆盖现有配置。"; return 1; }
+    validate_candidate "$preserved_config" || { rm -f "$preserved_config"; return 1; }
+    install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR"
+    install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$preserved_config" "$CONFIG_FILE"
+    rm -f "$preserved_config"
+    ensure_config
+  else
+    write_default_config
+  fi
+}
+
 install_or_update_xray() {
   ensure_runtime_dependencies install
-  local mode=${1:-install} version=${2:-} installer installed_before=0
-  xray_installed && installed_before=1
+  local mode=${1:-install} version=${2:-} installer preserved_config=""
+  _service_snapshot_existing_config preserved_config
   if [[ $(platform_init_system) == openrc ]]; then
     install_xray_core_openrc "$version"
   else
@@ -3311,8 +3362,8 @@ install_or_update_xray() {
     else TERM="${TERM:-xterm}" bash "$installer" install; fi
     rm -f "$installer"
   fi
-  [[ -x $XRAY_BIN ]] || die "Xray 安装后未找到：$XRAY_BIN"
-  if ((installed_before == 0)) || [[ ! -f $CONFIG_FILE ]]; then write_default_config; else ensure_config; fi
+  [[ -x $XRAY_BIN ]] || { rm -f "$preserved_config"; die "Xray 安装后未找到：$XRAY_BIN"; }
+  _service_restore_or_initialize_config "$preserved_config"
   setup_runtime_access
   [[ $(platform_init_system) != openrc ]] || write_openrc_service
   install_quick_command
@@ -3772,8 +3823,22 @@ _uninstall_remove_quick_command() {
   hash -r 2>/dev/null || true
 }
 
+_backup_dir_has_ownership_marker() {
+  [[ -d $BACKUP_DIR && ! -L $BACKUP_DIR ]] || return 1
+  [[ -f $BACKUP_OWNERSHIP_MARKER && ! -L $BACKUP_OWNERSHIP_MARKER ]] || return 1
+  [[ $(cat "$BACKUP_OWNERSHIP_MARKER" 2>/dev/null) == "$BACKUP_OWNERSHIP_MAGIC" ]]
+}
+
 _uninstall_remove_backups() {
-  safe_remove_managed_dir "backupDir" "$BACKUP_DIR"
+  local recorded
+  [[ -e $BACKUP_DIR ]] || return 0
+  recorded=$(_snapshot_meta_resource_get "backupDir")
+  if [[ $recorded == "$BACKUP_DIR" ]] || _backup_dir_has_ownership_marker; then
+    safe_remove_dir "$BACKUP_DIR" "$BACKUP_DIR"
+  else
+    warn "备份目录缺少有效资产登记或 ownership marker，拒绝删除：$BACKUP_DIR"
+    return 1
+  fi
 }
 
 _uninstall_remove_logs() {
@@ -3870,7 +3935,7 @@ _uninstall_remove_owned_jq() {
 }
 
 _scan_xrayctl_residuals() {
-  local __count_var=${1:-} count=0
+  local __count_var=${1:-} scan_backups=${2:-1} count=0
   local paths=(
     "$XRAY_BIN"
     /usr/local/bin/xray-linux-*
@@ -3882,7 +3947,6 @@ _scan_xrayctl_residuals() {
     "$CERTBOT_CONFIG_DIR"
     "$CERTBOT_WORK_DIR"
     "$CERTBOT_LOGS_DIR"
-    "$BACKUP_DIR"
     /etc/systemd/system/xrayctl-certbot-renew.timer
     /etc/systemd/system/xrayctl-certbot-renew.service
     /etc/systemd/system/xray.service
@@ -3893,6 +3957,7 @@ _scan_xrayctl_residuals() {
     /etc/sysctl.d/99-xrayctl-bbr.conf
     /var/log/xray
   )
+  ((scan_backups == 0)) || paths+=("$BACKUP_DIR")
 
   for p in "${paths[@]}"; do
     if compgen -G "$p" >/dev/null 2>&1 || [[ -e $p ]]; then
@@ -4029,7 +4094,7 @@ _xrayctl_uninstall_level_1() {
   _uninstall_remove_config            || ((step_failures+=1))
   _uninstall_remove_logs              || ((step_failures+=1))
 
-  _scan_xrayctl_residuals residual_count
+  _scan_xrayctl_residuals residual_count 0
 
   if ((step_failures > 0)); then
     warn "完全卸载有 ${step_failures} 个清理步骤失败，请结合残留检查确认。"
