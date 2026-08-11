@@ -51,4 +51,12 @@ run_fixture trojan 3
 run_fixture socks 4
 run_fixture http 5
 
+assert_eq $'vless\nvmess\ntrojan\nsocks\nhttp' "$(protocol_list)" "protocol registry changed"
+assert_success protocol_supports_stream vless
+assert_failure protocol_supports_stream socks
+assert_success protocol_supports_reality trojan
+assert_failure protocol_supports_reality vmess
+assert_eq id "$(protocol_client_credential_field vless)" "VLESS credential capability changed"
+assert_eq pass "$(protocol_client_credential_field http)" "HTTP credential capability changed"
+
 pass "protocol builders match recorded JSON fixtures"
