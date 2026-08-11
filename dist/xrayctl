@@ -5,8 +5,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.33"
-readonly XRAYCTL_BUILD_COMMIT="38fcbd720d10"
+readonly XRAYCTL_VERSION="1.2.34"
+readonly XRAYCTL_BUILD_COMMIT="38e7fd936d20"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -35,8 +35,6 @@ RUNTIME_GROUP="${XRAYCTL_RUNTIME_GROUP:-xrayctl}"
 SYSTEMD_OVERRIDE_DIR="${XRAYCTL_SYSTEMD_OVERRIDE_DIR:-/etc/systemd/system/${SYSTEMD_UNIT}.d}"
 LOCK_FILE="${XRAYCTL_LOCK_FILE:-/run/lock/xrayctl.lock}"
 JQ_INSTALL_PATH="${XRAYCTL_JQ_INSTALL_PATH:-/usr/local/bin/jq}"
-SBCTL_CONFIG_FILE="${XRAYCTL_SBCTL_CONFIG_FILE:-/etc/sing-box/config.json}"
-SBCTL_META_FILE="${XRAYCTL_SBCTL_META_FILE:-/var/lib/sbctl/meta.json}"
 BBR_CONFIG="${XRAYCTL_BBR_CONFIG:-/etc/sysctl.d/99-xrayctl-bbr.conf}"
 SBCTL_BBR_CONFIG="${XRAYCTL_SBCTL_BBR_CONFIG:-/etc/sysctl.d/99-sbctl-bbr.conf}"
 CERT_STOPPED_SERVICE=0
@@ -2418,34 +2416,17 @@ port_in_use_os() {
   else return 1; fi
 }
 
-sbctl_port_conflict_reason() {
-  local port=$1 range start end
-  validate_port "$port" || return 1
-  if [[ -r $SBCTL_CONFIG_FILE ]] && jq -e --argjson port "$port" \
-    '.inbounds[]? | select(.listen_port==$port)' "$SBCTL_CONFIG_FILE" >/dev/null 2>&1; then
-    printf 'sbctl/sing-box 入站正在使用该端口'
-    return 0
-  fi
-  [[ -r $SBCTL_META_FILE ]] || return 1
-  while IFS= read -r range; do
-    [[ $range =~ ^([0-9]{1,5})-([0-9]{1,5})$ ]] || continue
-    start=${BASH_REMATCH[1]}; end=${BASH_REMATCH[2]}
-    if ! validate_port "$start" || ! validate_port "$end"; then continue; fi
-    if ((10#$port >= 10#$start && 10#$port <= 10#$end)); then
-      printf '该端口位于 sbctl Hysteria2 UDP 跳跃范围 %s 内' "$range"
-      return 0
-    fi
-  done < <(jq -r '.inbounds[]? | select(.hysteria2PortHopping.enabled==true) | .hysteria2PortHopping.range // empty' "$SBCTL_META_FILE" 2>/dev/null || true)
-  return 1
-}
-
 suggest_available_port() {
-  local __var=$1 candidate hex i
+  local __var=$1 candidate hex offset i
   for ((i=0; i<128; i++)); do
     hex=$(random_hex 2)
-    candidate=$((10000 + (16#$hex % 55536)))
+    offset=$((16#$hex % 35535))
+    if ((offset < 20000)); then
+      candidate=$((10000 + offset))
+    else
+      candidate=$((50001 + offset - 20000))
+    fi
     port_in_config "$candidate" && continue
-    sbctl_port_conflict_reason "$candidate" >/dev/null && continue
     port_in_use_os "$candidate" && continue
     printf -v "$__var" '%s' "$candidate"
     return 0
@@ -2464,18 +2445,15 @@ prompt_tag() {
 }
 
 prompt_port() {
-  local __var=$1 default=${2:-443} except=${3-} value current_port="" peer_reason=""
+  local __var=$1 default=${2:-443} except=${3-} value current_port=""
   while true; do
     prompt_value value "监听端口" "$default"
     validate_port "$value" || { warn "端口必须是 1-65535。"; continue; }
     port_in_config "$value" "$except" && { warn "该端口已被另一条 Xray 入站使用。"; continue; }
-    if peer_reason=$(sbctl_port_conflict_reason "$value"); then
-      warn "端口 ${value} 与 sbctl 冲突：${peer_reason}。"
-      continue
-    fi
     [[ -z $except ]] || current_port=$(jq -r --arg tag "$except" '.inbounds[]|select(.tag==$tag)|.port // empty' "$CONFIG_FILE")
     if port_in_use_os "$value" && ! { [[ -n $except && $value == "$current_port" ]] && service_is_active; }; then
-      confirm "系统检测到端口 ${value} 已被占用，仍然继续吗？" N || continue
+      warn "系统检测到端口 ${value} 已被占用，请换一个端口。"
+      continue
     fi
     printf -v "$__var" '%s' "$value"; return
   done
@@ -3666,11 +3644,6 @@ system_diagnostics() {
   printf '系统: %s\n内核: %s\n架构: %s\n时间: %s\n' "$os_name" "$(uname -r)" "$(uname -m)" "$(date -Is)"
   printf '拥塞控制: %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
   printf 'BBR 持久化来源: %s\n' "$(bbr_manager)"
-  if [[ -r $SBCTL_CONFIG_FILE ]]; then
-    printf 'sbctl 共存: 已检测到（sing-box 入站 %s）\n' "$(jq '.inbounds|length' "$SBCTL_CONFIG_FILE" 2>/dev/null || printf '?')"
-  else
-    printf 'sbctl 共存: 未检测到配置\n'
-  fi
   printf 'IPv4 转发: %s\n' "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || printf unknown)"
   if command_exists timedatectl; then timedatectl show -p NTPSynchronized -p Timezone 2>/dev/null || true; fi
   if command_exists ss; then heading "Xray 监听端口"; ss -lntup 2>/dev/null | grep -E 'xray|State|Netid' || true; fi

@@ -23,7 +23,7 @@ NO_COLOR=1 bash "${REPO_ROOT}/dist/xrayctl" help >"${TEST_ROOT}/help.txt"
 assert_file_eq "${REPO_ROOT}/tests/fixtures/cli/help.txt" "${TEST_ROOT}/help.txt" "dist help differs from development entry"
 
 version=$(NO_COLOR=1 bash "${REPO_ROOT}/dist/xrayctl" version)
-[[ $version =~ ^xrayctl[[:space:]]+1[.]2[.]33[[:space:]]+\(commit[[:space:]][0-9a-f]+\)$ ]] \
+[[ $version =~ ^xrayctl[[:space:]]+1[.]2[.]34[[:space:]]+\(commit[[:space:]][0-9a-f]+\)$ ]] \
   || fail "dist version does not contain source commit: ${version}"
 
 if rg -n 'source "\$\{XRAYCTL_SOURCE_DIR\}' "${REPO_ROOT}/dist/xrayctl"; then
