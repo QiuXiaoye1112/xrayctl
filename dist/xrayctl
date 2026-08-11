@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.29"
-readonly XRAYCTL_BUILD_COMMIT="80c33e630a8d"
+readonly XRAYCTL_BUILD_COMMIT="41a6d33e27ea"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -229,7 +229,6 @@ run_menu_action() {
   return 0
 }
 
-json_quote() { jq -Rn --arg value "$1" '$value'; }
 url_encode() { jq -rn --arg value "$1" '$value|@uri'; }
 base64_nowrap() { base64 | tr -d '\n'; }
 
@@ -447,8 +446,6 @@ detect_local_ips() {
   fi
 }
 
-ensure_linux_systemd() { platform_require_supported; }
-
 pkg_manager() {
   if command_exists apt-get; then printf 'apt';
   elif command_exists apk; then printf 'apk';
@@ -482,11 +479,6 @@ apt_get_guarded() {
   else
     apt-get "${apt_options[@]}" "$@"
   fi
-}
-
-apt_package_index_available() {
-  [[ -d /var/lib/apt/lists ]] &&
-    find /var/lib/apt/lists -maxdepth 1 -type f -size +0c ! -name lock -print -quit 2>/dev/null | grep -q .
 }
 
 install_jq_standalone() {
@@ -695,11 +687,6 @@ meta_cert_set_raw() {
 
 # --- Migration functions — use ONLY raw helpers, NEVER call ensure_meta / init_meta ---
 
-meta_mark_migration() {
-  init_meta_base
-  meta_mark_migration_raw "$1"
-}
-
 migration_done() {
   init_meta_base
   meta_migration_done_raw "$1"
@@ -814,11 +801,6 @@ meta_resource_register() {
   jq --arg key "$key" --arg value "$value" \
     '.managedResources[$key] = $value' "$META_FILE" >"$tmp"
   install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-}
-
-meta_resource_get() {
-  ensure_meta
-  jq -r --arg key "$1" '.managedResources[$key] // empty' "$META_FILE"
 }
 
 meta_resource_remove() {
@@ -1031,15 +1013,6 @@ edit_config() {
 check_config() {
   ensure_config
   if validate_candidate "$CONFIG_FILE"; then info "配置检查通过。"; else return 1; fi
-}
-
-set_log_level() {
-  ensure_runtime_dependencies config-loglevel; ensure_config
-  local choice level tmp
-  choose choice "日志级别" "warning" "info" "error" "debug" "none"
-  case $choice in 1) level=warning;; 2) level=info;; 3) level=error;; 4) level=debug;; 5) level=none;; esac
-  tmp=$(temp_file); jq --arg level "$level" '.log.loglevel=$level' "$CONFIG_FILE" >"$tmp"
-  apply_candidate "$tmp"; rm -f "$tmp"
 }
 
 backup_all() {
@@ -2580,11 +2553,6 @@ delete_inbound() {
   rm -f "$tmp"
 }
 
-client_array_path() {
-  local protocol=$1
-  case $protocol in vless|vmess|trojan) printf '.settings.clients';; socks|http) printf '.settings.accounts';; *) return 1;; esac
-}
-
 http_inbound_has_auth() {
   jq -e --arg tag "$1" '
     [.inbounds[]|select(.tag==$tag)|((.settings.accounts // .settings.users // [])|length)][0] > 0' \
@@ -2815,7 +2783,6 @@ public_host_for_tag() {
   fi
   printf '%s' "$host"
 }
-
 
 # --- src/share.sh ---
 share_separator() { printf '%s\n' '------------------------------------------------------------------------'; }
@@ -3211,16 +3178,6 @@ is_xrayctl_certbot_symlink() {
   [[ $target == "${CERTBOT_VENV}/bin/certbot" ]]
 }
 
-get_service_user() {
-  local user
-  if [[ $(platform_init_system) == openrc ]]; then
-    printf '%s' "$RUNTIME_USER"
-  else
-    user=$(systemctl show "$SERVICE_NAME" -p User --value 2>/dev/null || true)
-    printf '%s' "${user:-nobody}"
-  fi
-}
-
 setup_runtime_access() {
   local created_group=0 created_user=0
   if [[ $(platform_init_system) == openrc ]]; then
@@ -3262,18 +3219,6 @@ EOF
 }
 
 setup_certificate_access() { setup_runtime_access; }
-
-copy_certificate_pair() {
-  local domain=$1 cert_source=$2 key_source=$3 cert_target key_target
-  [[ -r $cert_source ]] || die "无法读取证书：$cert_source"
-  [[ -r $key_source ]] || die "无法读取私钥：$key_source"
-  validate_certificate_pair_files "$cert_source" "$key_source" || die "证书或私钥无效。"
-  setup_certificate_access
-  cert_target="${CERT_DIR}/${domain}.crt"; key_target="${CERT_DIR}/${domain}.key"
-  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$cert_source" "$cert_target"
-  install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$key_source" "$key_target"
-  printf '%s\n%s\n' "$cert_target" "$key_target"
-}
 
 xray_release_asset() {
   case $(uname -m) in
@@ -3536,13 +3481,6 @@ manage_bbr() {
   fi
 }
 
-enable_bbr() {
-  # 保留旧名称兼容非交互模式 CLI 调用
-  ensure_system_context bbr
-  _check_bbr_available || return 0
-  _enable_bbr
-}
-
 system_diagnostics() {
   local os_name=unknown
   if [[ -r /etc/os-release ]]; then
@@ -3663,19 +3601,6 @@ safe_remove_dir() {
   rm -rf -- "$path"
 }
 
-safe_remove_file() {
-  local path=$1 allowed matched=0
-  [[ -n $path ]] || return 1
-  [[ $path == /* ]] || return 1
-  shift
-  for allowed in "$@"; do
-    [[ $path == "$allowed" ]] && { matched=1; break; }
-  done
-  ((matched)) || { warn "路径不在允许删除列表：$path"; return 1; }
-  [[ -e $path ]] || return 0
-  rm -f -- "$path"
-}
-
 safe_remove_managed_dir() {
   local resource_key=$1 path=$2 recorded
   [[ -n $path && $path == /* ]] || return 1
@@ -3711,11 +3636,6 @@ meta_resource_remove_existing() {
   tmp=$(temp_file)
   jq --arg key "$key" 'del(.managedResources[$key])' "$META_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
   install -m 600 "$tmp" "$META_FILE"; rm -f "$tmp"
-}
-
-meta_resource_get_existing() {
-  [[ -f $META_FILE ]] || return 1
-  jq -r --arg key "$1" '.managedResources[$key] // empty' "$META_FILE" 2>/dev/null
 }
 
 _uninstall_snapshot_metadata() {
