@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.29"
-readonly XRAYCTL_BUILD_COMMIT="7d41dd6112c8"
+readonly XRAYCTL_BUILD_COMMIT="42d998280ba1"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -216,15 +216,23 @@ print_table_cell_clipped() {
 }
 
 run_menu_action() {
-  local action_status
+  local action_status previous_err_trap
+  previous_err_trap=$(trap -p ERR || true)
+  trap - ERR
   set +e
   (
     set -Eeuo pipefail
+    trap 'exit $?' ERR
     trap cleanup_on_exit EXIT
     "$@"
   )
   action_status=$?
   set -e
+  if [[ -n $previous_err_trap ]]; then
+    eval "$previous_err_trap"
+  else
+    trap - ERR
+  fi
   if ((action_status != 0)); then
     warn "操作未完成，脚本仍在运行，请检查输入后重试。"
   fi
@@ -3076,20 +3084,20 @@ add_outbound() {
 }
 
 select_outbound() {
-  local __var=$1 include_direct=${2:-0} candidate_tag answer
+  local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} candidate_tag answer local_tag
   local tags=() local_ips=() local_ip_tags=() local_raw_ips=()
   ((include_direct == 0)) || tags+=("direct")
   while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || tags+=("$candidate_tag"); done < <(
     jq -r '.outbounds[]?|select((.protocol=="socks" or .protocol=="http" or .protocol=="freedom") and .tag!="direct" and .tag!="blocked")|.tag' "$CONFIG_FILE"
   )
   # 检测本地 IP，对已存在的 freedom 出站加备注
-  while IFS=$'\t' read -r label ip iface; do
-    local tag; tag=$(_freedom_tag_for_ip "$ip")
-    local_ip_tags+=("$tag")
+  while ((include_detected_local)) && IFS=$'\t' read -r label ip iface; do
+    local_tag=$(_freedom_tag_for_ip "$ip")
+    local_ip_tags+=("$local_tag")
     # 如果这个 freedom 出站不在列表里，追加到 tags
     local found=0
-    for t in "${tags[@]}"; do [[ $t == "$tag" ]] && { found=1; break; }; done
-    if ((!found)); then tags+=("$tag"); fi
+    for t in "${tags[@]}"; do [[ $t == "$local_tag" ]] && { found=1; break; }; done
+    if ((!found)); then tags+=("$local_tag"); fi
     local_ips+=("$label")
     local_raw_ips+=("$ip")
   done < <(ensure_config 2>/dev/null || true; detect_local_ips 2>/dev/null)
@@ -3154,7 +3162,7 @@ assign_outbound() {
 delete_outbound() {
   ensure_runtime_dependencies outbound-delete; ensure_config
   local tag=${1-} tmp assigned
-  [[ -n $tag ]] || select_outbound tag 0 || return
+  [[ -n $tag ]] || select_outbound tag 0 0 || return
   outbound_exists "$tag" || die "找不到出站：$tag"
   assigned=$(jq -r --arg tag "$tag" '[.routing.rules[]?|select(.outboundTag==$tag)|.inboundTag[]?]|unique|join(", ")' "$CONFIG_FILE")
   if [[ -n $assigned ]]; then warn "正在使用此出站的入站：${assigned}；删除后这些入站恢复 direct。"; fi
@@ -4387,9 +4395,9 @@ uninstall_menu() {
     printf '0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
-      1) uninstall_xray 0; pause;;
-      2) uninstall_xray 1; pause;;
-      3) uninstall_xray 2; pause;;
+      1) run_menu_action uninstall_xray 0; pause;;
+      2) run_menu_action uninstall_xray 1; pause;;
+      3) run_menu_action uninstall_xray 2; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
