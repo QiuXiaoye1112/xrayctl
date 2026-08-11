@@ -15,7 +15,9 @@ trap cleanup_test_root EXIT
 # shellcheck source=../helpers/assert.sh
 source "${REPO_ROOT}/tests/helpers/assert.sh"
 
-bash "${REPO_ROOT}/scripts/build.sh" >/dev/null
+recorded_commit=$(sed -n 's/^readonly XRAYCTL_BUILD_COMMIT="\([^"]*\)"/\1/p' "${REPO_ROOT}/dist/xrayctl" | head -1)
+[[ -n $recorded_commit ]] || recorded_commit=$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
+XRAYCTL_BUILD_COMMIT="$recorded_commit" bash "${REPO_ROOT}/scripts/build.sh" >/dev/null
 bash -n "${REPO_ROOT}/dist/xrayctl"
 NO_COLOR=1 bash "${REPO_ROOT}/dist/xrayctl" help >"${TEST_ROOT}/help.txt"
 assert_file_eq "${REPO_ROOT}/tests/fixtures/cli/help.txt" "${TEST_ROOT}/help.txt" "dist help differs from development entry"
