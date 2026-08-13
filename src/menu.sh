@@ -4,11 +4,29 @@ outbound_menu() {
     clear_screen
     heading "出站管理"
     list_outbound_overview
-    printf '\n1) 选择入站设置出站\n2) 添加代理出站 (SOCKS5/HTTP)\n3) 删除出站\n0) 返回\n'
+    printf '\n1) 设置入站默认出站\n2) 域名分流\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 删除出站\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
-      1) run_menu_action assign_outbound; pause;; 2) run_menu_action add_outbound; pause;;
-      3) run_menu_action delete_outbound; pause;; 0) return;; *) warn "无效选项。"; pause;;
+      1) run_menu_action assign_outbound; pause;; 2) domain_rule_menu;;
+      3) run_menu_action add_outbound; pause;; 4) run_menu_action delete_outbound; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
+    esac
+  done
+}
+
+domain_rule_menu() {
+  local choice
+  while true; do
+    clear_screen
+    heading "域名分流"
+    list_domain_rules
+    printf '\n1) 查看规则\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    read -r -p "请选择: " choice || { echo; return; }
+    case $choice in
+      1) run_menu_action list_domain_rules; pause;;
+      2) run_menu_action add_domain_rule; pause;;
+      3) run_menu_action delete_domain_rule; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
     esac
   done
 }
@@ -299,6 +317,9 @@ xrayctl - Xray Linux 管理脚本
   xrayctl outbound add
   xrayctl outbound assign <入站> <出站标签|direct>
   xrayctl outbound delete <出站标签>
+  xrayctl outbound rule list [入站]
+  xrayctl outbound rule add <入站> <suffix|exact> <域名> <出站>
+  xrayctl outbound rule delete [入站] [suffix|exact] [域名]
   xrayctl client list [标签]
   xrayctl client add [标签]
   xrayctl client rename [标签] [旧名称] [新名称]
@@ -351,7 +372,16 @@ dispatch() {
     outbound)
       case ${1:-list} in
         list) list_outbound_overview;; add) add_outbound;; assign|set) assign_outbound "${2-}" "${3-}";;
-        delete|remove) delete_outbound "${2-}";; *) die "未知 outbound 子命令：${1}";; esac;;
+        delete|remove) delete_outbound "${2-}";;
+        rule)
+          case ${2:-list} in
+            list) list_domain_rules "${3-}";;
+            add) add_domain_rule "${3-}" "${4-}" "${5-}" "${6-}";;
+            delete|remove) delete_domain_rule "${3-}" "${4-}" "${5-}";;
+            *) die "未知 outbound rule 子命令：${2}";;
+          esac
+          ;;
+        *) die "未知 outbound 子命令：${1}";; esac;;
     client)
       case ${1:-list} in
         list) ensure_config; list_clients "${2-}";; add) add_client "${2-}";; rename) rename_client "${2-}" "${3-}" "${4-}";;

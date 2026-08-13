@@ -13,6 +13,7 @@ tests=(
   "tests/unit/test_interactive_builders.sh"
   "tests/integration/test_state.sh"
   "tests/integration/test_lifecycle.sh"
+  "tests/integration/test_outbound_routing.sh"
   "tests/integration/test_coexistence.sh"
   "tests/integration/test_share.sh"
   "tests/integration/test_interactive_menus.sh"

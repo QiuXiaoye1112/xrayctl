@@ -71,6 +71,7 @@ exercise_menu_route() {
 }
 
 list_outbound_overview() { :; }
+list_domain_rules() { :; }
 list_clients() { :; }
 list_inbounds() { :; }
 inbound_exists() { return 0; }
@@ -82,7 +83,8 @@ bbr_state_summary() { printf enabled; }
 show_main_summary() { :; }
 show_main_inbounds() { :; }
 
-for spec in '1 assign_outbound' '2 add_outbound' '3 delete_outbound'; do
+domain_rule_menu() { record domain_rule_menu; }
+for spec in '1 assign_outbound' '2 domain_rule_menu' '3 add_outbound' '4 delete_outbound'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route outbound_menu "$choice" "$action"
 done
 for spec in '1 add_client node' '2 rename_client node' '3 rotate_client_credential node' '4 delete_client node'; do
@@ -97,6 +99,10 @@ exercise_menu_route inbound_menu 2 'manage_inbound_menu node'
 # Restore the real nested inbound menu after testing the parent dispatch.
 # shellcheck source=../../src/menu.sh
 source "${REPO_ROOT}/src/menu.sh"
+
+for spec in '1 list_domain_rules' '2 add_domain_rule' '3 delete_domain_rule'; do
+  choice=${spec%% *}; action=${spec#* }; exercise_menu_route domain_rule_menu "$choice" "$action"
+done
 
 for spec in '1 issue_certificate' '2 import_certificate' '3 list_certificates' '4 delete_managed_certificate' '6 renew_managed_certificates'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route certificate_menu "$choice" "$action"

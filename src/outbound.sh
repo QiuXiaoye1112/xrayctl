@@ -21,6 +21,22 @@ _ensure_freedom_outbound() {
 
 outbound_exists() { jq -e --arg tag "$1" '.outbounds[]?|select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
 
+_outbound_display_name() {
+  local tag=$1 ip
+  [[ $tag == direct ]] && { printf 'direct'; return; }
+  ip=$(jq -r --arg tag "$tag" '.outbounds[]?|select(.tag==$tag)|.sendThrough // empty' "$CONFIG_FILE" 2>/dev/null || true)
+  printf '%s' "${ip:-$tag}"
+}
+
+_xrayctl_domain_rule_jq() {
+  cat <<'JQ'
+def xrayctl_domain_rule:
+  type == "object" and
+  ((.ruleTag // "") | type == "string") and
+  ((.ruleTag // "") | startswith("xrayctl-domain:"));
+JQ
+}
+
 list_outbound_overview() {
   local rows number tag protocol address username password width
   local number_width=4 tag_width=4 protocol_width=4 address_width=4 username_width=4
@@ -36,13 +52,7 @@ list_outbound_overview() {
       (.key+1) as $number | .value.tag as $tag |
       [$number,$tag,([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // "direct")] | @tsv' "$CONFIG_FILE" \
       | while IFS=$'\t' read -r number tag outbound; do
-          local display="$outbound"
-          if [[ $outbound == direct ]]; then
-            display="direct"
-          elif [[ $outbound =~ ^local- ]]; then
-            local ip; ip=$(jq -r --arg tag "$outbound" '.outbounds[]?|select(.tag==$tag)|.sendThrough // empty' "$CONFIG_FILE" 2>/dev/null || true)
-            display="${ip:-$outbound}"
-          fi
+          local display; display=$(_outbound_display_name "$outbound")
           print_table_cell "$number" 6; print_table_cell "$tag" 28; printf '%s\n' "$display"
         done
   fi
@@ -179,24 +189,248 @@ assign_outbound() {
   tmp=$(temp_file)
   jq --arg inbound "$inbound" --arg outbound "$outbound" --arg ruleTag "$rule_tag" '
     .routing=(.routing // {domainStrategy:"IPIfNonMatch",rules:[]}) |
-    (.routing.rules // [] | map(select((.ruleTag // "")!=$ruleTag))) as $rules |
     .routing.rules=(
-      [$rules[] | select((.outboundTag // "") == "blocked")] +
-      [{type:"field",inboundTag:[$inbound],outboundTag:$outbound,ruleTag:$ruleTag}] +
-      [$rules[] | select((.outboundTag // "") != "blocked")]
+      [(.routing.rules // [])[] | select((.ruleTag // "") != $ruleTag)] +
+      [{type:"field",inboundTag:[$inbound],outboundTag:$outbound,ruleTag:$ruleTag}]
     )' "$CONFIG_FILE" >"$tmp"
   state_apply_candidate_file "$tmp" apply_candidate || return
   info "入站 ${inbound} 已使用出站 ${outbound}。"
 }
 
+_normalize_domain_input() {
+  local __var=$1 candidate
+  candidate=$(printf '%s' "${2-}" | tr '[:upper:]' '[:lower:]')
+  if [[ $candidate == \*.* ]]; then
+    # shellcheck disable=SC1111
+    warn "请输入 ${candidate#\*.}，并选择“域名及所有子域名”。"
+    return 1
+  fi
+  validate_domain "$candidate" || {
+    warn "域名格式无效，请输入类似 openai.com 的域名。"
+    return 1
+  }
+  printf -v "$__var" '%s' "$candidate"
+}
+
+generate_domain_rule_id() {
+  local id
+  while true; do
+    id=$(random_hex 4)
+    if ! jq -e --arg ruleTag "xrayctl-domain:${id}" \
+      '[.routing.rules[]?|select(.ruleTag==$ruleTag)]|length>0' "$CONFIG_FILE" >/dev/null 2>&1; then
+      printf '%s' "$id"
+      return 0
+    fi
+  done
+}
+
+list_domain_rules() {
+  ensure_runtime_dependencies outbound-rule-list; ensure_config
+  local inbound=${1-} rows number=0 match domain outbound display
+  [[ -z $inbound ]] || inbound_exists "$inbound" || die "找不到入站：$inbound"
+  rows=$(jq -r --arg inbound "$inbound" "$(_xrayctl_domain_rule_jq)
+    [.routing.rules[]? |
+      select(xrayctl_domain_rule) |
+      select(\$inbound==\"\" or ((.inboundTag // [])|index(\$inbound))!=null) |
+      (if (.inboundTag|type)==\"array\" then (.inboundTag[0] // \"?\") else \"?\" end) as \$rule_inbound |
+      (if (.domain|type)==\"array\" then (.domain[0] // \"\") else \"\" end) as \$domain_value |
+      (if (\$domain_value|startswith(\"full:\")) then \"exact\" elif (\$domain_value|startswith(\"domain:\")) then \"suffix\" else \"?\" end) as \$match |
+      (if \$match==\"exact\" then \$domain_value[5:] elif \$match==\"suffix\" then \$domain_value[7:] else \$domain_value end) as \$domain |
+      [\$rule_inbound,\$match,\$domain,(.outboundTag // \"?\")] | @tsv] | .[]" "$CONFIG_FILE")
+  heading "域名分流规则"
+  [[ -n $rows ]] || { info "还没有域名分流规则。"; return 0; }
+  print_table_cell "序号" 6; printf '| '
+  print_table_cell_clipped "入站" 22; printf '| '
+  print_table_cell "匹配" 8; printf '| '
+  print_table_cell_clipped "域名" 28; printf '| 出站\n'
+  while IFS=$'\t' read -r inbound match domain outbound; do
+    [[ -n $inbound ]] || continue
+    ((number+=1))
+    display=$(_outbound_display_name "$outbound")
+    [[ $match == suffix ]] && match="子域名" || match="精确"
+    print_table_cell "$number" 6; printf '| '
+    print_table_cell_clipped "$inbound" 22; printf '| '
+    print_table_cell "$match" 8; printf '| '
+    print_table_cell_clipped "$domain" 28; printf '| %s\n' "$display"
+  done <<<"$rows"
+}
+
+add_domain_rule() {
+  ensure_runtime_dependencies outbound-rule-add; ensure_config
+  local inbound=${1-} match=${2-} domain=${3-} outbound=${4-}
+  local choice normalized_domain rule_tag new_rule tmp
+  if [[ -n $inbound || -n $match || -n $domain || -n $outbound ]]; then
+    [[ -n $inbound && -n $match && -n $domain && -n $outbound ]] || \
+      die "用法：xrayctl outbound rule add <入站> <suffix|exact> <域名> <出站>"
+    inbound_exists "$inbound" || die "找不到入站：$inbound"
+    case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
+    _normalize_domain_input normalized_domain "$domain" || die "域名格式无效。"
+    domain=$normalized_domain
+    outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
+  else
+    select_inbound inbound || return
+    choose choice "匹配方式" "域名及所有子域名" "仅精确域名" || return
+    [[ $choice == 1 ]] && match=suffix || match=exact
+    while true; do
+      prompt_value domain "域名" || return
+      if _normalize_domain_input normalized_domain "$domain"; then
+        domain=$normalized_domain
+        break
+      fi
+    done
+    # Domain rules intentionally share the existing outbound selector with
+    # default outbound assignment, including direct, local IP, SOCKS and HTTP.
+    select_outbound outbound 1 || return
+  fi
+
+  rule_tag="xrayctl-domain:$(generate_domain_rule_id)"
+  new_rule=$(jq -n --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
+    --arg outbound "$outbound" --arg ruleTag "$rule_tag" '
+    {type:"field",inboundTag:[$inbound],
+     domain:(if $match=="suffix" then ["domain:"+$domain] else ["full:"+$domain] end),
+     outboundTag:$outbound,ruleTag:$ruleTag}')
+
+  tmp=$(temp_file)
+  jq --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
+    --argjson new_rule "$new_rule" "$(_xrayctl_domain_rule_jq)
+    def managed_for_inbound:
+      xrayctl_domain_rule and ((.inboundTag // []) == [\$inbound]);
+    def target_domain:
+      if \$match==\"suffix\" then [\"domain:\"+\$domain] else [\"full:\"+\$domain] end;
+    def target_rule:
+      managed_for_inbound and ((.domain // []) == target_domain);
+    .routing=(.routing // {domainStrategy:\"IPIfNonMatch\",rules:[]}) |
+    (.routing.rules // []) as \$rules |
+    ([\$rules[] | select(target_rule)] | .[0] // null) as \$existing |
+    (\$new_rule | .ruleTag=(\$existing.ruleTag // .ruleTag)) as \$replacement |
+    (reduce \$rules[] as \$rule
+      ({items:[],replaced:false};
+       if (\$rule | target_rule) then
+         if .replaced then . else .items += [\$replacement] | .replaced=true end
+       else .items += [\$rule] end)) as \$inline_state |
+    (reduce (\$rules | map(select(managed_for_inbound)))[] as \$rule
+      ({items:[],replaced:false};
+       if (\$rule | target_rule) then
+         if .replaced then . else .items += [\$replacement] | .replaced=true end
+       else .items += [\$rule] end)) as \$domain_state |
+    (\$domain_state.items + (if \$domain_state.replaced then [] else [\$replacement] end)) as \$desired_domains |
+    (\$rules | map((.ruleTag // \"\") == (\"xrayctl-outbound:\"+\$inbound)) | index(true)) as \$default_index |
+    if \$default_index==null then
+      .routing.rules=(\$inline_state.items + (if \$inline_state.replaced then [] else [\$replacement] end))
+    else
+      .routing.rules=[range(0; (\$rules|length)) as \$i |
+        if \$i==\$default_index then
+          (\$desired_domains[]),\$rules[\$i]
+        elif (\$rules[\$i] | managed_for_inbound) then empty
+        else \$rules[\$i]
+        end]
+    end" "$CONFIG_FILE" >"$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "已添加/更新域名规则：${inbound} ${match} ${domain} -> ${outbound}。"
+}
+
+delete_domain_rule() {
+  ensure_runtime_dependencies outbound-rule-delete; ensure_config
+  local inbound=${1-} match=${2-} domain=${3-} rows choice selected_inbound selected_match selected_domain tmp
+  local -a rule_inbounds=() rule_matches=() rule_domains=() rule_outbounds=() labels=()
+
+  if [[ -n $match || -n $domain ]]; then
+    [[ -n $inbound && -n $match && -n $domain ]] || \
+      die "用法：xrayctl outbound rule delete [入站] [suffix|exact] [域名]"
+    case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
+    _normalize_domain_input domain "$domain" || die "域名格式无效。"
+    inbound_exists "$inbound" || die "找不到入站：$inbound"
+  elif [[ -n $inbound ]]; then
+    inbound_exists "$inbound" || die "找不到入站：$inbound"
+  fi
+
+  rows=$(jq -r --arg inbound "$inbound" "$(_xrayctl_domain_rule_jq)
+    [.routing.rules[]? |
+      select(xrayctl_domain_rule) |
+      select(\$inbound==\"\" or ((.inboundTag // [])|index(\$inbound))!=null) |
+      (if (.inboundTag|type)==\"array\" then (.inboundTag[0] // \"?\") else \"?\" end) as \$rule_inbound |
+      (if (.domain|type)==\"array\" then (.domain[0] // \"\") else \"\" end) as \$domain_value |
+      (if (\$domain_value|startswith(\"full:\")) then \"exact\" elif (\$domain_value|startswith(\"domain:\")) then \"suffix\" else \"?\" end) as \$rule_match |
+      (if \$rule_match==\"exact\" then \$domain_value[5:] elif \$rule_match==\"suffix\" then \$domain_value[7:] else \$domain_value end) as \$rule_domain |
+      [\$rule_inbound,\$rule_match,\$rule_domain,(.outboundTag // \"?\")] | @tsv] | .[]" "$CONFIG_FILE")
+
+  if [[ -n $match ]]; then
+    local matching_count=0 row_inbound row_match row_domain row_outbound
+    while IFS=$'\t' read -r row_inbound row_match row_domain row_outbound; do
+      [[ $row_inbound == "$inbound" && $row_match == "$match" && $row_domain == "$domain" ]] || continue
+      ((matching_count+=1))
+      selected_inbound=$row_inbound; selected_match=$row_match; selected_domain=$row_domain
+    done <<<"$rows"
+    ((matching_count > 0)) || die "找不到域名规则：${inbound} ${match} ${domain}"
+    ((matching_count == 1)) || die "域名规则存在重复项，请先使用交互菜单处理。"
+  elif [[ -n $inbound ]]; then
+    local count=0 row_inbound row_match row_domain row_outbound
+    while IFS=$'\t' read -r row_inbound row_match row_domain row_outbound; do
+      [[ -n $row_inbound ]] || continue
+      ((count+=1))
+      selected_inbound=$row_inbound; selected_match=$row_match; selected_domain=$row_domain
+    done <<<"$rows"
+    ((count > 0)) || { warn "没有可删除的域名分流规则。"; return 0; }
+    ((count == 1)) || die "该入站有多条域名规则，请交互选择后删除。"
+  else
+    while IFS=$'\t' read -r row_inbound row_match row_domain row_outbound; do
+      [[ -n $row_inbound ]] || continue
+      rule_inbounds+=("$row_inbound"); rule_matches+=("$row_match"); rule_domains+=("$row_domain"); rule_outbounds+=("$row_outbound")
+      labels+=("${row_inbound} · ${row_match} · ${row_domain} → $(_outbound_display_name "$row_outbound")")
+    done <<<"$rows"
+    ((${#rule_inbounds[@]})) || { warn "没有可删除的域名分流规则。"; return 0; }
+    if ((${#rule_inbounds[@]} == 1)); then choice=1; else choose choice "选择要删除的域名规则" "${labels[@]}" || return; fi
+    selected_inbound=${rule_inbounds[$((choice-1))]}
+    selected_match=${rule_matches[$((choice-1))]}
+    selected_domain=${rule_domains[$((choice-1))]}
+  fi
+
+  tmp=$(temp_file)
+  jq --arg inbound "$selected_inbound" --arg match "$selected_match" --arg domain "$selected_domain" \
+    "$(_xrayctl_domain_rule_jq)
+    def target_domain:
+      if \$match==\"suffix\" then [\"domain:\"+\$domain] else [\"full:\"+\$domain] end;
+    def target_rule:
+      xrayctl_domain_rule and ((.inboundTag // []) == [\$inbound]) and ((.domain // []) == target_domain);
+    .routing=(.routing // {}) |
+    .routing.rules=[(.routing.rules // [])[] | select(target_rule | not)]" "$CONFIG_FILE" >"$tmp"
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  info "已删除域名规则：${selected_inbound} ${selected_match} ${selected_domain}。"
+}
+
 delete_outbound() {
   ensure_runtime_dependencies outbound-delete; ensure_config
-  local tag=${1-} tmp assigned
+  local tag=${1-} tmp default_refs domain_refs custom_refs
   [[ -n $tag ]] || select_outbound tag 0 0 || return
   outbound_exists "$tag" || die "找不到出站：$tag"
-  assigned=$(jq -r --arg tag "$tag" '[.routing.rules[]?|select(.outboundTag==$tag)|.inboundTag[]?]|unique|join(", ")' "$CONFIG_FILE")
-  if [[ -n $assigned ]]; then warn "正在使用此出站的入站：${assigned}；删除后这些入站恢复 direct。"; fi
-  confirm "删除出站 ${tag}？" N || return 0
+  [[ $tag != direct && $tag != blocked ]] || { warn "${tag} 出站不能删除。"; return 0; }
+
+  default_refs=$(jq -r --arg tag "$tag" '
+    [.routing.rules[]? |
+      select(.outboundTag==$tag and (.ruleTag|type)=="string" and (.ruleTag|startswith("xrayctl-outbound:")))] | length' "$CONFIG_FILE")
+  domain_refs=$(jq -r --arg tag "$tag" '
+    [.routing.rules[]? |
+      select(.outboundTag==$tag and (.ruleTag|type)=="string" and (.ruleTag|startswith("xrayctl-domain:")))] | length' "$CONFIG_FILE")
+  custom_refs=$(jq -r --arg tag "$tag" '
+    [.routing.rules[]? |
+      select(.outboundTag==$tag) |
+      select(
+        ((.ruleTag|type)!="string") or
+        (((.ruleTag|startswith("xrayctl-outbound:"))|not) and
+         ((.ruleTag|startswith("xrayctl-domain:"))|not))
+      )] | length' "$CONFIG_FILE")
+  if ((custom_refs > 0)); then
+    die "该出站仍被自定义路由规则引用，请先在完整配置中处理。"
+  fi
+  if ((default_refs > 0 || domain_refs > 0)); then
+    warn "出站 ${tag} 当前被 xrayctl 管理规则引用："
+    ((default_refs > 0)) && printf '%s 个入站默认出站使用\n' "$default_refs"
+    ((domain_refs > 0)) && printf '%s 条域名规则使用\n' "$domain_refs"
+    warn "删除后这些管理规则会一并删除。"
+    confirm "继续删除出站 ${tag}？" N || return 0
+  else
+    confirm "删除出站 ${tag}？" N || return 0
+  fi
   tmp=$(temp_file)
   jq --arg tag "$tag" '
     .outbounds |= map(select(.tag!=$tag)) |
