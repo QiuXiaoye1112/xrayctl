@@ -26,7 +26,10 @@ cat >"$XRAYCTL_CONFIG_FILE" <<'JSON'
   "log": {"loglevel": "warning"},
   "inbounds": [
     {"tag": "vless-443", "protocol": "vless", "port": 443, "settings": {"clients": []}},
-    {"tag": "vmess-20000", "protocol": "vmess", "port": 20000, "settings": {"clients": []}}
+    {"tag": "vmess-20000", "protocol": "vmess", "port": 20000, "settings": {"clients": []}},
+    {"tag": "priority-in", "protocol": "vless", "port": 30001, "settings": {"clients": []}},
+    {"tag": "reverse-in", "protocol": "vless", "port": 30002, "settings": {"clients": []}},
+    {"tag": "specificity-in", "protocol": "vless", "port": 30003, "settings": {"clients": []}}
   ],
   "outbounds": [
     {"protocol": "freedom", "tag": "direct"},
@@ -72,6 +75,31 @@ assert_domain_rules_before_default() {
        (((.value.inboundTag // [])|index($inbound))!=null))|[.key,.value.ruleTag]|@tsv' "$CONFIG_FILE")
 }
 
+append_custom_rule() {
+  local inbound=$1 rule_tag=$2 before_default=${3:-0} custom tmp
+  custom=$(jq -n --arg inbound "$inbound" --arg ruleTag "$rule_tag" \
+    '{type:"field",inboundTag:[$inbound],network:["tcp"],outboundTag:"socks-jp",ruleTag:$ruleTag}')
+  tmp=$(temp_file)
+  if ((before_default)); then
+    jq --arg inbound "$inbound" --argjson custom "$custom" '
+      .routing.rules=[.routing.rules[] as $rule |
+        if $rule.ruleTag==("xrayctl-outbound:"+$inbound) then $custom,$rule else $rule end]' \
+      "$CONFIG_FILE" >"$tmp"
+  else
+    jq --argjson custom "$custom" '.routing.rules += [$custom]' "$CONFIG_FILE" >"$tmp"
+  fi
+  state_apply_candidate_file "$tmp" apply_candidate >/dev/null
+}
+
+specificity_order() {
+  local inbound=$1
+  jq -c --arg inbound "$inbound" '
+    [.routing.rules[] |
+      select(((.inboundTag // []) == [$inbound]) or
+        .ruleTag=="custom-X" or .ruleTag=="custom-Y") |
+      .ruleTag]' "$CONFIG_FILE"
+}
+
 _normalize_domain_input normalized '*.OPENAI.COM' && fail 'wildcard domain was accepted'
 _normalize_domain_input normalized 'https://openai.com' && fail 'URL domain was accepted'
 
@@ -107,6 +135,80 @@ assign_outbound vless-443 http-jp >/dev/null
 assert_eq 2 "$(jq '[.routing.rules[]|select(((.ruleTag // "")|startswith("xrayctl-domain:")) and (.inboundTag==["vless-443"]))]|length' "$CONFIG_FILE")" \
   'changing default outbound deleted domain rules'
 assert_domain_rules_before_default vless-443
+
+# Specificity is scoped to each inbound and only new rules are inserted.
+add_domain_rule priority-in suffix example.com socks-jp >/dev/null
+add_domain_rule priority-in exact example.com direct >/dev/null
+priority_order=$(jq -c --arg inbound priority-in '
+  [.routing.rules[]|select(.inboundTag==[$inbound])|.domain[0]]' "$CONFIG_FILE")
+assert_eq '["full:example.com","domain:example.com"]' "$priority_order" \
+  'exact rule was not inserted before an existing suffix rule'
+add_domain_rule priority-in suffix api.example.com socks-jp >/dev/null
+priority_order=$(jq -c --arg inbound priority-in '
+  [.routing.rules[]|select(.inboundTag==[$inbound])|.domain[0]]' "$CONFIG_FILE")
+assert_eq '["full:example.com","domain:api.example.com","domain:example.com"]' "$priority_order" \
+  'more specific suffix was not inserted before broader suffix'
+
+add_domain_rule reverse-in suffix api.example.com socks-jp >/dev/null
+add_domain_rule reverse-in suffix example.com socks-jp >/dev/null
+reverse_order=$(jq -c --arg inbound reverse-in '
+  [.routing.rules[]|select(.inboundTag==[$inbound])|.domain[0]]' "$CONFIG_FILE")
+assert_eq '["domain:api.example.com","domain:example.com"]' "$reverse_order" \
+  'reverse suffix insertion did not produce specificity order'
+add_domain_rule priority-in suffix foo.bar.example.com socks-jp >/dev/null
+priority_order=$(jq -c --arg inbound priority-in '
+  [.routing.rules[]|select(.inboundTag==[$inbound])|.domain[0]]' "$CONFIG_FILE")
+assert_eq '["full:example.com","domain:foo.bar.example.com","domain:api.example.com","domain:example.com"]' "$priority_order" \
+  'specificity analysis was affected by another inbound'
+
+add_domain_rule specificity-in exact example.com direct >/dev/null
+specificity_exact_tag=$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])|.ruleTag' "$CONFIG_FILE")
+append_custom_rule specificity-in custom-X
+assign_outbound specificity-in socks-jp >/dev/null
+add_domain_rule specificity-in suffix example.com socks-jp >/dev/null
+append_custom_rule specificity-in custom-Y 1
+specificity_order_before=$(specificity_order specificity-in)
+specificity_broad_tag=$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["domain:example.com"])|.ruleTag' "$CONFIG_FILE")
+expected_specificity_order=$(jq -cn --arg exact "$specificity_exact_tag" --arg broad "$specificity_broad_tag" \
+  '[$exact,"custom-X",$broad,"custom-Y","xrayctl-outbound:specificity-in"]')
+assert_eq "$expected_specificity_order" \
+  "$specificity_order_before" 'managed and custom rules were not interleaved as expected'
+
+add_domain_rule specificity-in suffix api.example.com socks-jp >/dev/null
+specificity_order_after_insert=$(specificity_order specificity-in)
+specificity_specific_tag=$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["domain:api.example.com"])|.ruleTag' "$CONFIG_FILE")
+expected_specificity_order=$(jq -cn --arg exact "$specificity_exact_tag" --arg specific "$specificity_specific_tag" \
+  --arg broad "$specificity_broad_tag" \
+  '[$exact,"custom-X",$specific,$broad,"custom-Y","xrayctl-outbound:specificity-in"]')
+assert_eq "$expected_specificity_order" \
+  "$specificity_order_after_insert" 'new specific suffix disturbed custom rule order'
+
+order_before_exact_update=$specificity_order_after_insert
+add_domain_rule specificity-in exact example.com socks-us >/dev/null
+assert_eq "$order_before_exact_update" "$(specificity_order specificity-in)" \
+  'updating exact rule moved custom or managed rules'
+assert_eq "$specificity_exact_tag" "$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])|.ruleTag' "$CONFIG_FILE")" \
+  'updating exact rule changed ruleTag'
+add_domain_rule specificity-in suffix example.com http-jp >/dev/null
+assert_eq "$order_before_exact_update" "$(specificity_order specificity-in)" \
+  'updating broad suffix moved custom or managed rules'
+assert_eq "$specificity_broad_tag" "$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["domain:example.com"])|.ruleTag' "$CONFIG_FILE")" \
+  'updating broad suffix changed ruleTag'
+assign_outbound specificity-in http-jp >/dev/null
+assert_eq "$order_before_exact_update" "$(specificity_order specificity-in)" \
+  'updating default moved custom or managed rules'
+
+duplicate=$(jq -c --arg tag "$specificity_exact_tag" '[.routing.rules[]|select(.ruleTag==$tag)][0]' "$CONFIG_FILE")
+candidate=$(temp_file)
+jq --argjson duplicate "$duplicate" '.routing.rules += [$duplicate]' "$CONFIG_FILE" >"$candidate"
+state_apply_candidate_file "$candidate" apply_candidate >/dev/null
+add_domain_rule specificity-in exact example.com direct >/dev/null
+assert_eq 1 "$(jq '[.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])]|length' "$CONFIG_FILE")" \
+  'duplicate managed domain rule was not removed'
+assert_eq "$specificity_exact_tag" "$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])|.ruleTag' "$CONFIG_FILE")" \
+  'duplicate cleanup did not preserve the first ruleTag'
+assert_eq "$order_before_exact_update" "$(specificity_order specificity-in)" \
+  'duplicate cleanup did not preserve the first rule position'
 
 detect_local_ips() {
   printf '%s\t%s\t%s\n' '203.0.113.10 (IPv4)' 203.0.113.10 eth0
