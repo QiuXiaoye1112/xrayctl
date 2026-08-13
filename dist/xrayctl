@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.34"
-readonly XRAYCTL_BUILD_COMMIT="74b565e8186c"
+readonly XRAYCTL_BUILD_COMMIT="de27f5659ed2"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -3295,7 +3295,7 @@ list_domain_rules() {
 add_domain_rule() {
   ensure_runtime_dependencies outbound-rule-add; ensure_config
   local inbound=${1-} match=${2-} domain=${3-} outbound=${4-}
-  local choice normalized_domain rule_tag new_rule tmp
+  local choice normalized_domain rule_tag new_rule tmp existing_rule_tag
   if [[ -n $inbound || -n $match || -n $domain || -n $outbound ]]; then
     [[ -n $inbound && -n $match && -n $domain && -n $outbound ]] || \
       die "用法：xrayctl outbound rule add <入站> <suffix|exact> <域名> <出站>"
@@ -3320,46 +3320,83 @@ add_domain_rule() {
     select_outbound outbound 1 || return
   fi
 
-  rule_tag="xrayctl-domain:$(generate_domain_rule_id)"
-  new_rule=$(jq -n --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
-    --arg outbound "$outbound" --arg ruleTag "$rule_tag" '
-    {type:"field",inboundTag:[$inbound],
-     domain:(if $match=="suffix" then ["domain:"+$domain] else ["full:"+$domain] end),
-     outboundTag:$outbound,ruleTag:$ruleTag}')
+  existing_rule_tag=$(jq -r --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
+    "$(_xrayctl_domain_rule_jq)
+    def target_domain:
+      if \$match==\"suffix\" then [\"domain:\"+\$domain] else [\"full:\"+\$domain] end;
+    ([.routing.rules[]? |
+      select(xrayctl_domain_rule and ((.inboundTag // []) == [\$inbound]) and ((.domain // []) == target_domain)) |
+      .ruleTag][0] // \"\")" "$CONFIG_FILE")
+  if [[ -n $existing_rule_tag ]]; then
+    # An update must not generate a new identity. The jq operation below
+    # changes only outboundTag on the first matching rule.
+    new_rule=null
+  else
+    rule_tag="xrayctl-domain:$(generate_domain_rule_id)"
+    new_rule=$(jq -n --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
+      --arg outbound "$outbound" --arg ruleTag "$rule_tag" '
+      {type:"field",inboundTag:[$inbound],
+       domain:(if $match=="suffix" then ["domain:"+$domain] else ["full:"+$domain] end),
+       outboundTag:$outbound,ruleTag:$ruleTag}')
+  fi
 
   tmp=$(temp_file)
   jq --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
-    --argjson new_rule "$new_rule" "$(_xrayctl_domain_rule_jq)
+    --arg outbound "$outbound" --argjson new_rule "$new_rule" "$(_xrayctl_domain_rule_jq)
+    def domain_value:
+      if (.domain|type)==\"array\" and (.domain|length)==1 and (.domain[0]|type)==\"string\" then .domain[0] else \"\" end;
     def managed_for_inbound:
       xrayctl_domain_rule and ((.inboundTag // []) == [\$inbound]);
+    def managed_suffix:
+      managed_for_inbound and (domain_value|startswith(\"domain:\"));
     def target_domain:
       if \$match==\"suffix\" then [\"domain:\"+\$domain] else [\"full:\"+\$domain] end;
     def target_rule:
       managed_for_inbound and ((.domain // []) == target_domain);
+    def lower_priority_suffix:
+      managed_suffix and
+      (((domain_value[7:]|split(\".\")|length) < (\$domain|split(\".\")|length)) or
+       (((domain_value[7:]|split(\".\")|length) == (\$domain|split(\".\")|length)) and
+        ((domain_value[7:]|length) < (\$domain|length))));
     .routing=(.routing // {domainStrategy:\"IPIfNonMatch\",rules:[]}) |
     (.routing.rules // []) as \$rules |
-    ([\$rules[] | select(target_rule)] | .[0] // null) as \$existing |
-    (\$new_rule | .ruleTag=(\$existing.ruleTag // .ruleTag)) as \$replacement |
-    (reduce \$rules[] as \$rule
-      ({items:[],replaced:false};
-       if (\$rule | target_rule) then
-         if .replaced then . else .items += [\$replacement] | .replaced=true end
-       else .items += [\$rule] end)) as \$inline_state |
-    (reduce (\$rules | map(select(managed_for_inbound)))[] as \$rule
-      ({items:[],replaced:false};
-       if (\$rule | target_rule) then
-         if .replaced then . else .items += [\$replacement] | .replaced=true end
-       else .items += [\$rule] end)) as \$domain_state |
-    (\$domain_state.items + (if \$domain_state.replaced then [] else [\$replacement] end)) as \$desired_domains |
-    (\$rules | map((.ruleTag // \"\") == (\"xrayctl-outbound:\"+\$inbound)) | index(true)) as \$default_index |
-    if \$default_index==null then
-      .routing.rules=(\$inline_state.items + (if \$inline_state.replaced then [] else [\$replacement] end))
-    else
+    ([range(0; (\$rules|length)) as \$i | select(\$rules[\$i] | target_rule) | \$i]) as \$target_indices |
+    if (\$target_indices|length)>0 then
+      # Update the first matching rule in place and remove only later
+      # duplicates. Every other rule stays at its original relative position.
       .routing.rules=[range(0; (\$rules|length)) as \$i |
-        if \$i==\$default_index then
-          (\$desired_domains[]),\$rules[\$i]
-        elif (\$rules[\$i] | managed_for_inbound) then empty
+        if \$i==\$target_indices[0] then
+          (\$rules[\$i] | .outboundTag=\$outbound)
+        elif (\$target_indices|index(\$i))!=null then empty
         else \$rules[\$i]
+        end]
+    else
+      ([range(0; (\$rules|length)) as \$i |
+        select(\$rules[\$i] | (if \$match==\"exact\" then managed_suffix else lower_priority_suffix end)) |
+        \$i] | .[0] // null) as \$priority_index |
+      ([range(0; (\$rules|length)) as \$i |
+        select((\$rules[\$i].ruleTag // \"\") == (\"xrayctl-outbound:\"+\$inbound)) |
+        \$i] | .[0] // null) as \$default_index |
+      ([range(0; (\$rules|length)) as \$i |
+        select(\$rules[\$i] | managed_for_inbound) |
+        \$i] | .[-1] // null) as \$last_domain_index |
+      (if \$priority_index==null then
+         \$default_index
+       elif \$default_index==null then
+         \$priority_index
+       elif \$priority_index < \$default_index then
+         \$priority_index
+       else
+         \$default_index
+       end) as \$boundary_index |
+      (if \$boundary_index!=null then \$boundary_index
+       elif \$last_domain_index!=null then \$last_domain_index+1
+       else \$rules|length
+       end) as \$insert_index |
+      .routing.rules=[range(0; ((\$rules|length)+1)) as \$i |
+        if \$i==\$insert_index then \$new_rule
+        elif \$i < \$insert_index then \$rules[\$i]
+        else \$rules[\$i-1]
         end]
     end" "$CONFIG_FILE" >"$tmp"
   state_apply_candidate_file "$tmp" apply_candidate || return
