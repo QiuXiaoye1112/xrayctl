@@ -229,6 +229,7 @@ assert_eq UseIP "$(jq -r --arg tag "$local_ipv6_tag" '.outbounds[]|select(.tag==
 assert_domain_rules_before_default vless-443
 listing=$(list_domain_rules vless-443)
 [[ $listing == *'2001:db8::1'* ]] || fail 'domain rule list exposed local tag instead of sendThrough IP'
+[[ $listing == *'序号 | 入站'* ]] || fail 'domain rule list did not use compact sequence/inbound columns'
 
 add_domain_rule vmess-20000 suffix socks.example.com socks-us >/dev/null
 add_domain_rule vmess-20000 suffix http.example.com http-jp >/dev/null

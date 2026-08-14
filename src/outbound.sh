@@ -228,7 +228,9 @@ generate_domain_rule_id() {
 
 list_domain_rules() {
   ensure_runtime_dependencies outbound-rule-list; ensure_config
-  local inbound=${1-} rows number=0 match domain outbound display
+  local inbound=${1-} rows number=0 match domain outbound display width display_match
+  local inbound_width=4 match_width=4 domain_width=4
+  local -a rule_inbounds=() rule_matches=() rule_domains=() rule_displays=()
   [[ -z $inbound ]] || inbound_exists "$inbound" || die "找不到入站：$inbound"
   rows=$(jq -r --arg inbound "$inbound" "$(_xrayctl_domain_rule_jq)
     [.routing.rules[]? |
@@ -241,20 +243,32 @@ list_domain_rules() {
       [\$rule_inbound,\$match,\$domain,(.outboundTag // \"?\")] | @tsv] | .[]" "$CONFIG_FILE")
   heading "域名分流规则"
   [[ -n $rows ]] || { info "还没有域名分流规则。"; return 0; }
-  print_table_cell "序号" 6; printf '| '
-  print_table_cell_clipped "入站" 22; printf '| '
-  print_table_cell "匹配" 8; printf '| '
-  print_table_cell_clipped "域名" 28; printf '| 出站\n'
   while IFS=$'\t' read -r inbound match domain outbound; do
     [[ -n $inbound ]] || continue
-    ((number+=1))
+    [[ $match == suffix ]] && display_match="子域名" || display_match="精确"
     display=$(_outbound_display_name "$outbound")
-    [[ $match == suffix ]] && match="子域名" || match="精确"
-    print_table_cell "$number" 6; printf '| '
-    print_table_cell_clipped "$inbound" 22; printf '| '
-    print_table_cell "$match" 8; printf '| '
-    print_table_cell_clipped "$domain" 28; printf '| %s\n' "$display"
+    rule_inbounds+=("$inbound")
+    rule_matches+=("$display_match")
+    rule_domains+=("$domain")
+    rule_displays+=("$display")
+    display_width width "$inbound"; ((width > inbound_width)) && inbound_width=$width
+    display_width width "$display_match"; ((width > match_width)) && match_width=$width
+    display_width width "$domain"; ((width > domain_width)) && domain_width=$width
   done <<<"$rows"
+
+  # Keep short lists compact while still allowing long identifiers to be clipped.
+  ((inbound_width > 16)) && inbound_width=16
+  ((domain_width > 24)) && domain_width=24
+  print_table_cell "序号" 3; printf '| '
+  print_table_cell "入站" "$inbound_width"; printf '| '
+  print_table_cell "匹配" "$match_width"; printf '| '
+  print_table_cell "域名" "$domain_width"; printf '| 出站\n'
+  for ((number=0; number<${#rule_inbounds[@]}; number++)); do
+    print_table_cell "$((number + 1))" 3; printf '| '
+    print_table_cell_clipped "${rule_inbounds[$number]}" "$inbound_width"; printf '| '
+    print_table_cell "${rule_matches[$number]}" "$match_width"; printf '| '
+    print_table_cell_clipped "${rule_domains[$number]}" "$domain_width"; printf '| %s\n' "${rule_displays[$number]}"
+  done
 }
 
 add_domain_rule() {
