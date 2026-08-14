@@ -9,6 +9,8 @@ _ensure_freedom_outbound() {
   tag=$(_freedom_tag_for_ip "$ip")
   outbound_exists "$tag" && { printf '%s' "$tag"; return 0; }
   tmp=$(temp_file)
+  # Xray's equivalent of an address-family-bound direct outbound is
+  # sendThrough + UseIP: the core infers IPv4/IPv6 from the source address.
   jq --arg tag "$tag" --arg ip "$ip" \
     '.outbounds += [{tag:$tag,protocol:"freedom",sendThrough:$ip,settings:{domainStrategy:"UseIP"}}]' \
     "$CONFIG_FILE" >"$tmp"

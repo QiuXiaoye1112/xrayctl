@@ -220,6 +220,8 @@ add_domain_rule vless-443 suffix ipv4.example.com "$local_ipv4_tag" >/dev/null
 add_domain_rule vless-443 suffix ipv6.example.com "$local_ipv6_tag" >/dev/null
 assert_eq 203.0.113.10 "$(jq -r --arg tag "$local_ipv4_tag" '.outbounds[]|select(.tag==$tag)|.sendThrough' "$CONFIG_FILE")" \
   'IPv4 freedom outbound sendThrough changed'
+assert_eq UseIP "$(jq -r --arg tag "$local_ipv4_tag" '.outbounds[]|select(.tag==$tag)|.settings.domainStrategy' "$CONFIG_FILE")" \
+  'IPv4 freedom outbound domainStrategy changed'
 assert_eq 2001:db8::1 "$(jq -r --arg tag "$local_ipv6_tag" '.outbounds[]|select(.tag==$tag)|.sendThrough' "$CONFIG_FILE")" \
   'IPv6 freedom outbound sendThrough changed'
 assert_eq UseIP "$(jq -r --arg tag "$local_ipv6_tag" '.outbounds[]|select(.tag==$tag)|.settings.domainStrategy' "$CONFIG_FILE")" \
