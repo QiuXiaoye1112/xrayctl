@@ -193,10 +193,16 @@ prompt_validated_value() {
 
 display_width() {
   local __var=$1 value=$2 char code computed_width=0 i
+  local LC_ALL=C
   for ((i=0; i<${#value}; i++)); do
     char=${value:i:1}
     printf -v code '%d' "'$char"
-    if ((code < 0 || code > 127)); then ((computed_width+=2)); else ((computed_width+=1)); fi
+    ((code < 0)) && ((code+=256))
+    if ((code < 128)); then
+      ((computed_width+=1))
+    elif (( (code & 0xC0) != 0x80 )); then
+      ((computed_width+=2))
+    fi
   done
   printf -v "$__var" '%s' "$computed_width"
 }
@@ -205,7 +211,7 @@ print_table_cell() {
   local value=$1 target_width=$2 width padding
   display_width width "$value"
   padding=$((target_width-width))
-  ((padding > 0)) || padding=1
+  ((padding > 0)) || padding=0
   printf '%s%*s' "$value" "$padding" ''
 }
 

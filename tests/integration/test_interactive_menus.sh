@@ -100,7 +100,7 @@ exercise_menu_route inbound_menu 2 'manage_inbound_menu node'
 # shellcheck source=../../src/menu.sh
 source "${REPO_ROOT}/src/menu.sh"
 
-for spec in '1 list_domain_rules' '2 add_domain_rule' '3 delete_domain_rule'; do
+for spec in '1 add_domain_rule' '2 delete_domain_rule'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route domain_rule_menu "$choice" "$action"
 done
 

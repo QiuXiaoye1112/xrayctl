@@ -122,13 +122,17 @@ assert_domain_rules_before_default vless-443
 assert_eq socks-jp "$(jq -r '.routing.rules[]|select(.ruleTag=="xrayctl-outbound:vless-443")|.outboundTag' "$CONFIG_FILE")" \
   'default outbound assignment failed'
 
+before_duplicate_add=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
 add_domain_rule vless-443 suffix OPENAI.COM http-jp >/dev/null
+after_duplicate_add=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
+assert_eq "$before_duplicate_add" "$after_duplicate_add" \
+  'duplicate domain add changed the configuration'
 assert_eq 1 "$(jq '[.routing.rules[]|select(.domain==["domain:openai.com"])]|length' "$CONFIG_FILE")" \
   'duplicate suffix domain rule was created'
 assert_eq "$suffix_rule_tag" "$(jq -r '.routing.rules[]|select(.domain==["domain:openai.com"])|.ruleTag' "$CONFIG_FILE")" \
-  'duplicate domain update changed ruleTag'
-assert_eq http-jp "$(jq -r '.routing.rules[]|select(.domain==["domain:openai.com"])|.outboundTag' "$CONFIG_FILE")" \
-  'duplicate domain update did not change outbound'
+  'duplicate domain warning changed ruleTag'
+assert_eq socks-us "$(jq -r '.routing.rules[]|select(.domain==["domain:openai.com"])|.outboundTag' "$CONFIG_FILE")" \
+  'duplicate domain warning changed outbound'
 assert_domain_rules_before_default vless-443
 
 add_domain_rule vless-443 suffix 'batch-one.example.com, batch-two.example.com' socks-us >/dev/null
@@ -163,6 +167,9 @@ reverse_order=$(jq -c --arg inbound reverse-in '
   [.routing.rules[]|select(.inboundTag==[$inbound])|.domain[0]]' "$CONFIG_FILE")
 assert_eq '["domain:api.example.com","domain:example.com"]' "$reverse_order" \
   'reverse suffix insertion did not produce specificity order'
+delete_domain_rule reverse-in <<< '1,2' >/dev/null
+assert_eq 0 "$(jq '[.routing.rules[]|select(.inboundTag==["reverse-in"] and ((.ruleTag // "")|startswith("xrayctl-domain:")))]|length' "$CONFIG_FILE")" \
+  'batch domain deletion did not remove all selected rules'
 add_domain_rule priority-in suffix foo.bar.example.com socks-jp >/dev/null
 priority_order=$(jq -c --arg inbound priority-in '
   [.routing.rules[]|select(.inboundTag==[$inbound])|.domain[0]]' "$CONFIG_FILE")
@@ -192,16 +199,28 @@ assert_eq "$expected_specificity_order" \
   "$specificity_order_after_insert" 'new specific suffix disturbed custom rule order'
 
 order_before_exact_update=$specificity_order_after_insert
+before_exact_update=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
 add_domain_rule specificity-in exact example.com socks-us >/dev/null
+after_exact_update=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
+assert_eq "$before_exact_update" "$after_exact_update" \
+  'duplicate exact add changed the configuration'
 assert_eq "$order_before_exact_update" "$(specificity_order specificity-in)" \
-  'updating exact rule moved custom or managed rules'
-assert_eq "$specificity_exact_tag" "$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])|.ruleTag' "$CONFIG_FILE")" \
-  'updating exact rule changed ruleTag'
+  'duplicate exact add moved custom or managed rules'
+assert_eq "$specificity_exact_tag" "$(jq -r '[.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])|.ruleTag][0]' "$CONFIG_FILE")" \
+  'duplicate exact warning changed ruleTag'
+assert_eq direct "$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])|.outboundTag' "$CONFIG_FILE")" \
+  'duplicate exact warning changed outbound'
+before_broad_update=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
 add_domain_rule specificity-in suffix example.com http-jp >/dev/null
+after_broad_update=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
+assert_eq "$before_broad_update" "$after_broad_update" \
+  'duplicate suffix add changed the configuration'
 assert_eq "$order_before_exact_update" "$(specificity_order specificity-in)" \
-  'updating broad suffix moved custom or managed rules'
+  'duplicate suffix add moved custom or managed rules'
 assert_eq "$specificity_broad_tag" "$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["domain:example.com"])|.ruleTag' "$CONFIG_FILE")" \
-  'updating broad suffix changed ruleTag'
+  'duplicate suffix warning changed ruleTag'
+assert_eq socks-jp "$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["domain:example.com"])|.outboundTag' "$CONFIG_FILE")" \
+  'duplicate suffix warning changed outbound'
 assign_outbound specificity-in http-jp >/dev/null
 assert_eq "$order_before_exact_update" "$(specificity_order specificity-in)" \
   'updating default moved custom or managed rules'
@@ -210,13 +229,18 @@ duplicate=$(jq -c --arg tag "$specificity_exact_tag" '[.routing.rules[]|select(.
 candidate=$(temp_file)
 jq --argjson duplicate "$duplicate" '.routing.rules += [$duplicate]' "$CONFIG_FILE" >"$candidate"
 state_apply_candidate_file "$candidate" apply_candidate >/dev/null
+order_before_duplicate_warning=$(specificity_order specificity-in)
+before_duplicate_warning=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
 add_domain_rule specificity-in exact example.com direct >/dev/null
-assert_eq 1 "$(jq '[.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])]|length' "$CONFIG_FILE")" \
-  'duplicate managed domain rule was not removed'
-assert_eq "$specificity_exact_tag" "$(jq -r '.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])|.ruleTag' "$CONFIG_FILE")" \
-  'duplicate cleanup did not preserve the first ruleTag'
-assert_eq "$order_before_exact_update" "$(specificity_order specificity-in)" \
-  'duplicate cleanup did not preserve the first rule position'
+after_duplicate_warning=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
+assert_eq "$before_duplicate_warning" "$after_duplicate_warning" \
+  'historical duplicate warning changed the configuration'
+assert_eq 2 "$(jq '[.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])]|length' "$CONFIG_FILE")" \
+  'historical duplicate was unexpectedly removed'
+assert_eq "$specificity_exact_tag" "$(jq -r '[.routing.rules[]|select(.inboundTag==["specificity-in"] and .domain==["full:example.com"])|.ruleTag][0]' "$CONFIG_FILE")" \
+  'historical duplicate warning changed the first ruleTag'
+assert_eq "$order_before_duplicate_warning" "$(specificity_order specificity-in)" \
+  'historical duplicate warning changed the first rule position'
 
 detect_local_ips() {
   printf '%s\t%s\t%s\n' '203.0.113.10 (IPv4)' 203.0.113.10 eth0
@@ -237,7 +261,8 @@ assert_eq UseIP "$(jq -r --arg tag "$local_ipv6_tag" '.outbounds[]|select(.tag==
 assert_domain_rules_before_default vless-443
 listing=$(list_domain_rules vless-443)
 [[ $listing == *'2001:db8::1'* ]] || fail 'domain rule list exposed local tag instead of sendThrough IP'
-[[ $listing == *'序号 | 入站'* ]] || fail 'domain rule list did not use compact sequence/inbound columns'
+[[ $listing == *'入站：vless-443'* ]] || fail 'domain rule list was not grouped by inbound'
+[[ $listing == *'序号  | 匹配   | 域名'* ]] || fail 'domain rule list did not use the compact grouped columns'
 
 add_domain_rule vmess-20000 suffix socks.example.com socks-us >/dev/null
 add_domain_rule vmess-20000 suffix http.example.com http-jp >/dev/null

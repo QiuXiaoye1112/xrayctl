@@ -20,12 +20,11 @@ domain_rule_menu() {
     clear_screen
     heading "域名分流"
     list_domain_rules
-    printf '\n1) 查看规则\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    printf '\n1) 添加规则\n2) 删除规则\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
-      1) run_menu_action list_domain_rules; pause;;
-      2) run_menu_action add_domain_rule; pause;;
-      3) run_menu_action delete_domain_rule; pause;;
+      1) run_menu_action add_domain_rule; pause;;
+      2) run_menu_action delete_domain_rule; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done

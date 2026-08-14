@@ -34,4 +34,24 @@ assert_success validate_path /transport/path
 assert_failure validate_path relative/path
 assert_failure validate_path '/bad path'
 
+width=""
+display_width width "标签"
+assert_eq 4 "$width" "UTF-8 table width for labels is incorrect"
+(
+  export LC_ALL=C
+  width=""
+  display_width width "匹配"
+  assert_eq 4 "$width" "UTF-8 table width under C locale is incorrect"
+  width=""
+  display_width width "子域名"
+  assert_eq 6 "$width" "UTF-8 table width for subdomain labels is incorrect"
+)
+
+assert_eq '标签    ' "$(print_table_cell '标签' 8)" "table cell padding is incorrect"
+assert_eq '子域名' "$(print_table_cell '子域名' 6)" "exact-width table cells should not gain padding"
+assert_eq 'abcdefghijklmnopqrst... ' \
+  "$(print_table_cell_clipped 'abcdefghijklmnopqrstuvwx' 24)" \
+  "24-column domain cells should expose more of long values"
+assert_eq 'abcd... ' "$(print_table_cell_clipped 'abcdefghijkl' 8)" "clipped table cells are incorrect"
+
 pass "validators preserve the pre-refactor contract"
