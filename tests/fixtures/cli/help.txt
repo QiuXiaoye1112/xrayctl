@@ -22,7 +22,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl outbound assign <入站> <出站标签|direct>
   xrayctl outbound delete <出站标签>
   xrayctl outbound rule list [入站]
-  xrayctl outbound rule add <入站> <suffix|exact> <域名> <出站>
+  xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>
   xrayctl outbound rule delete [入站] [suffix|exact] [域名]
   xrayctl client list [标签]
   xrayctl client add [标签]

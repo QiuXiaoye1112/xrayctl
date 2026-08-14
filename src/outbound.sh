@@ -271,26 +271,48 @@ list_domain_rules() {
   done
 }
 
+_normalize_domain_list() {
+  local raw=$1 candidate normalized
+  local -a candidates=()
+
+  [[ $raw != ,* && $raw != *, && $raw != *,,* ]] || {
+    warn "域名列表中不能有空项，请使用英文逗号分隔。"
+    return 1
+  }
+  IFS=',' read -r -a candidates <<<"$raw"
+  ((${#candidates[@]} > 0)) || return 1
+
+  for candidate in "${candidates[@]}"; do
+    candidate="${candidate#"${candidate%%[![:space:]]*}"}"
+    candidate="${candidate%"${candidate##*[![:space:]]}"}"
+    [[ -n $candidate ]] || {
+      warn "域名列表中不能有空项，请使用英文逗号分隔。"
+      return 1
+    }
+    _normalize_domain_input normalized "$candidate" || return 1
+    printf '%s\n' "$normalized"
+  done
+}
+
 add_domain_rule() {
   ensure_runtime_dependencies outbound-rule-add; ensure_config
   local inbound=${1-} match=${2-} domain=${3-} outbound=${4-}
-  local choice normalized_domain rule_tag new_rule tmp existing_rule_tag
+  local choice normalized_domains rule_tag new_rule tmp existing_rule_tag
+  local -a domains=()
   if [[ -n $inbound || -n $match || -n $domain || -n $outbound ]]; then
     [[ -n $inbound && -n $match && -n $domain && -n $outbound ]] || \
-      die "用法：xrayctl outbound rule add <入站> <suffix|exact> <域名> <出站>"
+      die "用法：xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>"
     inbound_exists "$inbound" || die "找不到入站：$inbound"
     case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
-    _normalize_domain_input normalized_domain "$domain" || die "域名格式无效。"
-    domain=$normalized_domain
+    normalized_domains=$(_normalize_domain_list "$domain") || die "域名格式无效。"
     outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
   else
     select_inbound inbound || return
     choose choice "匹配方式" "域名及所有子域名" "仅精确域名" || return
     [[ $choice == 1 ]] && match=suffix || match=exact
     while true; do
-      prompt_value domain "域名" || return
-      if _normalize_domain_input normalized_domain "$domain"; then
-        domain=$normalized_domain
+      prompt_value domain "域名（多个请用英文逗号分隔）" || return
+      if normalized_domains=$(_normalize_domain_list "$domain"); then
         break
       fi
     done
@@ -299,7 +321,13 @@ add_domain_rule() {
     select_outbound outbound 1 || return
   fi
 
-  existing_rule_tag=$(jq -r --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
+  while IFS= read -r domain; do
+    [[ -n $domain ]] && domains+=("$domain")
+  done <<<"$normalized_domains"
+  ((${#domains[@]} > 0)) || die "域名格式无效。"
+
+  for domain in "${domains[@]}"; do
+    existing_rule_tag=$(jq -r --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
     "$(_xrayctl_domain_rule_jq)
     def target_domain:
       if \$match==\"suffix\" then [\"domain:\"+\$domain] else [\"full:\"+\$domain] end;
@@ -378,8 +406,9 @@ add_domain_rule() {
         else \$rules[\$i-1]
         end]
     end" "$CONFIG_FILE" >"$tmp"
-  state_apply_candidate_file "$tmp" apply_candidate || return
-  info "已添加/更新域名规则：${inbound} ${match} ${domain} -> ${outbound}。"
+    state_apply_candidate_file "$tmp" apply_candidate >/dev/null || return
+  done
+  info "已添加/更新域名规则：${inbound} ${match}（${#domains[@]} 条） -> ${outbound}。"
 }
 
 delete_domain_rule() {

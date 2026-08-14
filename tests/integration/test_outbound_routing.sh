@@ -131,8 +131,16 @@ assert_eq http-jp "$(jq -r '.routing.rules[]|select(.domain==["domain:openai.com
   'duplicate domain update did not change outbound'
 assert_domain_rules_before_default vless-443
 
+add_domain_rule vless-443 suffix 'batch-one.example.com, batch-two.example.com' socks-us >/dev/null
+assert_eq 1 "$(jq '[.routing.rules[]|select(.domain==["domain:batch-one.example.com"])]|length' "$CONFIG_FILE")" \
+  'first comma-separated domain was not added'
+assert_eq 1 "$(jq '[.routing.rules[]|select(.domain==["domain:batch-two.example.com"])]|length' "$CONFIG_FILE")" \
+  'second comma-separated domain was not added'
+assert_eq socks-us "$(jq -r '.routing.rules[]|select(.domain==["domain:batch-two.example.com"])|.outboundTag' "$CONFIG_FILE")" \
+  'comma-separated domain outbound was not applied'
+
 assign_outbound vless-443 http-jp >/dev/null
-assert_eq 2 "$(jq '[.routing.rules[]|select(((.ruleTag // "")|startswith("xrayctl-domain:")) and (.inboundTag==["vless-443"]))]|length' "$CONFIG_FILE")" \
+assert_eq 4 "$(jq '[.routing.rules[]|select(((.ruleTag // "")|startswith("xrayctl-domain:")) and (.inboundTag==["vless-443"]))]|length' "$CONFIG_FILE")" \
   'changing default outbound deleted domain rules'
 assert_domain_rules_before_default vless-443
 
