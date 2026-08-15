@@ -218,7 +218,7 @@ print_table_cell() {
 print_table_cell_clipped() {
   local value=$1 target_width=$2 width limit clipped="" used=0 char char_width i
   display_width width "$value"
-  if ((width < target_width)); then print_table_cell "$value" "$target_width"; return; fi
+  if ((width <= target_width)); then print_table_cell "$value" "$target_width"; return; fi
   limit=$((target_width-4)); ((limit > 0)) || limit=1
   for ((i=0; i<${#value}; i++)); do
     char=${value:i:1}; display_width char_width "$char"

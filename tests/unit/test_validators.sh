@@ -49,9 +49,10 @@ assert_eq 4 "$width" "UTF-8 table width for labels is incorrect"
 
 assert_eq '标签    ' "$(print_table_cell '标签' 8)" "table cell padding is incorrect"
 assert_eq '子域名' "$(print_table_cell '子域名' 6)" "exact-width table cells should not gain padding"
-assert_eq 'abcdefghijklmnopqrst... ' \
+assert_eq '子域名' "$(print_table_cell_clipped '子域名' 6)" "exact-width UTF-8 cells should not be clipped"
+assert_eq 'abcdefghijklmnopqrstuvwx' \
   "$(print_table_cell_clipped 'abcdefghijklmnopqrstuvwx' 24)" \
-  "24-column domain cells should expose more of long values"
+  "exact-width ASCII cells should not be clipped"
 assert_eq 'abcd... ' "$(print_table_cell_clipped 'abcdefghijkl' 8)" "clipped table cells are incorrect"
 
 pass "validators preserve the pre-refactor contract"
