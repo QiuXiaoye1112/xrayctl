@@ -34,7 +34,7 @@ cat >"$XRAYCTL_CONFIG_FILE" <<'JSON'
   "outbounds": [
     {"protocol": "freedom", "tag": "direct"},
     {"protocol": "blackhole", "tag": "blocked"},
-    {"protocol": "socks", "tag": "socks-us", "settings": {"address": "192.0.2.10", "port": 1080}},
+    {"protocol": "socks", "tag": "socks-us", "settings": {"address": "192.0.2.10", "port": 1080, "user": "Ethan", "pass": "secret", "level": 0}},
     {"protocol": "socks", "tag": "socks-jp", "settings": {"address": "192.0.2.20", "port": 1080}},
     {"protocol": "http", "tag": "http-jp", "settings": {"address": "192.0.2.30", "port": 8080}}
   ],
@@ -260,9 +260,21 @@ assert_eq UseIP "$(jq -r --arg tag "$local_ipv6_tag" '.outbounds[]|select(.tag==
   'IPv6 freedom outbound domainStrategy changed'
 assert_domain_rules_before_default vless-443
 listing=$(list_domain_rules vless-443)
-[[ $listing == *'2001:db8::1'* ]] || fail 'domain rule list exposed local tag instead of sendThrough IP'
+[[ $listing == *'2001:...:1'* ]] || fail 'domain rule list did not compact the IPv6 sendThrough address'
 [[ $listing == *'入站：vless-443'* ]] || fail 'domain rule list was not grouped by inbound'
 [[ $listing == *'序号  | 匹配   | 域名'* ]] || fail 'domain rule list did not use the compact grouped columns'
+
+assert_eq '[2001:...:1746]:5000' "$(_outbound_endpoint_display 2001:db8:1700::1746 5000)" \
+  'IPv6 proxy endpoint was not compacted'
+assert_eq '192.0.2.10:1080' "$(_outbound_endpoint_display 192.0.2.10 1080)" \
+  'IPv4 proxy endpoint display changed'
+overview=$(list_outbound_overview)
+[[ $overview == *'socks-us'* ]] || fail 'manual proxy disappeared from outbound overview'
+[[ $overview != *'secret'* ]] || fail 'outbound overview exposed the proxy password'
+details=$(show_outbound_details socks-us)
+[[ $details == *'"address": "192.0.2.10"'* ]] || fail 'outbound details omitted the proxy address'
+[[ $details == *'"user": "Ethan"'* ]] || fail 'outbound details omitted the proxy username'
+[[ $details == *'"pass": "secret"'* ]] || fail 'outbound details omitted the proxy password'
 
 add_domain_rule vmess-20000 suffix socks.example.com socks-us >/dev/null
 add_domain_rule vmess-20000 suffix http.example.com http-jp >/dev/null
