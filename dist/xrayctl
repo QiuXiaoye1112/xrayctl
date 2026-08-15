@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.34"
-readonly XRAYCTL_BUILD_COMMIT="af83b5347dea"
+readonly XRAYCTL_BUILD_COMMIT="a5b27787069a"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -218,7 +218,7 @@ print_table_cell() {
 print_table_cell_clipped() {
   local value=$1 target_width=$2 width limit clipped="" used=0 char char_width i
   display_width width "$value"
-  if ((width < target_width)); then print_table_cell "$value" "$target_width"; return; fi
+  if ((width <= target_width)); then print_table_cell "$value" "$target_width"; return; fi
   limit=$((target_width-4)); ((limit > 0)) || limit=1
   for ((i=0; i<${#value}; i++)); do
     char=${value:i:1}; display_width char_width "$char"
