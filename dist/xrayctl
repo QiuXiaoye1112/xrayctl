@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.34"
-readonly XRAYCTL_BUILD_COMMIT="a5b27787069a"
+readonly XRAYCTL_BUILD_COMMIT="bdc36a496f50"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -3066,11 +3066,34 @@ _ensure_freedom_outbound() {
 
 outbound_exists() { jq -e --arg tag "$1" '.outbounds[]?|select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
 
+_short_ipv6() {
+  local ip=$1 first last
+  [[ $ip == *:* ]] || { printf '%s' "$ip"; return; }
+  first=${ip%%:*}
+  last=${ip##*:}
+  [[ -n $first ]] || first=:
+  [[ -n $last ]] || last=:
+  printf '%s:...:%s' "$first" "$last"
+}
+
 _outbound_display_name() {
   local tag=$1 ip
   [[ $tag == direct ]] && { printf 'direct'; return; }
   ip=$(jq -r --arg tag "$tag" '.outbounds[]?|select(.tag==$tag)|.sendThrough // empty' "$CONFIG_FILE" 2>/dev/null || true)
-  printf '%s' "${ip:-$tag}"
+  if [[ $ip == *:* ]]; then _short_ipv6 "$ip"; else printf '%s' "${ip:-$tag}"; fi
+}
+
+_outbound_endpoint_display() {
+  local address=$1 port=$2 raw=$1
+  if [[ $raw == \[*\] ]]; then
+    raw=${raw#\[}
+    raw=${raw%\]}
+  fi
+  if [[ $raw == *:* ]]; then
+    printf '[%s]:%s' "$(_short_ipv6 "$raw")" "$port"
+  else
+    printf '%s:%s' "$address" "$port"
+  fi
 }
 
 _xrayctl_domain_rule_jq() {
@@ -3083,8 +3106,7 @@ JQ
 }
 
 list_outbound_overview() {
-  local rows number tag protocol address username password width
-  local number_width=4 tag_width=4 protocol_width=4 address_width=4 username_width=4
+  local rows number tag protocol address port username endpoint
   ensure_config
   heading "入站与出站规则"
   if [[ $(jq '.inbounds|length' "$CONFIG_FILE") == 0 ]]; then
@@ -3106,30 +3128,49 @@ list_outbound_overview() {
   if jq -e '.outbounds[]?|select(.protocol=="socks" or .protocol=="http")' "$CONFIG_FILE" >/dev/null; then
     rows=$(jq -r '[.outbounds[]?|select(.protocol=="socks" or .protocol=="http")] | to_entries[] |
       [.key+1,.value.tag,.value.protocol,
-       ((if (.value.settings.address|contains(":")) then "["+.value.settings.address+"]" else .value.settings.address end)+":"+(.value.settings.port|tostring)),
-       (if (.value.settings.user // "")=="" then "无" else .value.settings.user end),
-       (if (.value.settings.pass // "")=="" then "无" else .value.settings.pass end)] | @tsv' "$CONFIG_FILE")
-    while IFS=$'\t' read -r number tag protocol address username password; do
-      display_width width "$number"; if ((width > number_width)); then number_width=$width; fi
-      display_width width "$tag"; if ((width > tag_width)); then tag_width=$width; fi
-      display_width width "$protocol"; if ((width > protocol_width)); then protocol_width=$width; fi
-      display_width width "$address"; if ((width > address_width)); then address_width=$width; fi
-      display_width width "$username"; if ((width > username_width)); then username_width=$width; fi
-    done <<<"$rows"
-    ((number_width+=2, tag_width+=2, protocol_width+=2, address_width+=2, username_width+=2))
-    print_table_cell "序号" "$number_width"; printf '| '; print_table_cell "标签" "$tag_width"; printf '| '
-    print_table_cell "协议" "$protocol_width"; printf '| '; print_table_cell "地址" "$address_width"; printf '| '
-    print_table_cell "用户" "$username_width"; printf '| 密码\n'
-    while IFS=$'\t' read -r number tag protocol address username password; do
-      print_table_cell "$number" "$number_width"; printf '| '; print_table_cell "$tag" "$tag_width"; printf '| '
-      print_table_cell "$protocol" "$protocol_width"; printf '| '; print_table_cell "$address" "$address_width"; printf '| '
-      print_table_cell "$username" "$username_width"; printf '| %s\n' "$password"
+       .value.settings.address,(.value.settings.port|tostring),
+       (if (.value.settings.user // "")=="" then "无" else .value.settings.user end)] | @tsv' "$CONFIG_FILE")
+    print_table_cell "序号" 4; printf '| '
+    print_table_cell_clipped "标签" 16; printf '| '
+    print_table_cell "协议" 7; printf '| '
+    print_table_cell_clipped "地址" 22; printf '| 用户\n'
+    while IFS=$'\t' read -r number tag protocol address port username; do
+      endpoint=$(_outbound_endpoint_display "$address" "$port")
+      print_table_cell "$number" 4; printf '| '
+      print_table_cell_clipped "$tag" 16; printf '| '
+      print_table_cell "$protocol" 7; printf '| '
+      print_table_cell_clipped "$endpoint" 22; printf '| %s\n' "$username"
     done <<<"$rows"
   else
     info "还没有代理出站。"
   fi
 
   printf '\n'
+}
+
+show_outbound_details() {
+  ensure_config
+  local tag=${1-} answer item
+  local -a tags=()
+  while IFS= read -r item; do
+    [[ -n $item ]] && tags+=("$item")
+  done < <(jq -r '.outbounds[]?|select(.protocol=="socks" or .protocol=="http")|.tag' "$CONFIG_FILE")
+  ((${#tags[@]})) || { info "还没有手动添加的代理出站。"; return 0; }
+
+  if [[ -z $tag ]]; then
+    if ((${#tags[@]} == 1)); then
+      tag=${tags[0]}
+    else
+      choose answer "选择要查看的代理出站" "${tags[@]}" || return 0
+      tag=${tags[$((answer-1))]}
+    fi
+  fi
+  jq -e --arg tag "$tag" '.outbounds[]?|select((.protocol=="socks" or .protocol=="http") and .tag==$tag)' "$CONFIG_FILE" >/dev/null \
+    || die "找不到手动添加的代理出站：$tag"
+
+  heading "出站详情"
+  printf '出站：%s\n\n' "$tag"
+  jq --arg tag "$tag" '.outbounds[]|select((.protocol=="socks" or .protocol=="http") and .tag==$tag)' "$CONFIG_FILE"
 }
 
 prompt_outbound_tag() {
@@ -4621,11 +4662,12 @@ outbound_menu() {
     clear_screen
     heading "出站管理"
     list_outbound_overview
-    printf '\n1) 设置入站默认出站\n2) 域名分流\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 删除出站\n0) 返回\n'
+    printf '\n1) 设置入站默认出站\n2) 域名分流\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 查看出站详情\n5) 删除出站\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action assign_outbound; pause;; 2) domain_rule_menu;;
-      3) run_menu_action add_outbound; pause;; 4) run_menu_action delete_outbound; pause;;
+      3) run_menu_action add_outbound; pause;; 4) run_menu_action show_outbound_details; pause;;
+      5) run_menu_action delete_outbound; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done

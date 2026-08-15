@@ -4,11 +4,12 @@ outbound_menu() {
     clear_screen
     heading "出站管理"
     list_outbound_overview
-    printf '\n1) 设置入站默认出站\n2) 域名分流\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 删除出站\n0) 返回\n'
+    printf '\n1) 设置入站默认出站\n2) 域名分流\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 查看出站详情\n5) 删除出站\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action assign_outbound; pause;; 2) domain_rule_menu;;
-      3) run_menu_action add_outbound; pause;; 4) run_menu_action delete_outbound; pause;;
+      3) run_menu_action add_outbound; pause;; 4) run_menu_action show_outbound_details; pause;;
+      5) run_menu_action delete_outbound; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done

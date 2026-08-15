@@ -84,7 +84,7 @@ show_main_summary() { :; }
 show_main_inbounds() { :; }
 
 domain_rule_menu() { record domain_rule_menu; }
-for spec in '1 assign_outbound' '2 domain_rule_menu' '3 add_outbound' '4 delete_outbound'; do
+for spec in '1 assign_outbound' '2 domain_rule_menu' '3 add_outbound' '4 show_outbound_details' '5 delete_outbound'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route outbound_menu "$choice" "$action"
 done
 for spec in '1 add_client node' '2 rename_client node' '3 rotate_client_credential node' '4 delete_client node'; do
