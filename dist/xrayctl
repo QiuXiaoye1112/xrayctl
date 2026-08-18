@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.34"
-readonly XRAYCTL_BUILD_COMMIT="24cbac4557d0"
+readonly XRAYCTL_BUILD_COMMIT="5c1187154913"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -3351,7 +3351,7 @@ list_domain_rules() {
     fi
     ((number+=1))
     print_table_cell "$number" 4; printf '  '
-    print_table_cell_clipped "$domain" 24; printf '\n'
+    print_table_cell "$domain" 24; printf '\n'
   done <<<"$rows"
 }
 

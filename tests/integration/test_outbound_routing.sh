@@ -288,6 +288,7 @@ assert_eq 1 "$(jq '[.routing.rules[]|select(.inboundTag==["vless-443"] and .doma
 add_domain_rule vless-443 suffix zeta-sort.test socks-us >/dev/null
 add_domain_rule vless-443 suffix alpha-sort.test socks-us >/dev/null
 add_domain_rule vless-443 suffix middle-sort.test socks-us >/dev/null
+add_domain_rule vless-443 suffix very-long-domain-name-for-display.test socks-us >/dev/null
 route_order_before=$(jq -c '
   [.routing.rules[] |
     select(.inboundTag==["vless-443"] and
@@ -309,6 +310,7 @@ alpha_line=$(grep -nF 'alpha-sort.test' <<<"$listing" | cut -d: -f1)
 middle_line=$(grep -nF 'middle-sort.test' <<<"$listing" | cut -d: -f1)
 zeta_line=$(grep -nF 'zeta-sort.test' <<<"$listing" | cut -d: -f1)
 ((alpha_line < middle_line && middle_line < zeta_line)) || fail 'domain rule list is not sorted A-Z'
+[[ $listing == *'very-long-domain-name-for-display.test'* ]] || fail 'domain rule list truncated a long domain name'
 
 assert_eq '[2001:...:1746]:5000' "$(_outbound_endpoint_display 2001:db8:1700::1746 5000)" \
   'IPv6 proxy endpoint was not compacted'
