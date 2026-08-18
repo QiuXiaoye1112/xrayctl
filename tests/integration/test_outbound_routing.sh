@@ -264,6 +264,31 @@ listing=$(list_domain_rules vless-443)
 [[ $listing == *'入站：vless-443'* ]] || fail 'domain rule list was not grouped by inbound'
 [[ $listing == *'序号  | 匹配   | 域名'* ]] || fail 'domain rule list did not use the compact grouped columns'
 
+add_domain_rule vless-443 suffix zeta-sort.test socks-us >/dev/null
+add_domain_rule vless-443 suffix alpha-sort.test socks-us >/dev/null
+add_domain_rule vless-443 suffix middle-sort.test socks-us >/dev/null
+route_order_before=$(jq -c '
+  [.routing.rules[] |
+    select(.inboundTag==["vless-443"] and
+      (.domain[0] | IN("domain:zeta-sort.test", "domain:alpha-sort.test", "domain:middle-sort.test"))) |
+    .domain[0]]
+' "$CONFIG_FILE")
+before_listing=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
+listing=$(list_domain_rules vless-443)
+after_listing=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
+assert_eq "$before_listing" "$after_listing" 'listing domain rules changed the configuration'
+route_order_after=$(jq -c '
+  [.routing.rules[] |
+    select(.inboundTag==["vless-443"] and
+      (.domain[0] | IN("domain:zeta-sort.test", "domain:alpha-sort.test", "domain:middle-sort.test"))) |
+    .domain[0]]
+' "$CONFIG_FILE")
+assert_eq "$route_order_before" "$route_order_after" 'listing domain rules changed route order'
+alpha_line=$(grep -nF 'alpha-sort.test' <<<"$listing" | cut -d: -f1)
+middle_line=$(grep -nF 'middle-sort.test' <<<"$listing" | cut -d: -f1)
+zeta_line=$(grep -nF 'zeta-sort.test' <<<"$listing" | cut -d: -f1)
+((alpha_line < middle_line && middle_line < zeta_line)) || fail 'domain rule list is not sorted A-Z'
+
 assert_eq '[2001:...:1746]:5000' "$(_outbound_endpoint_display 2001:db8:1700::1746 5000)" \
   'IPv6 proxy endpoint was not compacted'
 assert_eq '192.0.2.10:1080' "$(_outbound_endpoint_display 192.0.2.10 1080)" \

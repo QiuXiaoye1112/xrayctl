@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.34"
-readonly XRAYCTL_BUILD_COMMIT="bdc36a496f50"
+readonly XRAYCTL_BUILD_COMMIT="2185e1c286ec"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -3325,7 +3325,10 @@ list_domain_rules() {
     [.inbounds[].tag] as \$inbound_order |
     \$inbound_order[] as \$group |
     select(\$inbound==\"\" or \$group==\$inbound) |
-    (\$rows[] | select(.[0]==\$group)) | @tsv" "$CONFIG_FILE")
+    (\$rows |
+      map(select(.[0]==\$group)) |
+      sort_by([(.[2] | ascii_downcase), .[2], (if .[1]==\"exact\" then 0 else 1 end)])[]
+    ) | @tsv" "$CONFIG_FILE")
   heading "域名分流规则"
   [[ -n $rows ]] || { info "还没有域名分流规则。"; return 0; }
   while IFS=$'\t' read -r inbound match domain outbound; do
