@@ -100,9 +100,8 @@ exercise_menu_route inbound_menu 2 'manage_inbound_menu node'
 # shellcheck source=../../src/menu.sh
 source "${REPO_ROOT}/src/menu.sh"
 
-for spec in '1 add_domain_rule' '2 delete_domain_rule'; do
-  choice=${spec%% *}; action=${spec#* }; exercise_menu_route domain_rule_menu "$choice" "$action"
-done
+exercise_menu_route domain_rule_menu 1 'add_domain_rule node    --prompt'
+exercise_menu_route domain_rule_menu 2 'delete_domain_rule node'
 
 for spec in '1 issue_certificate' '2 import_certificate' '3 list_certificates' '4 delete_managed_certificate' '6 renew_managed_certificates'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route certificate_menu "$choice" "$action"
