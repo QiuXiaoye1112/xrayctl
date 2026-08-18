@@ -282,7 +282,10 @@ list_domain_rules() {
     [.inbounds[].tag] as \$inbound_order |
     \$inbound_order[] as \$group |
     select(\$inbound==\"\" or \$group==\$inbound) |
-    (\$rows[] | select(.[0]==\$group)) | @tsv" "$CONFIG_FILE")
+    (\$rows |
+      map(select(.[0]==\$group)) |
+      sort_by([(.[2] | ascii_downcase), .[2], (if .[1]==\"exact\" then 0 else 1 end)])[]
+    ) | @tsv" "$CONFIG_FILE")
   heading "域名分流规则"
   [[ -n $rows ]] || { info "还没有域名分流规则。"; return 0; }
   while IFS=$'\t' read -r inbound match domain outbound; do
