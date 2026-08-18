@@ -308,7 +308,7 @@ list_domain_rules() {
     fi
     ((number+=1))
     print_table_cell "$number" 4; printf '  '
-    print_table_cell_clipped "$domain" 24; printf '\n'
+    print_table_cell "$domain" 24; printf '\n'
   done <<<"$rows"
 }
 
