@@ -170,6 +170,13 @@ assert_eq '["domain:api.example.com","domain:example.com"]' "$reverse_order" \
 delete_domain_rule reverse-in <<< '1,2' >/dev/null
 assert_eq 0 "$(jq '[.routing.rules[]|select(.inboundTag==["reverse-in"] and ((.ruleTag // "")|startswith("xrayctl-domain:")))]|length' "$CONFIG_FILE")" \
   'batch domain deletion did not remove all selected rules'
+add_domain_rule reverse-in suffix zeta-delete.test direct >/dev/null
+add_domain_rule reverse-in suffix alpha-delete.test socks-jp >/dev/null
+delete_domain_rule reverse-in <<< '1' >/dev/null
+assert_eq 0 "$(jq '[.routing.rules[]|select(.inboundTag==["reverse-in"] and .domain==["domain:zeta-delete.test"])]|length' "$CONFIG_FILE")" \
+  'delete list did not use the same grouped order as the rule display'
+assert_eq 1 "$(jq '[.routing.rules[]|select(.inboundTag==["reverse-in"] and .domain==["domain:alpha-delete.test"])]|length' "$CONFIG_FILE")" \
+  'delete list removed a rule other than the displayed first rule'
 add_domain_rule priority-in suffix foo.bar.example.com socks-jp >/dev/null
 priority_order=$(jq -c --arg inbound priority-in '
   [.routing.rules[]|select(.inboundTag==[$inbound])|.domain[0]]' "$CONFIG_FILE")
@@ -262,7 +269,21 @@ assert_domain_rules_before_default vless-443
 listing=$(list_domain_rules vless-443)
 [[ $listing == *'2001:...:1'* ]] || fail 'domain rule list did not compact the IPv6 sendThrough address'
 [[ $listing == *'入站：vless-443'* ]] || fail 'domain rule list was not grouped by inbound'
-[[ $listing == *'序号  | 匹配   | 域名'* ]] || fail 'domain rule list did not use the compact grouped columns'
+[[ $listing == *'子域名 →'* ]] || fail 'domain rule list did not group repeated match and outbound values'
+[[ $listing != *'序号  | 匹配   | 域名'* ]] || fail 'domain rule list still repeated table columns'
+menu_listing=$(list_domain_rules vless-443 --menu)
+[[ $menu_listing != *'入站：vless-443'* ]] || fail 'domain menu repeated the selected inbound label'
+[[ $menu_listing == *'子域名 →'* ]] || fail 'domain menu lost grouped rule display'
+
+(
+  select_inbound() { return 1; }
+  choose() { printf -v "$1" '%s' 1; }
+  prompt_value() { printf -v "$1" '%s' menu-scoped.test; }
+  select_outbound() { printf -v "$1" '%s' direct; }
+  add_domain_rule vless-443 "" "" "" --prompt
+)
+assert_eq 1 "$(jq '[.routing.rules[]|select(.inboundTag==["vless-443"] and .domain==["domain:menu-scoped.test"] and .outboundTag=="direct")]|length' "$CONFIG_FILE")" \
+  'menu-scoped add prompted for another inbound or used the wrong inbound'
 
 add_domain_rule vless-443 suffix zeta-sort.test socks-us >/dev/null
 add_domain_rule vless-443 suffix alpha-sort.test socks-us >/dev/null

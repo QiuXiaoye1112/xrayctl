@@ -16,16 +16,17 @@ outbound_menu() {
 }
 
 domain_rule_menu() {
-  local choice
-  while true; do
+  local tag choice
+  select_inbound tag || return
+  while inbound_exists "$tag"; do
     clear_screen
-    heading "域名分流"
-    list_domain_rules
+    heading "域名分流 · ${tag}"
+    list_domain_rules "$tag" --menu
     printf '\n1) 添加规则\n2) 删除规则\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
-      1) run_menu_action add_domain_rule; pause;;
-      2) run_menu_action delete_domain_rule; pause;;
+      1) run_menu_action add_domain_rule "$tag" "" "" "" --prompt; pause;;
+      2) run_menu_action delete_domain_rule "$tag"; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
