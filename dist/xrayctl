@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.2.34"
-readonly XRAYCTL_BUILD_COMMIT="5c1187154913"
+readonly XRAYCTL_BUILD_COMMIT="7a8d2476e32e"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -4700,7 +4700,7 @@ outbound_menu() {
 
 domain_rule_menu() {
   local tag choice
-  select_inbound tag || return
+  select_inbound tag || { pause; return; }
   while inbound_exists "$tag"; do
     clear_screen
     heading "域名分流 · ${tag}"

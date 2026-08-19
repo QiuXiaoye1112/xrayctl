@@ -103,6 +103,18 @@ source "${REPO_ROOT}/src/menu.sh"
 exercise_menu_route domain_rule_menu 1 'add_domain_rule node    --prompt'
 exercise_menu_route domain_rule_menu 2 'delete_domain_rule node'
 
+# An empty inbound list must leave the warning visible before returning to the
+# parent menu instead of immediately redrawing it.
+warn() { record warn "$@"; }
+pause() { record pause; }
+select_inbound() { warn '没有可选入站。'; return 1; }
+: >"$EVENT_LOG"
+domain_rule_menu >/dev/null
+assert_recorded 'warn 没有可选入站。'
+assert_recorded 'pause'
+warn() { :; }
+pause() { :; }
+
 for spec in '1 issue_certificate' '2 import_certificate' '3 list_certificates' '4 delete_managed_certificate' '6 renew_managed_certificates'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route certificate_menu "$choice" "$action"
 done

@@ -17,7 +17,7 @@ outbound_menu() {
 
 domain_rule_menu() {
   local tag choice
-  select_inbound tag || return
+  select_inbound tag || { pause; return; }
   while inbound_exists "$tag"; do
     clear_screen
     heading "域名分流 · ${tag}"
