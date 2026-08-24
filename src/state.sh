@@ -435,7 +435,8 @@ edit_config() {
     rm -f "$tmp"
     info "配置未更改。"
   else
-    state_apply_candidate_file "$tmp" apply_candidate
+    state_apply_candidate_file "$tmp" apply_candidate || return
+    traffic_after_config_change || warn "配置已应用，但流量入站清单暂未同步，采集任务会自动重试。"
   fi
 }
 
@@ -448,19 +449,21 @@ backup_all() {
   require_root backup; ensure_config
   local target=${1:-${BACKUP_DIR}/xrayctl-$(timestamp).tar.gz}
   local paths=("${CONFIG_FILE#/}")
+  traffic_is_enabled && traffic_collect || true
   ensure_backup_dir
   mkdir -p "$(dirname "$target")"
   [[ ! -f $META_FILE ]] || paths+=("${META_FILE#/}")
   [[ ! -d $CERT_DIR ]] || paths+=("${CERT_DIR#/}")
+  [[ ! -f $TRAFFIC_FILE ]] || paths+=("${TRAFFIC_FILE#/}")
   tar -czf "$target" -C / "${paths[@]}" 2>/dev/null || { rm -f "$target"; die "备份失败。"; }
   chmod 600 "$target"
   info "备份已创建：$target"
-  info "提示：备份包含 Xray 配置、metadata 和证书副本，不含 Certbot 账户/lineage 数据。"
+  info "提示：备份包含 Xray 配置、metadata、流量记录和证书副本，不含 Certbot 账户/lineage 数据。"
 }
 
 restore_backup() {
   ensure_runtime_dependencies restore; ensure_config
-  local archive=${1-} temp extract_config snapshot had_meta=0 had_certs=0
+  local archive=${1-} temp extract_config snapshot had_meta=0 had_certs=0 had_traffic=0 restored_traffic=0
   [[ -n $archive ]] || prompt_value archive "备份文件路径"
   [[ -r $archive ]] || die "无法读取备份：$archive"
   tar -tzf "$archive" >/dev/null || die "不是有效的 tar.gz 备份。"
@@ -477,33 +480,49 @@ restore_backup() {
     "$temp/$extract_config" >/dev/null || { rm -rf "$temp"; die "备份配置 JSON 结构无效。"; }
   confirm "恢复会覆盖当前配置和托管证书，继续吗？" N || { rm -rf "$temp"; return; }
 
+  if traffic_is_enabled; then
+    traffic_collect || true
+    traffic_runtime_stop || { rm -rf "$temp"; die "无法安全停止现有流量统计规则，已取消恢复。"; }
+  fi
   backup_config_quiet >/dev/null || true
   snapshot="$temp/.current"
   mkdir -p "$snapshot"
   cp -a "$CONFIG_FILE" "$snapshot/config.json"
   if [[ -f $META_FILE ]]; then cp -a "$META_FILE" "$snapshot/meta.json"; had_meta=1; fi
   if [[ -d $CERT_DIR ]]; then cp -a "$CERT_DIR" "$snapshot/certs"; had_certs=1; fi
+  if [[ -f $TRAFFIC_FILE ]]; then cp -a "$TRAFFIC_FILE" "$snapshot/traffic.json"; had_traffic=1; fi
 
   cp -a "$temp/$extract_config" "$CONFIG_FILE"
   if [[ -f "$temp/${META_FILE#/}" ]]; then cp -a "$temp/${META_FILE#/}" "$META_FILE"; else rm -f "$META_FILE"; fi
   rm -rf "$CERT_DIR"
   setup_certificate_access
   if [[ -d "$temp/${CERT_DIR#/}" ]]; then cp -a "$temp/${CERT_DIR#/}/." "$CERT_DIR/"; fi
+  if [[ -f "$temp/${TRAFFIC_FILE#/}" ]]; then
+    mkdir -p "$(dirname "$TRAFFIC_FILE")"
+    install -m 600 "$temp/${TRAFFIC_FILE#/}" "$TRAFFIC_FILE"
+    restored_traffic=1
+  fi
   init_meta
   setup_runtime_access
 
-  if ! validate_candidate "$CONFIG_FILE" || ! restart_service; then
-    error "恢复后配置验证或服务启动失败，正在回滚配置、元数据和证书。"
+  if ! validate_candidate "$CONFIG_FILE" || ! restart_service || ! traffic_runtime_ensure; then
+    error "恢复后配置、服务或流量统计运行时失败，正在整体回滚。"
     cp -a "$snapshot/config.json" "$CONFIG_FILE"
     if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE"; else rm -f "$META_FILE"; fi
     rm -rf "$CERT_DIR"
     setup_certificate_access
     if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/"; fi
+    if ((had_traffic)); then
+      mkdir -p "$(dirname "$TRAFFIC_FILE")"; install -m 600 "$snapshot/traffic.json" "$TRAFFIC_FILE"
+    elif ((restored_traffic)); then
+      rm -f "$TRAFFIC_FILE"
+    fi
     init_meta
     setup_runtime_access
     restart_service || true
+    traffic_runtime_ensure || true
     rm -rf "$temp"
-    die "恢复失败，已回滚配置、元数据和证书。"
+    die "恢复失败，已回滚配置、元数据、证书、流量记录和运行时规则。"
   fi
   rm -rf "$temp"; info "备份已恢复。"
 

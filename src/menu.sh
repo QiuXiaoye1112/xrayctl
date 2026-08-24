@@ -276,6 +276,64 @@ uninstall_menu() {
   done
 }
 
+traffic_menu() {
+  local choice start end
+  start=$(traffic_retention_start); end=$(traffic_today)
+  traffic_is_enabled && run_menu_action traffic_collect
+  while true; do
+    clear_screen
+    traffic_show "$start" "$end" || true
+    printf '\n1) 刷新\n2) 设置时间范围\n3) 流量限制\n4) 清空指定入站记录\n5) 清空全部流量记录\n'
+    if traffic_is_enabled; then printf '6) 停止流量统计\n'; else printf '6) 开启流量统计\n'; fi
+    printf '0) 返回\n'
+    read -r -p "请选择: " choice || { echo; return; }
+    case $choice in
+      1) run_menu_action traffic_collect;;
+      2) traffic_prompt_range start end || true;;
+      3) traffic_limit_menu;;
+      4) run_menu_action traffic_clear_tag_records; pause;;
+      5) run_menu_action traffic_clear_all_records; pause;;
+      6)
+        if traffic_is_enabled; then run_menu_action traffic_disable; else run_menu_action traffic_enable; fi
+        pause
+        ;;
+      0) return;;
+      *) warn "无效选项。"; pause;;
+    esac
+  done
+}
+
+traffic_limit_menu() {
+  local choice
+  while true; do
+    if traffic_is_enabled; then run_menu_action traffic_collect || true; fi
+    clear_screen
+    traffic_limits_show || true
+    if traffic_limits_are_enabled; then
+      printf '操作\n1) 刷新状态\n2) 设置/修改入站额度\n3) 取消入站额度\n4) 关闭流量限制\n0) 返回\n'
+    else
+      printf '操作\n1) 启用流量限制\n0) 返回\n'
+    fi
+    read -r -p "请选择: " choice || { echo; return; }
+    if traffic_limits_are_enabled; then
+      case $choice in
+        1) continue;;
+        2) run_menu_action traffic_limit_set; pause;;
+        3) run_menu_action traffic_limit_remove; pause;;
+        4) run_menu_action traffic_limits_disable; pause;;
+        0) return 0;;
+        *) warn "无效选项。"; pause;;
+      esac
+    else
+      case $choice in
+        1) run_menu_action traffic_limits_enable; pause;;
+        0) return 0;;
+        *) warn "无效选项。"; pause;;
+      esac
+    fi
+  done
+}
+
 main_menu() {
   local choice
   while true; do
@@ -283,11 +341,11 @@ main_menu() {
     printf '%sXray Linux 管理脚本%s  v%s\n' "$C_BOLD$C_BLUE" "$C_RESET" "$XRAYCTL_VERSION"
     show_main_summary
     show_main_inbounds
-    printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 服务管理\n5) 系统工具\n6) 卸载\n0) 退出\n'
+    printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 服务管理\n5) 流量信息\n6) 系统工具\n7) 卸载\n0) 退出\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) service_menu;;
-      5) system_menu;; 6) uninstall_menu;;
+      5) traffic_menu;; 6) system_menu;; 7) uninstall_menu;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -307,6 +365,11 @@ xrayctl - Xray Linux 管理脚本
   xrayctl status                  查看状态
   xrayctl start|stop|restart      服务控制
   xrayctl logs [行数]             查看服务日志
+  xrayctl traffic [开始日期] [结束日期] 查看按入站累计流量
+  xrayctl traffic enable|disable       开启/停止流量统计
+  xrayctl traffic limit show|enable|disable
+  xrayctl traffic limit set <标签> <GB>
+  xrayctl traffic limit remove <标签>
   xrayctl inbound list            列出入站
   xrayctl inbound add             交互新增入站
   xrayctl inbound show <标签>     查看入站 JSON
@@ -363,6 +426,29 @@ dispatch() {
     status) show_status;;
     start|stop|restart|enable|disable) service_action "$command";;
     logs) show_logs "${1:-100}";;
+    traffic)
+      case ${1:-show} in
+        show) traffic_collect || true; traffic_show "${2:-$(traffic_retention_start)}" "${3:-$(traffic_today)}";;
+        enable|start) traffic_enable;;
+        disable|stop) traffic_disable;;
+        collect|refresh) traffic_collect;;
+        reset)
+          if [[ ${2-} == --all ]]; then traffic_clear_all_records; else traffic_clear_tag_records "${2-}"; fi
+          ;;
+        limit)
+          case ${2:-show} in
+            show) traffic_limits_show;;
+            enable|start) traffic_limits_enable;;
+            disable|stop) traffic_limits_disable;;
+            set) traffic_limit_set "${3-}" "${4-}";;
+            remove|delete) traffic_limit_remove "${3-}";;
+            *) die "未知 traffic limit 子命令：${2}";;
+          esac
+          ;;
+        [0-9][0-9][0-9][0-9]-*) traffic_collect || true; traffic_show "$1" "${2:-$(traffic_today)}";;
+        *) die "未知 traffic 子命令：${1}";;
+      esac
+      ;;
     inbound)
       case ${1:-list} in
         list) ensure_config; list_inbounds;; add) add_inbound;; show) ensure_config; show_inbound "${2:?请提供入站标签}";;
@@ -406,6 +492,8 @@ dispatch() {
         *) die "未知 cert 子命令：${1}";; esac;;
 
     bbr) manage_bbr;; diagnose|doctor) system_diagnostics;; quick-command) ensure_runtime_dependencies quick-command; install_quick_command;;
+    internal-traffic-collect) internal_traffic_collect;;
+    internal-traffic-watch) internal_traffic_watch;;
     *) error "未知命令：$command"; show_help; return 2;;
   esac
 }

@@ -98,6 +98,7 @@ add_inbound() {
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
   state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  traffic_after_config_change || warn "入站已创建，但流量规则暂未同步，采集任务会自动重试。"
   heading "入站已创建"
   show_inbound "$tag"
   print_links "$tag" "" || true
@@ -183,6 +184,7 @@ rename_inbound() {
       if (.ruleTag // "")==("xrayctl-outbound:"+$old) then .ruleTag=("xrayctl-outbound:"+$new) else . end
     ))' "$CONFIG_FILE" >"$tmp"
   state_apply_candidate_file "$tmp" state_commit_inbound_rename "$old_tag" "$new_tag" || return
+  traffic_after_config_change "$old_tag" "$new_tag" || warn "入站已重命名，但流量记录暂未同步，采集任务会自动重试。"
   info "入站已重命名：${old_tag} → ${new_tag}。"
 }
 
@@ -200,6 +202,7 @@ modify_inbound_basic() {
   jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
     '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
   state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
 }
 
@@ -224,6 +227,7 @@ modify_inbound_transport() {
       )
     else . end' "$CONFIG_FILE" >"$tmp"
   state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" || return
+  traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
   info "传输已更新，请重新导出客户端分享链接。"
 }
 
@@ -252,6 +256,7 @@ delete_inbound() {
       )
     ]' "$CONFIG_FILE" >"$tmp"
   state_apply_candidate_file "$tmp" state_commit_inbound_delete "$tag" || return
+  traffic_after_config_change "$tag" || warn "入站已删除，但流量记录暂未同步，采集任务会自动重试。"
   info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
 }
 

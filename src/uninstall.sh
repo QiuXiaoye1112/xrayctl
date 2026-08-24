@@ -325,6 +325,10 @@ _scan_xrayctl_residuals() {
     /etc/systemd/system/xray.service.d
     "$OPENRC_SERVICE"
     "$CERT_RENEW_HOOK"
+    "$TRAFFIC_FILE"
+    "$TRAFFIC_SYSTEMD_SERVICE"
+    "$TRAFFIC_SYSTEMD_TIMER"
+    "$TRAFFIC_OPENRC_SERVICE"
     /etc/sysctl.d/99-xrayctl-bbr.conf
     /var/log/xray
   )
@@ -413,6 +417,7 @@ EOF
   local step_failures=0 residual_count=0
 
   cleanup_step "停止续期任务"           _uninstall_disable_timers          || ((step_failures+=1))
+  cleanup_step "删除流量统计"           traffic_remove_all                  || ((step_failures+=1))
   cleanup_step "删除托管证书"           _uninstall_remove_managed_certs    || ((step_failures+=1))
   cleanup_step "删除 Cloudflare 凭据"   _uninstall_remove_cloudflare       || ((step_failures+=1))
   cleanup_step "删除 Certbot 环境"      _uninstall_remove_certbot          || ((step_failures+=1))
@@ -454,6 +459,7 @@ _xrayctl_uninstall_level_1() {
   _uninstall_snapshot_metadata
   local step_failures=0 residual_count=0
   _uninstall_disable_timers           || ((step_failures+=1))
+  traffic_remove_all                  || ((step_failures+=1))
   _uninstall_remove_managed_certs     || ((step_failures+=1))
   _uninstall_remove_cloudflare        || ((step_failures+=1))
   _uninstall_remove_certbot           || ((step_failures+=1))
@@ -486,6 +492,11 @@ _xrayctl_uninstall_level_0() {
   final_backup="${BACKUP_DIR}/pre-uninstall-$(timestamp).tar.gz"
   backup_all "$final_backup" >/dev/null 2>&1 || true
 
+  if traffic_runtime_stop; then
+    [[ ! -f $TRAFFIC_FILE ]] || traffic_set_enabled false || warn "流量记录已保留，但未能写入停止状态。"
+  else
+    warn "流量统计运行时未能完整停止，请检查防火墙规则。"
+  fi
   _uninstall_xray_core_keep_config
   info "Xray 已卸载。配置、证书、备份和自动续期仍保留。"
   info "需要时可运行 xrayctl install 重新安装 Xray。"

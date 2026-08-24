@@ -27,6 +27,9 @@ source "${XRAYCTL_SOURCE_DIR}/src/inbound.sh"
 # shellcheck source=src/share.sh
 source "${XRAYCTL_SOURCE_DIR}/src/share.sh"
 
+# shellcheck source=src/traffic.sh
+source "${XRAYCTL_SOURCE_DIR}/src/traffic.sh"
+
 # shellcheck source=src/outbound.sh
 source "${XRAYCTL_SOURCE_DIR}/src/outbound.sh"
 

@@ -24,7 +24,7 @@ if [[ -d ${REPO_ROOT}/src ]]; then
     production_files+=("$file")
   done < <(find "${REPO_ROOT}/src" -maxdepth 1 -type f -name '*.sh' | sort)
   ((${#production_files[@]} > 0)) || fail "src exists but contains no modules"
-  expected_modules=$'certificate.sh\ncore.sh\ninbound.sh\nmenu.sh\noutbound.sh\nplatform.sh\nprotocols.sh\nsecurity.sh\nservice.sh\nshare.sh\nstate.sh\nuninstall.sh'
+  expected_modules=$'certificate.sh\ncore.sh\ninbound.sh\nmenu.sh\noutbound.sh\nplatform.sh\nprotocols.sh\nsecurity.sh\nservice.sh\nshare.sh\nstate.sh\ntraffic.sh\nuninstall.sh'
   actual_modules=$(printf '%s\n' "${production_files[@]##*/}")
   assert_eq "$expected_modules" "$actual_modules" "production domain module set changed"
   duplicates=$(definition_stream "${production_files[@]}" | sort | awk -F '\t' '

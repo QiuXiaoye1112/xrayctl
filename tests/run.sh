@@ -11,6 +11,7 @@ tests=(
   "tests/unit/test_platform.sh"
   "tests/unit/test_protocol_builders.sh"
   "tests/unit/test_interactive_builders.sh"
+  "tests/unit/test_traffic.sh"
   "tests/integration/test_state.sh"
   "tests/integration/test_lifecycle.sh"
   "tests/integration/test_outbound_routing.sh"

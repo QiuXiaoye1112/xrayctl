@@ -17,6 +17,7 @@ modules=(
   protocols.sh
   inbound.sh
   share.sh
+  traffic.sh
   outbound.sh
   service.sh
   uninstall.sh

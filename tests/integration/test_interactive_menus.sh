@@ -17,6 +17,9 @@ export XRAYCTL_CONFIG_DIR="${TEST_ROOT}/config"
 export XRAYCTL_CONFIG_FILE="${XRAYCTL_CONFIG_DIR}/config.json"
 export XRAYCTL_META_FILE="${XRAYCTL_CONFIG_DIR}/meta.json"
 export XRAYCTL_CERT_DIR="${XRAYCTL_CONFIG_DIR}/certs"
+export XRAYCTL_TRAFFIC_FILE="${TEST_ROOT}/traffic.json"
+export XRAYCTL_LOCK_FILE="${TEST_ROOT}/xrayctl.lock"
+export XRAYCTL_TESTING=1
 export XRAYCTL_CLOUDFLARE_INI="${TEST_ROOT}/cloudflare.ini"
 export XRAYCTL_XRAY_BIN="${TEST_ROOT}/missing-xray"
 export XRAYCTL_RUNTIME_OWNER
@@ -131,7 +134,7 @@ for spec in '1 uninstall_xray 0' '2 uninstall_xray 1' '3 uninstall_xray 2'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route uninstall_menu "$choice" "$action"
 done
 
-for spec in '1 inbound_menu' '2 outbound_menu' '3 certificate_menu' '4 service_menu' '5 system_menu' '6 uninstall_menu'; do
+for spec in '1 inbound_menu' '2 outbound_menu' '3 certificate_menu' '4 service_menu' '5 traffic_menu' '6 system_menu' '7 uninstall_menu'; do
   choice=${spec%% *}; action=${spec#* }
   eval "$action() { record $action; }"
   exercise_menu_route main_menu "$choice" "$action"

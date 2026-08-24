@@ -200,6 +200,7 @@ install_or_update_xray() {
   validate_candidate "$CONFIG_FILE"
   platform_service_enable >/dev/null
   restart_service
+  traffic_runtime_ensure || warn "Xray 已启动，但流量统计运行时暂未恢复，请运行 xrayctl traffic enable 重试。"
   if [[ $mode == upgrade ]]; then
     info "Xray 已升级：$($XRAY_BIN version | sed -n '1p')"
   else
@@ -254,11 +255,16 @@ install_quick_command() {
 # ============================================================
 
 show_status() {
+  local traffic_state quota_state backend
   heading "Xray 状态"
   if xray_installed; then "$XRAY_BIN" version | sed -n '1,2p'; else printf 'Xray: 未安装\n'; fi
   if service_exists; then platform_service_status 2>/dev/null | sed -n '1,12p' || true
   else printf '%s 服务: 未安装\n' "$(platform_init_system 2>/dev/null || printf unknown)"; fi
   [[ -f $CONFIG_FILE ]] && printf '入站数: %s\n配置: %s\n' "$(jq '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?')" "$CONFIG_FILE"
+  if traffic_is_enabled; then traffic_state="运行中"; else traffic_state="已停止"; fi
+  if traffic_limits_are_enabled; then quota_state="已启用"; else quota_state="未启用"; fi
+  backend=$(traffic_recorded_backend); backend=${backend:-未设置}
+  printf '流量统计: %s（%s）\n流量限制: %s（已设置 %s 个入站）\n' "$traffic_state" "$backend" "$quota_state" "$(traffic_limit_count)"
 }
 
 service_action() {
@@ -390,7 +396,7 @@ manage_bbr() {
 }
 
 system_diagnostics() {
-  local os_name=unknown
+  local os_name=unknown traffic_backend_name
   if [[ -r /etc/os-release ]]; then
     os_name=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release)
     os_name=${os_name#\"}; os_name=${os_name%\"}
@@ -400,6 +406,9 @@ system_diagnostics() {
   printf '拥塞控制: %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
   printf 'BBR 持久化来源: %s\n' "$(bbr_manager)"
   printf 'IPv4 转发: %s\n' "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || printf unknown)"
+  traffic_backend_name=$(traffic_recorded_backend); traffic_backend_name=${traffic_backend_name:-未设置}
+  printf '流量统计: %s（后端：%s）\n' "$(traffic_is_enabled && printf 运行中 || printf 已停止)" "$traffic_backend_name"
+  printf '流量限制: %s（已设置 %s 个入站）\n' "$(traffic_limits_are_enabled && printf 已启用 || printf 未启用)" "$(traffic_limit_count)"
   if command_exists timedatectl; then timedatectl show -p NTPSynchronized -p Timezone 2>/dev/null || true; fi
   if command_exists ss; then heading "Xray 监听端口"; ss -lntup 2>/dev/null | grep -E 'xray|State|Netid' || true; fi
   heading "最近服务日志"; platform_service_logs 20 2>/dev/null || true

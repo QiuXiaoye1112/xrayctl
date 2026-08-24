@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.2.34"
+readonly XRAYCTL_VERSION="1.3.0"
 readonly XRAYCTL_BUILD_COMMIT="${XRAYCTL_BUILD_COMMIT:-development}"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -22,6 +22,9 @@ LOG_DIR="${XRAYCTL_LOG_DIR:-/var/log/xray}"
 XRAY_SHARE_DIR="${XRAYCTL_SHARE_DIR:-/usr/local/share/xray}"
 export XRAY_LOCATION_ASSET="$XRAY_SHARE_DIR"
 BACKUP_DIR="${XRAYCTL_BACKUP_DIR:-/var/backups/xrayctl}"
+TRAFFIC_FILE="${XRAYCTL_TRAFFIC_FILE:-/var/lib/xrayctl/traffic.json}"
+SYSTEMD_UNIT_DIR="${XRAYCTL_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+OPENRC_INIT_DIR="${XRAYCTL_OPENRC_INIT_DIR:-/etc/init.d}"
 BACKUP_OWNERSHIP_MARKER="${BACKUP_DIR}/.xrayctl-owned"
 readonly BACKUP_OWNERSHIP_MAGIC="xrayctl-backup-directory-v1"
 QUICK_COMMAND="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"

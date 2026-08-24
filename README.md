@@ -2,7 +2,7 @@
 
 `xrayctl` 是一个同时支持 systemd 与 Alpine/OpenRC 的 Xray 管理工具。开发源码按领域保存在 `src/`，发布时构建为单文件 `dist/xrayctl`。交互界面按“先看对象、再直接操作”设计；每次生产配置变更都会先创建 candidate，执行 JSON/Xray 校验，再联合提交 config 与 metadata，服务重启失败时一起回滚。
 
-当前版本：`1.2.34`
+当前版本：`1.3.0`
 
 > Alpine Linux 使用兼容 bootstrap，但安装的是同一个 `dist/xrayctl`。平台差异由 `platform.sh` 统一处理。参见 [Alpine/OpenRC 安装说明](alpine/README.md)。
 
@@ -25,6 +25,8 @@
 - Let's Encrypt 域名/公网 IP 签发、自动续期、已有证书导入和安全删除
 - IP 证书优先免 APT 创建 Certbot 环境；证书依赖安装均带硬超时，避免 NAT 主机无限等待软件源
 - 配置校验、systemd/OpenRC 服务与日志管理
+- 按入站累计 TCP/UDP 流量，总量按天保存，只保留最近三个自然月；统计周期可自定义选择
+- 可选月度流量限制（默认关闭）：额度从首次设置的精确时刻起算，用尽后只禁用对应入站，下个周期自动恢复
 - 配置校验失败时显示 Xray 核心的原始错误，便于准确定位问题
 - BBR 环境检测和开启/关闭、系统诊断
 - 安装后通过 `xrayctl` 快捷命令启动
@@ -60,6 +62,11 @@ Xray Linux 管理脚本
 │  └─ 删除出站
 ├─ TLS 证书（签发、导入、查看、续期测试）
 ├─ 服务管理（启停、重启、自启、日志、更新修复）
+├─ 流量信息
+│  ├─ 查看/刷新各入站最近三个月累计流量
+│  ├─ 设置开始日期和结束日期
+│  ├─ 设置/取消单入站月度额度
+│  └─ 开启或停止流量统计（流量限制默认关闭）
 ├─ 系统工具
 │  ├─ BBR 开启/关闭
 │  ├─ 系统诊断
@@ -81,6 +88,8 @@ Xray Linux 管理脚本
 xrayctl 可以与 sbctl/sing-box 同时安装。两者使用独立的命令、服务、配置、metadata、备份和 Certbot 环境。新增 Xray 入站时只依据当前 Xray 配置和 `ss`/`netstat` 的实时监听结果避开端口，自动端口同时固定避开 Hysteria2 默认跳跃范围 `30000-50000`。xrayctl 不读取 sbctl 的配置、metadata 或自定义跳跃范围；已停止服务的端口不作预留，之后重新启动时仍可能因端口已被占用而失败。
 
 BBR 是主机全局开关，xrayctl 与 sbctl 都读取内核当前状态，也都可以开启或关闭。关闭时会清理两者的已知持久化文件，避免重启后被另一份配置重新开启；第三方 sysctl 配置不会被修改。两套证书环境保持隔离，但 Certbot 操作会通过 `/run/lock/certbot.lock` 串行执行，避免同时操作 80 端口/nginx；同一个域名仍建议只交给一个工具自动签发和续期，避免重复申请。
+
+流量统计同样完全隔离：xrayctl 使用 `xrayctl_traffic` nftables 表（或 `XRAYCTL_TRAFFIC_IN/OUT` iptables 链），sbctl 使用自己的对象。脚本只删除带有自身注释的规则；检测到同名但不属于 xrayctl 的规则时会拒绝覆盖。
 
 ## 快速开始
 
@@ -159,6 +168,11 @@ xrayctl link TAG                 # 分享链接
 xrayctl subscription [TAG]      # Base64 订阅内容
 xrayctl config check             # JSON + Xray 核心检查
 xrayctl logs 100                 # 最近 100 行日志
+xrayctl traffic                  # 查看最近三个月各入站总流量
+xrayctl traffic enable           # 开启每分钟采集
+xrayctl traffic limit enable     # 启用月度流量限制功能
+xrayctl traffic limit set TAG 100 # 为 TAG 设置每月 100 GB
+xrayctl traffic limit remove TAG # 取消该入站额度
 xrayctl cert issue example.com admin@example.com
 xrayctl diagnose
 ```
@@ -178,6 +192,7 @@ xrayctl help
 | 管理元数据 | `/usr/local/etc/xray/xrayctl.meta.json` |
 | 托管证书 | `/usr/local/etc/xray/certs/` |
 | 手动备份 | `/var/backups/xrayctl/` |
+| 流量记录 | `/var/lib/xrayctl/traffic.json` |
 | Xray 日志 | `/var/log/xray/` |
 | 快捷命令 | `/usr/local/sbin/xrayctl`，并链接到 `/usr/local/bin/xrayctl` |
 
@@ -190,6 +205,7 @@ xrayctl help
 - SOCKS5/HTTP 出站本身不加密，只应连接可信代理；HTTP 出站仅支持 TCP。
 - 用户管理页和代理出站详情会直接显示 UUID 或密码，请避免在录屏、截图和共享终端中泄露。
 - 分享链接、配置和手动备份含有 UUID 或密码，应按密钥材料保护。
+- 流量统计依赖 nftables 或 iptables，并会创建独立计数/阻断规则；云厂商安全组仍需在控制台单独管理。
 - 云厂商安全组需要在云控制台单独设置。
 - VMess 和传统 Trojan 仍被支持，但新部署优先使用 VLESS + REALITY/TLS。Shadowsocks 已停止新增和分享；旧入站只保留查看与删除入口。
 - 请遵守服务器所在地法律、服务商条款和网络使用政策。
@@ -204,18 +220,18 @@ xrayctl uninstall --purge       # 完全卸载，保留备份
 xrayctl uninstall --erase       # 删除 xrayctl 创建的全部资源（含备份）
 ```
 
-普通卸载和完全卸载都会先创建备份。删除操作通过 metadata 资产登记和固定路径检查限制在 xrayctl 自己创建的资源。
+普通卸载和完全卸载都会先创建备份，备份包含流量记录。恢复时配置、metadata、证书、流量文件和防火墙运行时作为一个整体处理；失败会一起回滚。删除操作通过 metadata 资产登记和固定路径检查限制在 xrayctl 自己创建的资源。
 
 ## 开发、构建与测试
 
-源码领域固定为 12 个模块：
+源码领域固定为 13 个模块：
 
 ```text
 core + platform
 state
 security + certificate
 protocols
-inbound + outbound + share
+inbound + outbound + share + traffic
 service + uninstall
 menu
 ```
@@ -233,7 +249,7 @@ bash -n dist/xrayctl
 bash tests/run.sh
 ```
 
-测试覆盖 Bash syntax、ShellCheck、重复函数、模块 source 依赖、validator、协议 fixture、config/metadata 联合事务、migration 幂等、inbound/client/outbound 生命周期、CLI 与单文件构建。重构前审计见 [`architecture-audit.md`](architecture-audit.md)。
+测试覆盖 Bash syntax、ShellCheck、重复函数、模块 source 依赖、validator、协议 fixture、config/metadata 联合事务、migration 幂等、inbound/client/outbound 生命周期、流量统计与月度限额、防火墙隔离、CLI 与单文件构建。重构前审计见 [`architecture-audit.md`](architecture-audit.md)。
 
 ## 安装卡在 APT
 
