@@ -715,7 +715,7 @@ traffic_limit_remove() {
 }
 
 traffic_show() {
-  local start=${1:-$(traffic_retention_start)} end=${2:-$(traffic_today)} rows tag protocol port bytes deleted total status last limit_status exhausted
+  local start=${1:-$(traffic_retention_start)} end=${2:-$(traffic_today)} rows tag protocol port bytes deleted total status last limit_status exhausted display_order
   traffic_validate_range "$start" "$end" || { warn "日期范围无效或超出最近三个月。"; return 1; }
   traffic_init_file; traffic_sync_inventory
   traffic_is_enabled && status="运行中" || status="已停止"
@@ -725,8 +725,11 @@ traffic_show() {
   print_table_cell_clipped "标签" 20; printf '| '
   print_table_cell_clipped "协议" 10; printf '| '
   print_table_cell "端口" 7; printf '| %14s\n' "总流量"
-  rows=$(jq -r --arg start "$start" --arg finish "$end" '
-    .inbounds | to_entries | sort_by(.key)[] |
+  display_order=$(jq -c '[.inbounds[]?.tag]' "$CONFIG_FILE" 2>/dev/null || printf '[]')
+  rows=$(jq -r --arg start "$start" --arg finish "$end" --argjson order "$display_order" '
+    ($order | to_entries | map({key:.value,value:.key}) | from_entries) as $positions |
+    .inbounds | to_entries |
+    sort_by(if $positions[.key] != null then [0,$positions[.key]] else [1,.key] end)[] |
     [.key,(.value.protocol // "unknown"),((.value.port // 0)|tostring),
      ([.value.daily | to_entries[]? | select(.key >= $start and .key <= $finish) | .value] | add // 0),
      (.value.deleted // false)] | @tsv

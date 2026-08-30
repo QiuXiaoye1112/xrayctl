@@ -81,6 +81,10 @@ output=$(traffic_show 2026-05-24 2026-08-24)
 grep -Fq '统计范围：2026-05-24 ～ 2026-08-24' <<<"$output"
 grep -Fq '1.00 GB' <<<"$output"
 grep -Fq '全部入站：1.00 GB' <<<"$output"
+vless_line=$(grep -n '^vless[[:space:]]' <<<"$output" | cut -d: -f1)
+socks_line=$(grep -n '^socks[[:space:]]' <<<"$output" | cut -d: -f1)
+vmess_line=$(grep -n '^vmess[[:space:]]' <<<"$output" | cut -d: -f1)
+[[ $vless_line -lt $socks_line && $socks_line -lt $vmess_line ]]
 # jq 1.6 parses `end` as a keyword, so date range filters must not expose it
 # as a jq variable even though newer jq releases accept it in some contexts.
 ! grep -Eq -- '--arg(json)?[[:space:]]+end([[:space:]]|$)' src/traffic.sh
