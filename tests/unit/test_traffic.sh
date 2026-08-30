@@ -119,6 +119,18 @@ mv -f "$tmp" "$CONFIG_FILE"
 traffic_sync_inventory
 jq -e '.inbounds.socks.deleted==true and .inbounds.socks.daily["2026-08-24"]==2048' "$TRAFFIC_FILE" >/dev/null
 
+# Clearing a selected inbound also offers retained records for inbounds that
+# have already been removed from the current config.
+selection_output=$(temp_file)
+selected=""
+traffic_select_record_tag selected <<<"3" >"$selection_output"
+[[ $selected == socks ]]
+grep -Fq '3) socks(已删除)' "$selection_output"
+rm -f "$selection_output"
+confirm() { return 0; }
+traffic_clear_tag_records "$selected" >/dev/null
+jq -e '.inbounds.socks.daily|length==0' "$TRAFFIC_FILE" >/dev/null
+
 [[ $(traffic_format_bytes 0) == '0 B' ]]
 [[ $(traffic_format_bytes 1024) == '1.00 KB' ]]
 [[ $(traffic_format_percent 0 107374182400) == '0.00%' ]]

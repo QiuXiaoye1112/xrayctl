@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.3.0"
-readonly XRAYCTL_BUILD_COMMIT="064633d430dc"
+readonly XRAYCTL_BUILD_COMMIT="9363c8d616d7"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -3840,9 +3840,39 @@ traffic_prompt_range() {
   printf -v "$__start_var" '%s' "$candidate_start"; printf -v "$__end_var" '%s' "$candidate_end"
 }
 
+traffic_select_record_tag() {
+  local __var=$1 __item __deleted __answer __selected
+  local tags=() labels=()
+  ensure_config
+  traffic_init_file
+  traffic_sync_inventory || return 1
+  while IFS=$'\t' read -r __item __deleted; do
+    [[ -n $__item ]] || continue
+    tags+=("$__item")
+    if [[ $__deleted == true ]]; then labels+=("${__item}(已删除)"); else labels+=("$__item"); fi
+  done < <(
+    jq -r --slurpfile traffic "$TRAFFIC_FILE" '
+      ([.inbounds[]?.tag | {tag:.,deleted:false}] +
+       [($traffic[0].inbounds // {} | to_entries[]? |
+         select(.value.deleted==true) | {tag:.key,deleted:true})]) |
+      reduce .[] as $item ([];
+        if any(.[]; .tag==$item.tag) then . else . + [$item] end) |
+      .[] | [.tag,(.deleted|tostring)] | @tsv
+    ' "$CONFIG_FILE"
+  )
+  ((${#tags[@]})) || { warn "没有可清空的入站流量记录。"; return 1; }
+  if ((${#tags[@]} == 1)); then
+    __selected=${tags[0]}
+  else
+    choose __answer "选择入站" "${labels[@]}" || return 1
+    __selected=${tags[$((__answer-1))]}
+  fi
+  printf -v "$__var" '%s' "$__selected"
+}
+
 traffic_clear_tag_records() {
   local tag=${1-} tmp rc=0
-  [[ -n $tag ]] || select_inbound tag || return 0
+  [[ -n $tag ]] || traffic_select_record_tag tag || return 0
   traffic_collect || true; traffic_init_file
   jq -e --arg tag "$tag" '.inbounds[$tag] != null' "$TRAFFIC_FILE" >/dev/null || { warn "没有入站 ${tag} 的流量记录。"; return 1; }
   confirm "清空入站 ${tag} 最近三个月的流量记录和当前周期已用流量？" N || return 0
