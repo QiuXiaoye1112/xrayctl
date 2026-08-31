@@ -52,7 +52,9 @@ jobs:
           docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -ec '
             apk add --no-cache bash curl jq openssl coreutils ripgrep unzip >/dev/null
             export TERM=xterm XRAYCTL_TESTING=1
-            recorded_commit=$(sed -n 's/^readonly XRAYCTL_BUILD_COMMIT="\([^"]*\)"/\1/p' dist/xrayctl | head -1)
+            recorded_line=$(grep XRAYCTL_BUILD_COMMIT dist/xrayctl | head -1)
+            recorded_commit=${recorded_line#*\\\"}
+            recorded_commit=${recorded_commit%%\\\"*}
             XRAYCTL_BUILD_COMMIT="$recorded_commit" bash scripts/build.sh
             sh -n alpine/install.sh
             bash tests/run.sh
