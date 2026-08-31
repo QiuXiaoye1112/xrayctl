@@ -124,21 +124,19 @@ done
 cloudflare_credentials_menu() { record cloudflare_credentials_menu; }
 exercise_menu_route certificate_menu 5 cloudflare_credentials_menu
 
-for spec in '1 toggle_service_running' '2 service_action restart' '3 toggle_service_startup' '4 show_logs 100' '5 install_or_update_xray install'; do
+for spec in '1 toggle_service_running' '2 service_action restart' '3 toggle_service_startup' '4 show_logs 100' '5 install_or_update_xray install' '6 system_diagnostics' '7 repair_quick_command'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route service_menu "$choice" "$action"
-done
-for spec in '1 manage_bbr' '2 system_diagnostics' '3 repair_quick_command'; do
-  choice=${spec%% *}; action=${spec#* }; exercise_menu_route system_menu "$choice" "$action"
 done
 for spec in '1 uninstall_xray 0' '2 uninstall_xray 1' '3 uninstall_xray 2'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route uninstall_menu "$choice" "$action"
 done
 
-for spec in '1 inbound_menu' '2 outbound_menu' '3 certificate_menu' '4 service_menu' '5 traffic_menu' '6 system_menu' '7 uninstall_menu'; do
+for spec in '1 inbound_menu' '2 outbound_menu' '3 certificate_menu' '4 traffic_menu' '5 service_menu' '7 uninstall_menu'; do
   choice=${spec%% *}; action=${spec#* }
   eval "$action() { record $action; }"
   exercise_menu_route main_menu "$choice" "$action"
 done
+exercise_menu_route main_menu 6 'manage_bbr'
 
 for spec in '1 rename_inbound node' '2 modify_inbound_basic node' '3 modify_inbound_transport node'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route modify_inbound_menu "$choice" "$action" node vless

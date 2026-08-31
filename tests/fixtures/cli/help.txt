@@ -46,7 +46,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl cert renew-auto            立即续期所有托管证书
   xrayctl cert renew <标识>          续期单个证书
   xrayctl cert cloudflare            管理 Cloudflare DNS 凭据
-  xrayctl bbr                        管理 BBR（交互式开启/关闭）
+  xrayctl bbr                        启用/关闭 BBR（交互式）
   xrayctl diagnose                系统诊断
   xrayctl version
 

@@ -213,12 +213,13 @@ service_menu() {
     heading "服务管理"
     printf '状态: %s  |  开机自启: %s  |  Xray: %s\n\n' \
       "$(service_state_summary)" "$(startup_state_summary)" "$(xray_version_summary)"
-    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装/更新/修复 Xray\n0) 返回\n'
+    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装/更新/修复 Xray\n6) 系统诊断\n7) 修复快捷命令\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action toggle_service_running; pause;; 2) run_menu_action service_action restart; pause;;
       3) run_menu_action toggle_service_startup; pause;; 4) run_menu_action show_logs 100; pause;;
-      5) run_menu_action install_or_update_xray install; pause;; 0) return;; *) warn "无效选项。"; pause;;
+      5) run_menu_action install_or_update_xray install; pause;; 6) run_menu_action system_diagnostics; pause;;
+      7) run_menu_action repair_quick_command; pause;; 0) return;; *) warn "无效选项。"; pause;;
     esac
   done
 }
@@ -230,22 +231,6 @@ bbr_state_summary() {
   else
     printf '不可用'
   fi
-}
-
-system_menu() {
-  local choice
-  while true; do
-    clear_screen
-    heading "系统工具"
-    printf 'BBR: %s\n\n' "$(bbr_state_summary)"
-    printf '1) BBR 管理\n2) 系统诊断\n3) 修复快捷命令\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; return; }
-    case $choice in
-      1) run_menu_action manage_bbr; pause;; 2) run_menu_action system_diagnostics; pause;;
-      3) run_menu_action repair_quick_command; pause;;
-      0) return;; *) warn "无效选项。"; pause;;
-    esac
-  done
 }
 
 uninstall_menu() {
@@ -332,11 +317,11 @@ main_menu() {
     printf '%sXray Linux 管理脚本%s  v%s\n' "$C_BOLD$C_BLUE" "$C_RESET" "$XRAYCTL_VERSION"
     show_main_summary
     show_main_inbounds
-    printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 服务管理\n5) 流量信息\n6) 系统工具\n7) 卸载\n0) 退出\n'
+    printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 流量信息\n5) 服务管理\n6) BBR启用/关闭\n7) 卸载\n0) 退出\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
-      1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) service_menu;;
-      5) traffic_menu;; 6) system_menu;; 7) uninstall_menu;;
+      1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_menu;;
+      5) service_menu;; 6) run_menu_action manage_bbr; pause;; 7) uninstall_menu;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -392,7 +377,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl cert renew-auto            立即续期所有托管证书
   xrayctl cert renew <标识>          续期单个证书
   xrayctl cert cloudflare            管理 Cloudflare DNS 凭据
-  xrayctl bbr                        管理 BBR（交互式开启/关闭）
+  xrayctl bbr                        启用/关闭 BBR（交互式）
   xrayctl diagnose                系统诊断
   xrayctl version
 
