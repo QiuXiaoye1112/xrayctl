@@ -168,16 +168,17 @@ add_outbound() {
 
 select_outbound() {
   local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} candidate_tag answer local_tag
-  local tags=() local_ips=() local_ip_tags=() local_raw_ips=()
+  local tags=() local_ips=() local_ip_tags=() local_raw_ips=() proxy_tags=() local_tags=()
   ((include_direct == 0)) || tags+=("direct")
-  while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || tags+=("$candidate_tag"); done < <(
-    jq -r '.outbounds[]?|select((.protocol=="socks" or .protocol=="http" or .protocol=="freedom") and .tag!="direct" and .tag!="blocked")|.tag' "$CONFIG_FILE"
+  while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || proxy_tags+=("$candidate_tag"); done < <(
+    jq -r '.outbounds[]?|select((.protocol=="socks" or .protocol=="http") and .tag!="direct" and .tag!="blocked")|.tag' "$CONFIG_FILE"
   )
-  # 检测本地 IP，对已存在的 freedom 出站加备注
+  tags+=("${proxy_tags[@]}")
+  # 检测本地 IP，始终把本机 IPv4/IPv6 放在自建代理出站之后。
   while ((include_detected_local)) && IFS=$'\t' read -r label ip iface; do
     local_tag=$(_freedom_tag_for_ip "$ip")
     local_ip_tags+=("$local_tag")
-    # 如果这个 freedom 出站不在列表里，追加到 tags
+    local_tags+=("$local_tag")
     local found=0
     for t in "${tags[@]}"; do [[ $t == "$local_tag" ]] && { found=1; break; }; done
     if ((!found)); then tags+=("$local_tag"); fi
@@ -185,23 +186,20 @@ select_outbound() {
     local_raw_ips+=("$ip")
   done < <(ensure_config 2>/dev/null || true; detect_local_ips 2>/dev/null)
   ((${#tags[@]} > 0)) || { warn "没有可选出站。"; return 1; }
-  # 构建带有类型标注的显示标签
+  # 只显示 direct、代理标签和本机 IP，不显示协议/地址括号说明。
   local display_labels=()
   for t in "${tags[@]}"; do
     if [[ $t == direct ]]; then
-      display_labels+=("direct (系统默认)")
+      display_labels+=("direct")
     elif [[ $t =~ ^local- ]]; then
       # 找到对应的原始 IP 标签
       local dlabel="" found=0 i
       for ((i=0; i<${#local_ip_tags[@]}; i++)); do
         [[ ${local_ip_tags[$i]} == "$t" ]] && { dlabel="${local_ips[$i]}"; found=1; break; }
       done
-      if ((found)); then display_labels+=("${dlabel}"); else display_labels+=("$t (本地)"); fi
+      if ((found)); then display_labels+=("${dlabel%% *}"); else display_labels+=("$t"); fi
     else
-      # socks/http 代理
-      local proto; proto=$(jq -r --arg tag "$t" '.outbounds[]?|select(.tag==$tag)|.protocol' "$CONFIG_FILE" 2>/dev/null || printf '?')
-      local addr; addr=$(jq -r --arg tag "$t" '.outbounds[]?|select(.tag==$tag)|"\(.settings.address // "?"):\(.settings.port // "?")"' "$CONFIG_FILE" 2>/dev/null || printf '?:?')
-      display_labels+=("$t ($proto · $addr)")
+      display_labels+=("$t")
     fi
   done
   choose answer "选择出站" "${display_labels[@]}"
