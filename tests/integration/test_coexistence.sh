@@ -13,6 +13,7 @@ export XRAYCTL_META_FILE="${XRAYCTL_CONFIG_DIR}/meta.json"
 export XRAYCTL_BBR_CONFIG="${TEST_ROOT}/99-xrayctl-bbr.conf"
 export XRAYCTL_SBCTL_BBR_CONFIG="${TEST_ROOT}/99-sbctl-bbr.conf"
 export XRAYCTL_CERTBOT_VENV="${TEST_ROOT}/certbot-venv"
+export XRAYCTL_CERTBOT_CONFIG_DIR="${TEST_ROOT}/certbot-config"
 export XRAYCTL_CERTBOT_SHARED_LOCK="${TEST_ROOT}/certbot.lock"
 export XRAYCTL_CERTBOT_SHARED_LOCK_WAIT=0
 
@@ -88,5 +89,34 @@ certbot_cmd certonly --cert-name stale >/dev/null
 
 if CERTBOT_STUB_FAIL=1 certbot_cmd certonly --cert-name failed >/dev/null 2>&1; then fail 'Certbot failure was not propagated'; fi
 [[ ! -e $CERTBOT_SHARED_LOCK ]] || fail 'xrayctl did not release the lock after Certbot failure'
+
+# Multiple Certbot accounts must be resolved deterministically. Existing lineage
+# ownership takes priority; otherwise an explicit account is required in a
+# non-interactive session.
+mkdir -p "$CERTBOT_CONFIG_DIR/accounts/acme-v02.api.letsencrypt.org/directory/acct1"
+mkdir -p "$CERTBOT_CONFIG_DIR/accounts/acme-v02.api.letsencrypt.org/directory/acct2"
+mkdir -p "$CERTBOT_CONFIG_DIR/renewal"
+printf '{}\n' >"$CERTBOT_CONFIG_DIR/accounts/acme-v02.api.letsencrypt.org/directory/acct1/regr.json"
+printf '{}\n' >"$CERTBOT_CONFIG_DIR/accounts/acme-v02.api.letsencrypt.org/directory/acct2/regr.json"
+printf 'account = acct1\n' >"$CERTBOT_CONFIG_DIR/renewal/existing.example.conf"
+selected_account=""
+select_certbot_account selected_account existing.example
+assert_eq acct1 "$selected_account" 'lineage account was not preferred'
+assert_failure select_certbot_account selected_account new.example
+XRAYCTL_CERTBOT_ACCOUNT=acct2
+select_certbot_account selected_account new.example
+assert_eq acct2 "$selected_account" 'explicit Certbot account was not selected'
+
+certbot_args="$TEST_ROOT/certbot-args"
+certbot_cmd() { printf '%s\n' "$@" >"$certbot_args"; }
+certbot_issue_cmd new.example certonly --cert-name new.example
+awk 'previous=="--account" && $0=="acct2" {found=1} {previous=$0} END {exit !found}' "$certbot_args" \
+  || fail 'selected Certbot account was not forwarded to issuance'
+
+# Listener detection must distinguish a real IPv6 wildcard listener from a free
+# port even when process details are hidden from the current user.
+command_exists() { [[ $1 == ss ]]; }
+ss() { printf 'LISTEN 0 4096 [::]:80 [::]:*\n'; }
+assert_eq other "$(detect_port80_owner)" 'IPv6 port 80 listener was treated as free'
 
 printf 'ok - xrayctl checks active ports and coordinates BBR and Certbot operations\n'

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq openssl shellcheck unzip
+      - name: Download and verify current Xray release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+            https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')
+          case "$(uname -m)" in
+            x86_64) asset=Xray-linux-64.zip ;;
+            aarch64) asset=Xray-linux-arm64-v8a.zip ;;
+            *) printf 'unsupported runner architecture: %s\n' "$(uname -m)" >&2; exit 1 ;;
+          esac
+          base="https://github.com/XTLS/Xray-core/releases/download/${version}"
+          curl -fsSL --connect-timeout 10 --max-time 120 "$base/$asset" -o "$RUNNER_TEMP/$asset"
+          curl -fsSL --connect-timeout 10 --max-time 30 "$base/$asset.dgst" -o "$RUNNER_TEMP/$asset.dgst"
+          expected=$(awk -F'= ' '$1=="SHA2-256" {print $2; exit}' "$RUNNER_TEMP/$asset.dgst")
+          printf '%s  %s\n' "$expected" "$RUNNER_TEMP/$asset" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/xray"
+          unzip -q "$RUNNER_TEMP/$asset" -d "$RUNNER_TEMP/xray"
+          "$RUNNER_TEMP/xray/xray" version | sed -n '1p'
+          printf 'XRAYCTL_REAL_XRAY_BIN=%s\n' "$RUNNER_TEMP/xray/xray" >>"$GITHUB_ENV"
+      - name: Build, lint, and test
+        env:
+          REQUIRE_SHELLCHECK: "1"
+        run: |
+          bash scripts/build.sh
+          git diff --exit-code -- dist/xrayctl
+          bash tests/run.sh
+
+  alpine-openrc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run unified suite on Alpine
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -ec '
+            apk add --no-cache bash curl jq openssl coreutils unzip >/dev/null
+            export TERM=xterm XRAYCTL_TESTING=1
+            bash scripts/build.sh
+            sh -n alpine/install.sh
+            bash tests/run.sh
+          '

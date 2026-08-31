@@ -26,7 +26,7 @@ cat >"$XRAYCTL_CONFIG_FILE" <<'JSON'
   "log": {"loglevel": "warning"},
   "inbounds": [
     {"tag": "vless-443", "protocol": "vless", "port": 443, "settings": {"clients": []}},
-    {"tag": "vmess-20000", "protocol": "vmess", "port": 20000, "settings": {"clients": []}},
+    {"tag": "vless-20000", "protocol": "vless", "port": 20000, "settings": {"clients": []}},
     {"tag": "priority-in", "protocol": "vless", "port": 30001, "settings": {"clients": []}},
     {"tag": "reverse-in", "protocol": "vless", "port": 30002, "settings": {"clients": []}},
     {"tag": "specificity-in", "protocol": "vless", "port": 30003, "settings": {"clients": []}}
@@ -324,10 +324,10 @@ details=$(show_outbound_details socks-us)
 [[ $details == *'"user": "Ethan"'* ]] || fail 'outbound details omitted the proxy username'
 [[ $details == *'"pass": "secret"'* ]] || fail 'outbound details omitted the proxy password'
 
-add_domain_rule vmess-20000 suffix socks.example.com socks-us >/dev/null
-add_domain_rule vmess-20000 suffix http.example.com http-jp >/dev/null
-assign_outbound vmess-20000 socks-jp >/dev/null
-assert_domain_rules_before_default vmess-20000
+add_domain_rule vless-20000 suffix socks.example.com socks-us >/dev/null
+add_domain_rule vless-20000 suffix http.example.com http-jp >/dev/null
+assign_outbound vless-20000 socks-jp >/dev/null
+assert_domain_rules_before_default vless-20000
 assert_eq socks-us "$(jq -r '.routing.rules[]|select(.domain==["domain:socks.example.com"])|.outboundTag' "$CONFIG_FILE")" \
   'SOCKS outbound was not accepted by domain rule'
 assert_eq http-jp "$(jq -r '.routing.rules[]|select(.domain==["domain:http.example.com"])|.outboundTag' "$CONFIG_FILE")" \
@@ -360,7 +360,7 @@ assert_eq 0 "$(jq '[.routing.rules[]|select(.outboundTag=="socks-us")]|length' "
 
 candidate=$(temp_file)
 jq '.outbounds += [{protocol:"socks",tag:"proxy-custom",settings:{address:"192.0.2.40",port:1080}}] |
-  .routing.rules += [{type:"field",inboundTag:["vmess-20000"],outboundTag:"proxy-custom",ruleTag:"user-custom"}]' \
+  .routing.rules += [{type:"field",inboundTag:["vless-20000"],outboundTag:"proxy-custom",ruleTag:"user-custom"}]' \
   "$CONFIG_FILE" >"$candidate"
 state_apply_candidate_file "$candidate" apply_candidate >/dev/null
 if (delete_outbound proxy-custom >/dev/null 2>&1); then

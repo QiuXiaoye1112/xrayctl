@@ -224,8 +224,9 @@ select_outbound() {
 assign_outbound() {
   ensure_runtime_dependencies outbound-assign; ensure_config
   local inbound=${1-} outbound=${2-} rule_tag tmp
-  [[ -n $inbound ]] || select_inbound inbound || return
+  [[ -n $inbound ]] || select_inbound inbound '^(vless|socks|http)$' || return
   inbound_exists "$inbound" || die "找不到入站：$inbound"
+  inbound_require_supported_configuration "$inbound"
   [[ -n $outbound ]] || select_outbound outbound 1 || return
   outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
   rule_tag="xrayctl-outbound:${inbound}"
@@ -344,16 +345,18 @@ add_domain_rule() {
   if [[ $prompt_details == --prompt ]]; then
     [[ -n $inbound && -z $match && -z $domain && -z $outbound ]] || die "内部调用参数无效。"
     inbound_exists "$inbound" || die "找不到入站：$inbound"
+    inbound_require_supported_configuration "$inbound"
   elif [[ -n $inbound || -n $match || -n $domain || -n $outbound ]]; then
     cli=1
     [[ -n $inbound && -n $match && -n $domain && -n $outbound ]] || \
       die "用法：xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>"
     inbound_exists "$inbound" || die "找不到入站：$inbound"
+    inbound_require_supported_configuration "$inbound"
     case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
     normalized_domains=$(_normalize_domain_list "$domain") || die "域名格式无效。"
     outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
   else
-    select_inbound inbound || return
+    select_inbound inbound '^(vless|socks|http)$' || return
   fi
   if ((cli == 0)); then
     choose choice "匹配方式" "域名及所有子域名" "仅精确域名" || return

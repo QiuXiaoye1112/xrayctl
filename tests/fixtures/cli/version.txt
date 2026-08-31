@@ -1,1 +1,1 @@
-xrayctl 1.3.0
+xrayctl 1.4.0

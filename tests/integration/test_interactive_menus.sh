@@ -179,9 +179,6 @@ for protocol in http socks; do
     choice=${spec%% *}; action=${spec#* }; exercise_menu_route manage_inbound_menu "$choice" "$action" node
   done
 done
-write_inbound shadowsocks none
-exercise_menu_route manage_inbound_menu 1 'show_inbound node' node
-
 # Restore and exercise the two nested certificate menus.
 # shellcheck source=../../src/certificate.sh
 source "${REPO_ROOT}/src/certificate.sh"

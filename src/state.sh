@@ -241,17 +241,33 @@ ensure_config() {
   [[ -f $CONFIG_FILE ]] || write_default_config
   jq -e 'type=="object" and (.inbounds|type=="array")' "$CONFIG_FILE" >/dev/null \
     || die "配置文件不是有效的 Xray JSON：$CONFIG_FILE"
+  validate_supported_capabilities "$CONFIG_FILE" \
+    || die "配置包含 xrayctl 当前不支持的入站协议或传输：$CONFIG_FILE"
   init_meta
 }
 
 xray_installed() { [[ -x $XRAY_BIN ]]; }
 require_xray_installed() { xray_installed || die "Xray 尚未安装，请先运行：sudo xrayctl install"; }
 
+validate_supported_capabilities() {
+  jq -e '
+    all(.inbounds[];
+      if .protocol=="vless" then
+        ((.streamSettings.method // "raw") as $method | ["raw","xhttp","websocket"] | index($method)) != null
+      else .protocol=="socks" or .protocol=="http"
+      end
+    )' "$1" >/dev/null 2>&1
+}
+
 validate_candidate() {
   local candidate=$1 validation_output
   if ! validation_output=$(jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' "$candidate" 2>&1); then
     error "JSON 结构检查失败。"
     [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+    return 1
+  fi
+  if ! validate_supported_capabilities "$candidate"; then
+    error "配置包含 xrayctl 当前不支持的入站协议或传输。"
     return 1
   fi
   if xray_installed; then

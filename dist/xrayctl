@@ -5,8 +5,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly XRAYCTL_VERSION="1.3.0"
-readonly XRAYCTL_BUILD_COMMIT="9363c8d616d7"
+readonly XRAYCTL_VERSION="1.4.0"
+readonly XRAYCTL_BUILD_COMMIT="95102f238f2e"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -876,17 +876,33 @@ ensure_config() {
   [[ -f $CONFIG_FILE ]] || write_default_config
   jq -e 'type=="object" and (.inbounds|type=="array")' "$CONFIG_FILE" >/dev/null \
     || die "配置文件不是有效的 Xray JSON：$CONFIG_FILE"
+  validate_supported_capabilities "$CONFIG_FILE" \
+    || die "配置包含 xrayctl 当前不支持的入站协议或传输：$CONFIG_FILE"
   init_meta
 }
 
 xray_installed() { [[ -x $XRAY_BIN ]]; }
 require_xray_installed() { xray_installed || die "Xray 尚未安装，请先运行：sudo xrayctl install"; }
 
+validate_supported_capabilities() {
+  jq -e '
+    all(.inbounds[];
+      if .protocol=="vless" then
+        ((.streamSettings.method // "raw") as $method | ["raw","xhttp","websocket"] | index($method)) != null
+      else .protocol=="socks" or .protocol=="http"
+      end
+    )' "$1" >/dev/null 2>&1
+}
+
 validate_candidate() {
   local candidate=$1 validation_output
   if ! validation_output=$(jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' "$candidate" 2>&1); then
     error "JSON 结构检查失败。"
     [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+    return 1
+  fi
+  if ! validate_supported_capabilities "$candidate"; then
+    error "配置包含 xrayctl 当前不支持的入站协议或传输。"
     return 1
   fi
   if xray_installed; then
@@ -1213,15 +1229,11 @@ generate_reality_keys() {
 
 build_stream_settings() {
   local protocol=$1 __json=$2 __public_key=$3
-  local transport_choice security_choice method security path service target sni private public short_id cert key alpn json
+  local transport_choice security_choice method security path target sni private public short_id cert key alpn json
   case $protocol in
     vless)
       choose security_choice "选择加密方式" "REALITY" "TLS" "无"
       case $security_choice in 1) security=reality;; 2) security=tls;; 3) security=none;; esac
-      ;;
-    trojan)
-      choose security_choice "选择加密方式" "TLS" "REALITY" "无"
-      case $security_choice in 1) security=tls;; 2) security=reality;; 3) security=none;; esac
       ;;
     *)
       choose security_choice "选择加密方式" "TLS" "无"
@@ -1229,12 +1241,12 @@ build_stream_settings() {
       ;;
   esac
 
-  if [[ $security == reality || ( $protocol == trojan && $security != tls ) ]]; then
-    choose transport_choice "选择传输方式" "RAW" "XHTTP" "gRPC"
-    case $transport_choice in 1) method=raw;; 2) method=xhttp;; 3) method=grpc;; esac
+  if [[ $security == reality ]]; then
+    choose transport_choice "选择传输方式" "RAW" "XHTTP"
+    case $transport_choice in 1) method=raw;; 2) method=xhttp;; esac
   else
-    choose transport_choice "选择传输方式" "RAW" "XHTTP" "WebSocket" "gRPC"
-    case $transport_choice in 1) method=raw;; 2) method=xhttp;; 3) method=websocket;; 4) method=grpc;; esac
+    choose transport_choice "选择传输方式" "RAW" "XHTTP" "WebSocket"
+    case $transport_choice in 1) method=raw;; 2) method=xhttp;; 3) method=websocket;; esac
   fi
 
   json=$(jq -n --arg method "$method" --arg security "$security" '{method:$method,security:$security}')
@@ -1246,9 +1258,6 @@ build_stream_settings() {
     websocket)
       while true; do prompt_value path "WebSocket 路径" "/$(random_hex 6)"; validate_path "$path" && break; warn "路径必须以 / 开头且不含空格。"; done
       json=$(jq --arg path "$path" '. + {wsSettings:{path:$path,acceptProxyProtocol:false}}' <<<"$json") ;;
-    grpc)
-      prompt_value service "gRPC serviceName" "$(random_hex 6)"
-      json=$(jq --arg service "$service" '. + {grpcSettings:{serviceName:$service,multiMode:false}}' <<<"$json") ;;
   esac
 
   case $security in
@@ -1280,7 +1289,6 @@ reality_public_key() {
   [[ -n $public ]] || return 1
   printf '%s' "$public"
 }
-
 
 # --- src/certificate.sh ---
 certificate_server_names() {
@@ -1458,6 +1466,71 @@ certbot_cmd() {
   return "$rc"
 }
 
+certbot_account_ids() {
+  local file id
+  for file in "$CERTBOT_CONFIG_DIR"/accounts/*/*/*/regr.json; do
+    [[ -f $file ]] || continue
+    id=$(basename "$(dirname "$file")")
+    printf '%s\n' "$id"
+  done | sort -u
+}
+
+certbot_account_exists() {
+  local wanted=$1 id
+  while IFS= read -r id; do
+    [[ $id == "$wanted" ]] && return 0
+  done < <(certbot_account_ids)
+  return 1
+}
+
+certbot_lineage_account() {
+  local cert_name=$1 conf
+  conf="${CERTBOT_CONFIG_DIR}/renewal/${cert_name}.conf"
+  [[ -r $conf ]] || return 1
+  sed -n 's/^[[:space:]]*account[[:space:]]*=[[:space:]]*//p' "$conf" | sed -n '1p'
+}
+
+select_certbot_account() {
+  local __var=$1 cert_name=${2:-} configured=${XRAYCTL_CERTBOT_ACCOUNT:-} lineage="" id answer
+  local ids=()
+  if [[ -n $cert_name ]]; then
+    lineage=$(certbot_lineage_account "$cert_name" 2>/dev/null || true)
+    if [[ -n $lineage ]]; then
+      if certbot_account_exists "$lineage"; then
+        printf -v "$__var" '%s' "$lineage"
+        return 0
+      fi
+      warn "证书 ${cert_name} 记录的 Certbot 账户 ${lineage} 已不存在。"
+    fi
+  fi
+  if [[ -n $configured ]]; then
+    certbot_account_exists "$configured" \
+      || { warn "XRAYCTL_CERTBOT_ACCOUNT 指定的账户不存在：${configured}"; return 1; }
+    printf -v "$__var" '%s' "$configured"
+    return 0
+  fi
+  while IFS= read -r id; do [[ -n $id ]] && ids+=("$id"); done < <(certbot_account_ids)
+  case ${#ids[@]} in
+    0) printf -v "$__var" '%s' ""; return 0;;
+    1) printf -v "$__var" '%s' "${ids[0]}"; return 0;;
+  esac
+  if [[ ! -t 0 ]]; then
+    warn "检测到多个 Certbot 账户；非交互模式请设置 XRAYCTL_CERTBOT_ACCOUNT=<账户ID>。"
+    return 1
+  fi
+  choose answer "选择 Let's Encrypt / Certbot 账户" "${ids[@]}" || return 1
+  printf -v "$__var" '%s' "${ids[$((answer-1))]}"
+}
+
+certbot_issue_cmd() {
+  local cert_name=$1 account=""
+  shift
+  local args=("$@")
+  select_certbot_account account "$cert_name" || return 1
+  [[ -z $account ]] || args+=(--account "$account")
+  certbot_cmd "${args[@]}"
+}
+
 setup_certbot_renewal_timer() {
   local quick_command="${QUICK_COMMAND:-/usr/local/sbin/xrayctl}"
   [[ -x $quick_command ]] || install_quick_command
@@ -1610,20 +1683,25 @@ certificate_identifier_for_subject() {
 }
 
 detect_port80_owner() {
-  local pid pname
-  pid=$(ss -tlnp 2>/dev/null | awk '/:80 /{print $NF}' | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)
-  if [[ -z $pid ]]; then
-    pid=$(netstat -tlnp 2>/dev/null | awk '/:80 /{print $NF}' | sed -n 's/.*\///p' | head -1)
-    if [[ -z $pid ]]; then printf 'free'; return 0; fi
-    pname="$pid"
+  local pid pname="" line
+  if command_exists ss; then
+    line=$(ss -H -ltnp 2>/dev/null | awk '$4 ~ /:80$/ || $4 ~ /\]:80$/ {print; exit}')
+    [[ -n $line ]] || { printf 'free'; return 0; }
+    pid=$(sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' <<<"$line" | head -1)
+    [[ -z $pid ]] || pname=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]')
+  elif command_exists netstat; then
+    line=$(netstat -ltnp 2>/dev/null | awk '$4 ~ /:80$/ {print; exit}')
+    [[ -n $line ]] || { printf 'free'; return 0; }
+    pname=$(awk '{print $7}' <<<"$line" | sed 's#^[0-9]*/##')
   else
-    pname=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+    printf 'unknown'
+    return 0
   fi
   case $pname in
     xray) printf 'xray';;
     nginx) printf 'nginx';;
     httpd|apache2) printf 'apache';;
-    "") printf 'free';;
+    "") printf 'other';;
     *) printf 'other';;
   esac
 }
@@ -1742,7 +1820,7 @@ issue_domain_cloudflare() {
   local certbot_args=(certonly --dns-cloudflare --dns-cloudflare-credentials "$CLOUDFLARE_INI" \
     --non-interactive --agree-tos --cert-name "$domain" -m "$email" -d "$domain")
   [[ $force == 1 ]] && certbot_args+=(--force-renewal)
-  certbot_cmd "${certbot_args[@]}"
+  certbot_issue_cmd "$domain" "${certbot_args[@]}"
 }
 
 issue_domain_http() {
@@ -1755,11 +1833,11 @@ issue_domain_http() {
 
   case $owner in
     free)
-      certbot_cmd "${certbot_args[@]}"
+      certbot_issue_cmd "$domain" "${certbot_args[@]}"
       ;;
     xray)
       service_is_active && { was_active=1; platform_service_stop; CERT_STOPPED_SERVICE=1; }
-      if ! certbot_cmd "${certbot_args[@]}"; then
+      if ! certbot_issue_cmd "$domain" "${certbot_args[@]}"; then
         ((was_active)) && { platform_service_start || true; CERT_STOPPED_SERVICE=0; }
         return 1
       fi
@@ -1771,7 +1849,7 @@ issue_domain_http() {
       certbot_args=(certonly --nginx --non-interactive --agree-tos \
         --cert-name "$domain" -m "$email" -d "$domain")
       [[ $force == 1 ]] && certbot_args+=(--force-renewal)
-      certbot_cmd "${certbot_args[@]}"
+      certbot_issue_cmd "$domain" "${certbot_args[@]}"
       ;;
     apache)
       warn "80 端口被 Apache 占用，暂不支持 certbot --apache 自动验证。"
@@ -1790,7 +1868,7 @@ issue_domain_manual_dns() {
   local certbot_args=(certonly --manual --agree-tos -m "$email" --preferred-challenges dns --cert-name "$domain" -d "$domain")
   [[ $force == 1 ]] && certbot_args+=(--force-renewal)
   info "Certbot 将提示添加 TXT 记录，请在 DNS 面板添加后回车继续。"
-  certbot_cmd "${certbot_args[@]}"
+  certbot_issue_cmd "$domain" "${certbot_args[@]}"
 }
 
 issue_ip_certificate() {
@@ -1803,10 +1881,10 @@ issue_ip_certificate() {
   [[ $force == 1 ]] && certbot_args+=(--force-renewal)
 
   case $owner in
-    free) certbot_cmd "${certbot_args[@]}";;
+    free) certbot_issue_cmd "$identifier" "${certbot_args[@]}";;
     xray)
       service_is_active && { was_active=1; platform_service_stop; CERT_STOPPED_SERVICE=1; }
-      if ! certbot_cmd "${certbot_args[@]}"; then
+      if ! certbot_issue_cmd "$identifier" "${certbot_args[@]}"; then
         ((was_active)) && { platform_service_start || true; CERT_STOPPED_SERVICE=0; }
         return 1
       fi
@@ -2270,21 +2348,24 @@ manage_inbound_certificate_menu() {
 
 # --- src/protocols.sh ---
 protocol_list() {
-  printf '%s\n' vless vmess trojan socks http
+  printf '%s\n' vless socks http
+}
+
+protocol_is_supported() {
+  [[ $1 == vless || $1 == socks || $1 == http ]]
 }
 
 protocol_supports_stream() {
-  [[ $1 == vless || $1 == vmess || $1 == trojan ]]
+  [[ $1 == vless ]]
 }
 
 protocol_supports_reality() {
-  [[ $1 == vless || $1 == trojan ]]
+  [[ $1 == vless ]]
 }
 
 protocol_client_credential_field() {
   case $1 in
-    vless|vmess) printf '%s\n' id ;;
-    trojan) printf '%s\n' password ;;
+    vless) printf '%s\n' id ;;
     socks|http) printf '%s\n' pass ;;
     *) return 1 ;;
   esac
@@ -2305,27 +2386,6 @@ protocol_build_vless() {
   result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
     --argjson user "$user" --argjson stream "$stream" \
     '{tag:$tag,listen:$listen,port:$port,protocol:"vless",settings:{clients:[$user],decryption:"none"},streamSettings:$stream,sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}')
-  printf -v "$__out" '%s' "$result"
-}
-
-protocol_build_vmess() {
-  local __out=$1 tag=$2 listen=$3 port=$4 email=$5 stream=$6
-  local uuid user result
-  uuid=$(generate_uuid)
-  user=$(jq -n --arg id "$uuid" --arg email "$email" '{id:$id,alterId:0,email:$email,level:0}')
-  result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-    --argjson user "$user" --argjson stream "$stream" \
-    '{tag:$tag,listen:$listen,port:$port,protocol:"vmess",settings:{clients:[$user]},streamSettings:$stream,sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}')
-  printf -v "$__out" '%s' "$result"
-}
-
-protocol_build_trojan() {
-  local __out=$1 tag=$2 listen=$3 port=$4 email=$5 password=$6 stream=$7
-  local user result
-  user=$(jq -n --arg password "$password" --arg email "$email" '{password:$password,email:$email,level:0}')
-  result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-    --argjson user "$user" --argjson stream "$stream" \
-    '{tag:$tag,listen:$listen,port:$port,protocol:"trojan",settings:{clients:[$user]},streamSettings:$stream,sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}')
   printf -v "$__out" '%s' "$result"
 }
 
@@ -2372,8 +2432,6 @@ protocol_build() {
   shift 2
   case $protocol in
     vless) protocol_build_vless "$__out" "$@" ;;
-    vmess) protocol_build_vmess "$__out" "$@" ;;
-    trojan) protocol_build_trojan "$__out" "$@" ;;
     socks) protocol_build_socks "$__out" "$@" ;;
     http) protocol_build_http "$__out" "$@" ;;
     *) error "不支持的协议：${protocol}"; return 1 ;;
@@ -2383,11 +2441,9 @@ protocol_build() {
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
   local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
-  choose choice "选择入站协议" \
-    "VLESS" "VMess" "Trojan" "SOCKS5" "HTTP"
+  choose choice "选择入站协议" "VLESS" "SOCKS5" "HTTP"
   case $choice in
-    1) protocol=vless;; 2) protocol=vmess;; 3) protocol=trojan;;
-    4) protocol=socks;; 5) protocol=http;;
+    1) protocol=vless;; 2) protocol=socks;; 3) protocol=http;;
   esac
 
   if protocol_supports_stream "$protocol"; then
@@ -2407,14 +2463,9 @@ build_inbound() {
   fi
 
   case $protocol in
-    vless|vmess)
+    vless)
       prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol"
       protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$email" "$stream"
-      ;;
-    trojan)
-      prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol"
-      prompt_secret password "Trojan 密码" "$(random_password)"
-      protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$email" "$password" "$stream"
       ;;
     socks|http)
       prompt_optional_value username "用户名（留空表示无认证）"
@@ -2430,6 +2481,21 @@ build_inbound() {
 
 # --- src/inbound.sh ---
 inbound_exists() { jq -e --arg tag "$1" '.inbounds[] | select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
+
+inbound_configuration_is_supported() {
+  local tag=$1 protocol method
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  protocol_is_supported "$protocol" || return 1
+  if protocol_supports_stream "$protocol"; then
+    method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.method // "raw"' "$CONFIG_FILE")
+    case $method in raw|xhttp|websocket) ;; *) return 1;; esac
+  fi
+}
+
+inbound_require_supported_configuration() {
+  inbound_configuration_is_supported "$1" \
+    || die "该入站使用已停止支持的协议或传输；仅允许查看或删除。"
+}
 
 port_in_config() {
   local port=$1 except=${2-}
@@ -2597,6 +2663,7 @@ rename_inbound() {
   local old_tag=${1-} new_tag=${2-} tmp
   [[ -n $old_tag ]] || select_inbound old_tag || return
   inbound_exists "$old_tag" || die "找不到入站：$old_tag"
+  inbound_require_supported_configuration "$old_tag"
   [[ -n $new_tag ]] || prompt_renamed_inbound_tag new_tag "$old_tag"
   validate_tag "$new_tag" || die "入站名称格式无效。"
   if [[ $new_tag == "$old_tag" ]]; then info "入站名称未更改。"; return 0; fi
@@ -2624,6 +2691,7 @@ modify_inbound_basic() {
   local tag=${1-} current listen port host tmp old_port
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
+  inbound_require_supported_configuration "$tag"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
   old_port=$(jq -r '.port' <<<"$current")
   prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")"
@@ -2640,10 +2708,11 @@ modify_inbound_basic() {
 modify_inbound_transport() {
   ensure_runtime_dependencies inbound-transport; require_xray_installed; ensure_config
   local tag=${1-} protocol stream public_key="" tmp method security
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan)$' || return
+  [[ -n $tag ]] || select_inbound tag '^vless$' || return
   inbound_exists "$tag" || die "找不到入站：$tag"
+  inbound_require_supported_configuration "$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
-  [[ $protocol =~ ^(vless|vmess|trojan)$ ]] || die "${protocol} 入站没有可修改的流式传输。"
+  [[ $protocol == vless ]] || die "${protocol} 已停止支持或没有可修改的流式传输。"
   warn "修改传输后，所有客户端都要同步更新配置。"
   confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
   build_stream_settings "$protocol" stream public_key
@@ -2701,8 +2770,9 @@ http_inbound_has_auth() {
 list_clients() {
   ensure_config
   local tag=${1-} protocol count
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
   heading "${tag} 的用户"
   if [[ $protocol == socks || $protocol == http ]]; then
     count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|length' "$CONFIG_FILE")
@@ -2711,13 +2781,10 @@ list_clients() {
   fi
   if ((count == 0)); then info "还没有用户。"; return; fi
   case $protocol in
-    vless|vmess|trojan)
+    vless)
       print_table_cell "序号" 5; print_table_cell "用户" 16; print_table_cell "凭据" 40; printf '\n'
-      if [[ $protocol == vless || $protocol == vmess ]]; then
-        jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE"
-      else
-        jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),(.value.password // "-")]|@tsv' "$CONFIG_FILE"
-      fi | while IFS=$'\t' read -r number label credential; do
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
+        | while IFS=$'\t' read -r number label credential; do
         print_table_cell "$number" 5; print_table_cell "$label" 16; print_table_cell "$credential" 40; printf '\n'
       done
       ;;
@@ -2777,8 +2844,9 @@ prompt_client_label() {
 add_client() {
   ensure_runtime_dependencies client-add; require_xray_installed; ensure_config
   local tag=${1-} protocol label id password user tmp flow method security
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
   prompt_client_label label "$tag" "用户名称/邮箱" "user-$(random_hex 2)"
   case $protocol in
     vless)
@@ -2788,8 +2856,6 @@ add_client() {
       [[ $method == raw && $security != none ]] && flow=xtls-rprx-vision || flow=""
       user=$(jq -n --arg id "$id" --arg email "$label" --arg flow "$flow" '{id:$id,email:$email,level:0}+(if $flow!="" then {flow:$flow} else {} end)')
       ;;
-    vmess) id=$(generate_uuid); user=$(jq -n --arg id "$id" --arg email "$label" '{id:$id,alterId:0,email:$email,level:0}') ;;
-    trojan) prompt_secret password "密码" "$(random_password)"; user=$(jq -n --arg password "$password" --arg email "$label" '{password:$password,email:$email,level:0}') ;;
     socks|http) prompt_secret password "密码" "$(random_password)"; user=$(jq -n --arg user "$label" --arg pass "$password" '{user:$user,pass:$pass}') ;;
     *) die "${protocol} 不支持多用户。";;
   esac
@@ -2811,8 +2877,9 @@ add_client() {
 delete_client() {
   ensure_runtime_dependencies client-delete; ensure_config
   local tag=${1-} label=${2-} assume_yes=${3:-0} protocol tmp count
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
   [[ -n $label ]] || select_client label "$tag" || return
   # HTTP: refuse to delete the last user on a non-localhost address
   if [[ $protocol == http ]]; then
@@ -2852,19 +2919,17 @@ delete_client() {
 rotate_client_credential() {
   ensure_runtime_dependencies client-rotate; ensure_config
   local tag=${1-} label=${2-} protocol value generated tmp
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   [[ -n $label ]] || select_client label "$tag" || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
   confirm "旧凭据会立即失效，继续吗？" N || return 0
   tmp=$(temp_file)
   case $protocol in
-    vless|vmess)
+    vless)
       generated=$(generate_uuid)
       prompt_validated_value value "新 UUID" "$generated" validate_uuid "UUID 格式无效，请重新输入。" || { rm -f "$tmp"; return 1; }
       jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
-    trojan)
-      prompt_secret value "新密码" "$(random_password)" || { rm -f "$tmp"; return 1; }
-      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)|.password)=$value' "$CONFIG_FILE" >"$tmp" ;;
     socks|http)
       prompt_secret value "新密码" "$(random_password)" || { rm -f "$tmp"; return 1; }
       jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '
@@ -2882,9 +2947,10 @@ rotate_client_credential() {
 rename_client() {
   ensure_runtime_dependencies client-rename; require_xray_installed; ensure_config
   local tag=${1-} old_label=${2-} new_label=${3-} protocol count tmp
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   [[ -n $old_label ]] || select_client old_label "$tag" || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
   if [[ -z $new_label ]]; then
     prompt_client_label new_label "$tag" "新的用户名称/邮箱" "" "$old_label" "$protocol"
   else
@@ -2933,13 +2999,12 @@ print_share_entry() {
 }
 
 link_query_for_stream() {
-  local tag=$1 protocol=$2 stream method security query="" path service sni sid pbk flow
+  local tag=$1 protocol=$2 stream method security query="" path sni sid pbk flow
   stream=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings // {method:"raw",security:"none"}' "$CONFIG_FILE")
   method=$(jq -r '.method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
   case $method in
     raw) query="type=tcp" ;;
     websocket) path=$(jq -r '.wsSettings.path // "/"' <<<"$stream"); query="type=ws&path=$(url_encode "$path")" ;;
-    grpc) service=$(jq -r '.grpcSettings.serviceName // ""' <<<"$stream"); query="type=grpc&serviceName=$(url_encode "$service")&mode=gun" ;;
     xhttp) path=$(jq -r '.xhttpSettings.path // "/"' <<<"$stream"); query="type=xhttp&path=$(url_encode "$path")&mode=auto" ;;
     *) query="type=$(url_encode "$method")" ;;
   esac
@@ -2950,7 +3015,6 @@ link_query_for_stream() {
       [[ -n $sni ]] || sni=$(public_host_for_tag "$tag")
       query+="&sni=$(url_encode "$sni")"
       [[ $method == websocket ]] && query+="&host=$(url_encode "$sni")"
-      [[ $method == grpc ]] && query+="&authority=$(url_encode "$sni")"
       query+="&fp=chrome"
       ;;
     reality)
@@ -2969,42 +3033,24 @@ link_query_for_stream() {
 
 print_links() {
   ensure_config; init_meta
-  local tag=${1-} filter=${2-} protocol host uri_host port query label id password method vmess_net vmess_sni payload link
+  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
+  inbound_require_supported_configuration "$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   host=$(public_host_for_tag "$tag"); uri_host=$host
   [[ $uri_host == *:* && $uri_host != \[*\] ]] && uri_host="[${uri_host}]"
   port=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.port' "$CONFIG_FILE")
   heading "${tag} 分享信息"
   case $protocol in
-    vless|trojan)
+    vless)
       query=$(link_query_for_stream "$tag" "$protocol")
       while IFS=$'\t' read -r label id; do
         [[ -z $filter || $label == "$filter" ]] || continue
-        [[ $protocol == vless ]] && link="vless://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")" \
-          || link="trojan://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")"
-        print_share_entry "$label" "链接" "$link"
-      done < <(jq -r --arg tag "$tag" --arg protocol "$protocol" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|[.email,(if $protocol=="vless" then .id else .password end)]|@tsv' "$CONFIG_FILE")
-      ;;
-    vmess)
-      method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.method // "raw"' "$CONFIG_FILE")
-      case $method in raw) vmess_net=tcp;; websocket) vmess_net=ws;; *) vmess_net=$method;; esac
-      vmess_sni=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.tlsSettings.serverName // empty' "$CONFIG_FILE")
-      [[ -n $vmess_sni ]] || vmess_sni=$host
-      while IFS=$'\t' read -r label id; do
-        [[ -z $filter || $label == "$filter" ]] || continue
-        payload=$(jq -nc --arg ps "${tag}-${label}" --arg add "$host" --arg port "$port" --arg id "$id" --arg net "$vmess_net" \
-          --arg type "none" --arg host "$([[ $method == websocket ]] && printf '%s' "$host" || true)" \
-          --arg path "$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.streamSettings.wsSettings.path // .streamSettings.xhttpSettings.path // .streamSettings.grpcSettings.serviceName // "")' "$CONFIG_FILE")" \
-          --arg tls "$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|if .streamSettings.security=="tls" then "tls" elif .streamSettings.security=="reality" then "reality" else "" end' "$CONFIG_FILE")" \
-          --arg sni "$vmess_sni" \
-          '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:"0",scy:"auto",net:$net,type:$type,host:$host,path:$path,tls:$tls,sni:$sni,alpn:""}')
-        link="vmess://$(printf '%s' "$payload" | base64_nowrap)"
+        link="vless://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")"
         print_share_entry "$label" "链接" "$link"
       done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|[.email,.id]|@tsv' "$CONFIG_FILE")
       ;;
-    shadowsocks) die "Shadowsocks 已停止支持；请迁移或删除入站。" ;;
     socks)
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
         while IFS=$'\t' read -r label password; do
@@ -3037,14 +3083,14 @@ print_subscription() {
   ensure_config; init_meta
   local tag=${1-} links="" current_tag current_links
   if [[ -n $tag ]]; then
-    links=$(print_links "$tag" "" | awk '/^链接: (vless|vmess|trojan):\/\// {sub(/^链接: /, ""); print}')
+    links=$(print_links "$tag" "" | awk '/^链接: vless:\/\// {sub(/^链接: /, ""); print}')
   else
     while IFS= read -r current_tag; do
-      current_links=$(print_links "$current_tag" "" | awk '/^链接: (vless|vmess|trojan):\/\// {sub(/^链接: /, ""); print}')
+      current_links=$(print_links "$current_tag" "" | awk '/^链接: vless:\/\// {sub(/^链接: /, ""); print}')
       [[ -n $current_links ]] || continue
       [[ -z $links ]] || links+=$'\n'
       links+=$current_links
-    done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan)$"))|.tag' "$CONFIG_FILE")
+    done < <(jq -r '.inbounds[]|select(.protocol=="vless")|.tag' "$CONFIG_FILE")
   fi
   [[ -n $links ]] || die "没有可生成订阅的代理分享链接。"
   printf '%s' "$links" | base64_nowrap
@@ -3057,7 +3103,7 @@ print_all_share_links() {
   while IFS= read -r tag; do
     found=1
     print_links "$tag" ""
-  done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|vmess|trojan|socks|http)$"))|.tag' "$CONFIG_FILE")
+  done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|socks|http)$"))|.tag' "$CONFIG_FILE")
   ((found == 1)) || { warn "没有可生成分享链接的入站。"; return 0; }
 }
 
@@ -4273,8 +4319,9 @@ select_outbound() {
 assign_outbound() {
   ensure_runtime_dependencies outbound-assign; ensure_config
   local inbound=${1-} outbound=${2-} rule_tag tmp
-  [[ -n $inbound ]] || select_inbound inbound || return
+  [[ -n $inbound ]] || select_inbound inbound '^(vless|socks|http)$' || return
   inbound_exists "$inbound" || die "找不到入站：$inbound"
+  inbound_require_supported_configuration "$inbound"
   [[ -n $outbound ]] || select_outbound outbound 1 || return
   outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
   rule_tag="xrayctl-outbound:${inbound}"
@@ -4393,16 +4440,18 @@ add_domain_rule() {
   if [[ $prompt_details == --prompt ]]; then
     [[ -n $inbound && -z $match && -z $domain && -z $outbound ]] || die "内部调用参数无效。"
     inbound_exists "$inbound" || die "找不到入站：$inbound"
+    inbound_require_supported_configuration "$inbound"
   elif [[ -n $inbound || -n $match || -n $domain || -n $outbound ]]; then
     cli=1
     [[ -n $inbound && -n $match && -n $domain && -n $outbound ]] || \
       die "用法：xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>"
     inbound_exists "$inbound" || die "找不到入站：$inbound"
+    inbound_require_supported_configuration "$inbound"
     case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
     normalized_domains=$(_normalize_domain_list "$domain") || die "域名格式无效。"
     outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
   else
-    select_inbound inbound || return
+    select_inbound inbound '^(vless|socks|http)$' || return
   fi
   if ((cli == 0)); then
     choose choice "匹配方式" "域名及所有子域名" "仅精确域名" || return
@@ -5726,7 +5775,7 @@ outbound_menu() {
 
 domain_rule_menu() {
   local tag choice
-  select_inbound tag || { pause; return; }
+  select_inbound tag '^(vless|socks|http)$' || { pause; return; }
   while inbound_exists "$tag"; do
     clear_screen
     heading "域名分流 · ${tag}"
@@ -5762,7 +5811,7 @@ modify_inbound_menu() {
   while inbound_exists "$tag"; do
     clear_screen
     heading "修改入站信息 · ${tag}"
-    if [[ $protocol == vless || $protocol == vmess || $protocol == trojan ]]; then
+    if [[ $protocol == vless ]]; then
       printf '1) 修改入站名称\n2) 修改地址/端口\n3) 修改传输/安全\n0) 返回入站\n'
       read -r -p "请选择: " choice || { echo; return; }
       case $choice in
@@ -5791,7 +5840,7 @@ manage_inbound_menu() {
     heading "入站 · ${tag}"
     show_node_summary "$tag"
     case $protocol in
-      vless|vmess|trojan)
+      vless)
         security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
         if [[ $security == tls ]]; then
           printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 证书管理\n5) 查看 JSON\n0) 返回列表\n'
@@ -5852,15 +5901,6 @@ manage_inbound_menu() {
             0) return;; *) warn "无效选项。"; pause;;
           esac
         fi
-        ;;
-      shadowsocks)
-        warn "此入站使用已停止支持的 Shadowsocks，仅保留查看入口；删除请返回入站列表。"
-        printf '1) 查看 JSON\n0) 返回列表\n'
-        read -r -p "请选择: " choice || { echo; return; }
-        case $choice in
-          1) run_menu_action show_inbound "$tag"; pause;;
-          0) return;; *) warn "无效选项。"; pause;;
-        esac
         ;;
       *) warn "不支持的入站协议：${protocol}"; return;;
     esac
@@ -6114,8 +6154,8 @@ xrayctl - Xray Linux 管理脚本
   xrayctl diagnose                系统诊断
   xrayctl version
 
-支持协议: VLESS、VMess、Trojan、SOCKS5、HTTP
-支持传输: RAW、XHTTP、WebSocket、gRPC；支持 TLS 和 REALITY。
+支持协议: VLESS、SOCKS5、HTTP
+支持传输: RAW、XHTTP、WebSocket；支持 TLS 和 REALITY。
 EOF
 }
 

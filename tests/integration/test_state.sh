@@ -84,6 +84,16 @@ printf '%s\n' '{"inbounds":"invalid","outbounds":[]}' >"$candidate"
 assert_failure apply_candidate "$candidate"
 assert_eq "$before_invalid" "$(jq -S . "$CONFIG_FILE")" "invalid candidate changed production config"
 
+jq '.inbounds=[{"tag":"unsupported","protocol":"vmess","port":10001,"settings":{"clients":[]}}]' \
+  "$CONFIG_FILE" >"$candidate"
+assert_failure apply_candidate "$candidate"
+assert_eq "$before_invalid" "$(jq -S . "$CONFIG_FILE")" "unsupported protocol changed production config"
+
+jq '.inbounds=[{"tag":"unsupported","protocol":"vless","port":10002,"settings":{"clients":[]},"streamSettings":{"method":"grpc","security":"none"}}]' \
+  "$CONFIG_FILE" >"$candidate"
+assert_failure apply_candidate "$candidate"
+assert_eq "$before_invalid" "$(jq -S . "$CONFIG_FILE")" "unsupported transport changed production config"
+
 ensure_meta
 first_meta=$(jq -S . "$META_FILE")
 ensure_meta

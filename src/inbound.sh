@@ -1,5 +1,20 @@
 inbound_exists() { jq -e --arg tag "$1" '.inbounds[] | select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
 
+inbound_configuration_is_supported() {
+  local tag=$1 protocol method
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  protocol_is_supported "$protocol" || return 1
+  if protocol_supports_stream "$protocol"; then
+    method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.method // "raw"' "$CONFIG_FILE")
+    case $method in raw|xhttp|websocket) ;; *) return 1;; esac
+  fi
+}
+
+inbound_require_supported_configuration() {
+  inbound_configuration_is_supported "$1" \
+    || die "该入站使用已停止支持的协议或传输；仅允许查看或删除。"
+}
+
 port_in_config() {
   local port=$1 except=${2-}
   [[ -r $CONFIG_FILE ]] || return 1
@@ -166,6 +181,7 @@ rename_inbound() {
   local old_tag=${1-} new_tag=${2-} tmp
   [[ -n $old_tag ]] || select_inbound old_tag || return
   inbound_exists "$old_tag" || die "找不到入站：$old_tag"
+  inbound_require_supported_configuration "$old_tag"
   [[ -n $new_tag ]] || prompt_renamed_inbound_tag new_tag "$old_tag"
   validate_tag "$new_tag" || die "入站名称格式无效。"
   if [[ $new_tag == "$old_tag" ]]; then info "入站名称未更改。"; return 0; fi
@@ -193,6 +209,7 @@ modify_inbound_basic() {
   local tag=${1-} current listen port host tmp old_port
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
+  inbound_require_supported_configuration "$tag"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
   old_port=$(jq -r '.port' <<<"$current")
   prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")"
@@ -209,10 +226,11 @@ modify_inbound_basic() {
 modify_inbound_transport() {
   ensure_runtime_dependencies inbound-transport; require_xray_installed; ensure_config
   local tag=${1-} protocol stream public_key="" tmp method security
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan)$' || return
+  [[ -n $tag ]] || select_inbound tag '^vless$' || return
   inbound_exists "$tag" || die "找不到入站：$tag"
+  inbound_require_supported_configuration "$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
-  [[ $protocol =~ ^(vless|vmess|trojan)$ ]] || die "${protocol} 入站没有可修改的流式传输。"
+  [[ $protocol == vless ]] || die "${protocol} 已停止支持或没有可修改的流式传输。"
   warn "修改传输后，所有客户端都要同步更新配置。"
   confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
   build_stream_settings "$protocol" stream public_key
@@ -270,8 +288,9 @@ http_inbound_has_auth() {
 list_clients() {
   ensure_config
   local tag=${1-} protocol count
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
   heading "${tag} 的用户"
   if [[ $protocol == socks || $protocol == http ]]; then
     count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|length' "$CONFIG_FILE")
@@ -280,13 +299,10 @@ list_clients() {
   fi
   if ((count == 0)); then info "还没有用户。"; return; fi
   case $protocol in
-    vless|vmess|trojan)
+    vless)
       print_table_cell "序号" 5; print_table_cell "用户" 16; print_table_cell "凭据" 40; printf '\n'
-      if [[ $protocol == vless || $protocol == vmess ]]; then
-        jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE"
-      else
-        jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),(.value.password // "-")]|@tsv' "$CONFIG_FILE"
-      fi | while IFS=$'\t' read -r number label credential; do
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
+        | while IFS=$'\t' read -r number label credential; do
         print_table_cell "$number" 5; print_table_cell "$label" 16; print_table_cell "$credential" 40; printf '\n'
       done
       ;;
@@ -346,8 +362,9 @@ prompt_client_label() {
 add_client() {
   ensure_runtime_dependencies client-add; require_xray_installed; ensure_config
   local tag=${1-} protocol label id password user tmp flow method security
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
   prompt_client_label label "$tag" "用户名称/邮箱" "user-$(random_hex 2)"
   case $protocol in
     vless)
@@ -357,8 +374,6 @@ add_client() {
       [[ $method == raw && $security != none ]] && flow=xtls-rprx-vision || flow=""
       user=$(jq -n --arg id "$id" --arg email "$label" --arg flow "$flow" '{id:$id,email:$email,level:0}+(if $flow!="" then {flow:$flow} else {} end)')
       ;;
-    vmess) id=$(generate_uuid); user=$(jq -n --arg id "$id" --arg email "$label" '{id:$id,alterId:0,email:$email,level:0}') ;;
-    trojan) prompt_secret password "密码" "$(random_password)"; user=$(jq -n --arg password "$password" --arg email "$label" '{password:$password,email:$email,level:0}') ;;
     socks|http) prompt_secret password "密码" "$(random_password)"; user=$(jq -n --arg user "$label" --arg pass "$password" '{user:$user,pass:$pass}') ;;
     *) die "${protocol} 不支持多用户。";;
   esac
@@ -380,8 +395,9 @@ add_client() {
 delete_client() {
   ensure_runtime_dependencies client-delete; ensure_config
   local tag=${1-} label=${2-} assume_yes=${3:-0} protocol tmp count
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
   [[ -n $label ]] || select_client label "$tag" || return
   # HTTP: refuse to delete the last user on a non-localhost address
   if [[ $protocol == http ]]; then
@@ -421,19 +437,17 @@ delete_client() {
 rotate_client_credential() {
   ensure_runtime_dependencies client-rotate; ensure_config
   local tag=${1-} label=${2-} protocol value generated tmp
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   [[ -n $label ]] || select_client label "$tag" || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
   confirm "旧凭据会立即失效，继续吗？" N || return 0
   tmp=$(temp_file)
   case $protocol in
-    vless|vmess)
+    vless)
       generated=$(generate_uuid)
       prompt_validated_value value "新 UUID" "$generated" validate_uuid "UUID 格式无效，请重新输入。" || { rm -f "$tmp"; return 1; }
       jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
-    trojan)
-      prompt_secret value "新密码" "$(random_password)" || { rm -f "$tmp"; return 1; }
-      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)|.password)=$value' "$CONFIG_FILE" >"$tmp" ;;
     socks|http)
       prompt_secret value "新密码" "$(random_password)" || { rm -f "$tmp"; return 1; }
       jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '
@@ -451,9 +465,10 @@ rotate_client_credential() {
 rename_client() {
   ensure_runtime_dependencies client-rename; require_xray_installed; ensure_config
   local tag=${1-} old_label=${2-} new_label=${3-} protocol count tmp
-  [[ -n $tag ]] || select_inbound tag '^(vless|vmess|trojan|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   [[ -n $old_label ]] || select_client old_label "$tag" || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
   if [[ -z $new_label ]]; then
     prompt_client_label new_label "$tag" "新的用户名称/邮箱" "" "$old_label" "$protocol"
   else

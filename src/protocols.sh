@@ -1,19 +1,22 @@
 protocol_list() {
-  printf '%s\n' vless vmess trojan socks http
+  printf '%s\n' vless socks http
+}
+
+protocol_is_supported() {
+  [[ $1 == vless || $1 == socks || $1 == http ]]
 }
 
 protocol_supports_stream() {
-  [[ $1 == vless || $1 == vmess || $1 == trojan ]]
+  [[ $1 == vless ]]
 }
 
 protocol_supports_reality() {
-  [[ $1 == vless || $1 == trojan ]]
+  [[ $1 == vless ]]
 }
 
 protocol_client_credential_field() {
   case $1 in
-    vless|vmess) printf '%s\n' id ;;
-    trojan) printf '%s\n' password ;;
+    vless) printf '%s\n' id ;;
     socks|http) printf '%s\n' pass ;;
     *) return 1 ;;
   esac
@@ -34,27 +37,6 @@ protocol_build_vless() {
   result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
     --argjson user "$user" --argjson stream "$stream" \
     '{tag:$tag,listen:$listen,port:$port,protocol:"vless",settings:{clients:[$user],decryption:"none"},streamSettings:$stream,sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}')
-  printf -v "$__out" '%s' "$result"
-}
-
-protocol_build_vmess() {
-  local __out=$1 tag=$2 listen=$3 port=$4 email=$5 stream=$6
-  local uuid user result
-  uuid=$(generate_uuid)
-  user=$(jq -n --arg id "$uuid" --arg email "$email" '{id:$id,alterId:0,email:$email,level:0}')
-  result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-    --argjson user "$user" --argjson stream "$stream" \
-    '{tag:$tag,listen:$listen,port:$port,protocol:"vmess",settings:{clients:[$user]},streamSettings:$stream,sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}')
-  printf -v "$__out" '%s' "$result"
-}
-
-protocol_build_trojan() {
-  local __out=$1 tag=$2 listen=$3 port=$4 email=$5 password=$6 stream=$7
-  local user result
-  user=$(jq -n --arg password "$password" --arg email "$email" '{password:$password,email:$email,level:0}')
-  result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-    --argjson user "$user" --argjson stream "$stream" \
-    '{tag:$tag,listen:$listen,port:$port,protocol:"trojan",settings:{clients:[$user]},streamSettings:$stream,sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}')
   printf -v "$__out" '%s' "$result"
 }
 
@@ -101,8 +83,6 @@ protocol_build() {
   shift 2
   case $protocol in
     vless) protocol_build_vless "$__out" "$@" ;;
-    vmess) protocol_build_vmess "$__out" "$@" ;;
-    trojan) protocol_build_trojan "$__out" "$@" ;;
     socks) protocol_build_socks "$__out" "$@" ;;
     http) protocol_build_http "$__out" "$@" ;;
     *) error "不支持的协议：${protocol}"; return 1 ;;
@@ -112,11 +92,9 @@ protocol_build() {
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
   local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
-  choose choice "选择入站协议" \
-    "VLESS" "VMess" "Trojan" "SOCKS5" "HTTP"
+  choose choice "选择入站协议" "VLESS" "SOCKS5" "HTTP"
   case $choice in
-    1) protocol=vless;; 2) protocol=vmess;; 3) protocol=trojan;;
-    4) protocol=socks;; 5) protocol=http;;
+    1) protocol=vless;; 2) protocol=socks;; 3) protocol=http;;
   esac
 
   if protocol_supports_stream "$protocol"; then
@@ -136,14 +114,9 @@ build_inbound() {
   fi
 
   case $protocol in
-    vless|vmess)
+    vless)
       prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol"
       protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$email" "$stream"
-      ;;
-    trojan)
-      prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol"
-      prompt_secret password "Trojan 密码" "$(random_password)"
-      protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$email" "$password" "$stream"
       ;;
     socks|http)
       prompt_optional_value username "用户名（留空表示无认证）"

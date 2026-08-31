@@ -53,10 +53,15 @@ else
   done
 fi
 
-for protocol in vless vmess trojan socks http; do
+for protocol in vless socks http; do
   rg -q "^protocol_build_${protocol}\\(\\)" "${REPO_ROOT}/src/protocols.sh" \
     || fail "missing protocol builder: ${protocol}"
 done
+for removed in vmess trojan; do
+  ! rg -q "^protocol_build_${removed}\\(\\)" "${REPO_ROOT}/src/protocols.sh" \
+    || fail "removed protocol builder still exists: ${removed}"
+done
+! rg -qi 'grpc' "${REPO_ROOT}/src" || fail "removed gRPC transport still exists in production modules"
 
 rg -q 'dist/xrayctl' "${REPO_ROOT}/install.sh" || fail "root installer does not install dist/xrayctl"
 rg -q 'dist/xrayctl' "${REPO_ROOT}/alpine/install.sh" || fail "Alpine installer does not install dist/xrayctl"

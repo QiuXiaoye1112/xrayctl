@@ -29,15 +29,11 @@ generate_reality_keys() {
 
 build_stream_settings() {
   local protocol=$1 __json=$2 __public_key=$3
-  local transport_choice security_choice method security path service target sni private public short_id cert key alpn json
+  local transport_choice security_choice method security path target sni private public short_id cert key alpn json
   case $protocol in
     vless)
       choose security_choice "选择加密方式" "REALITY" "TLS" "无"
       case $security_choice in 1) security=reality;; 2) security=tls;; 3) security=none;; esac
-      ;;
-    trojan)
-      choose security_choice "选择加密方式" "TLS" "REALITY" "无"
-      case $security_choice in 1) security=tls;; 2) security=reality;; 3) security=none;; esac
       ;;
     *)
       choose security_choice "选择加密方式" "TLS" "无"
@@ -45,12 +41,12 @@ build_stream_settings() {
       ;;
   esac
 
-  if [[ $security == reality || ( $protocol == trojan && $security != tls ) ]]; then
-    choose transport_choice "选择传输方式" "RAW" "XHTTP" "gRPC"
-    case $transport_choice in 1) method=raw;; 2) method=xhttp;; 3) method=grpc;; esac
+  if [[ $security == reality ]]; then
+    choose transport_choice "选择传输方式" "RAW" "XHTTP"
+    case $transport_choice in 1) method=raw;; 2) method=xhttp;; esac
   else
-    choose transport_choice "选择传输方式" "RAW" "XHTTP" "WebSocket" "gRPC"
-    case $transport_choice in 1) method=raw;; 2) method=xhttp;; 3) method=websocket;; 4) method=grpc;; esac
+    choose transport_choice "选择传输方式" "RAW" "XHTTP" "WebSocket"
+    case $transport_choice in 1) method=raw;; 2) method=xhttp;; 3) method=websocket;; esac
   fi
 
   json=$(jq -n --arg method "$method" --arg security "$security" '{method:$method,security:$security}')
@@ -62,9 +58,6 @@ build_stream_settings() {
     websocket)
       while true; do prompt_value path "WebSocket 路径" "/$(random_hex 6)"; validate_path "$path" && break; warn "路径必须以 / 开头且不含空格。"; done
       json=$(jq --arg path "$path" '. + {wsSettings:{path:$path,acceptProxyProtocol:false}}' <<<"$json") ;;
-    grpc)
-      prompt_value service "gRPC serviceName" "$(random_hex 6)"
-      json=$(jq --arg service "$service" '. + {grpcSettings:{serviceName:$service,multiMode:false}}' <<<"$json") ;;
   esac
 
   case $security in
@@ -96,4 +89,3 @@ reality_public_key() {
   [[ -n $public ]] || return 1
   printf '%s' "$public"
 }
-

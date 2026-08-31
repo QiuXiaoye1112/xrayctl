@@ -17,7 +17,7 @@ outbound_menu() {
 
 domain_rule_menu() {
   local tag choice
-  select_inbound tag || { pause; return; }
+  select_inbound tag '^(vless|socks|http)$' || { pause; return; }
   while inbound_exists "$tag"; do
     clear_screen
     heading "域名分流 · ${tag}"
@@ -53,7 +53,7 @@ modify_inbound_menu() {
   while inbound_exists "$tag"; do
     clear_screen
     heading "修改入站信息 · ${tag}"
-    if [[ $protocol == vless || $protocol == vmess || $protocol == trojan ]]; then
+    if [[ $protocol == vless ]]; then
       printf '1) 修改入站名称\n2) 修改地址/端口\n3) 修改传输/安全\n0) 返回入站\n'
       read -r -p "请选择: " choice || { echo; return; }
       case $choice in
@@ -82,7 +82,7 @@ manage_inbound_menu() {
     heading "入站 · ${tag}"
     show_node_summary "$tag"
     case $protocol in
-      vless|vmess|trojan)
+      vless)
         security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
         if [[ $security == tls ]]; then
           printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 证书管理\n5) 查看 JSON\n0) 返回列表\n'
@@ -143,15 +143,6 @@ manage_inbound_menu() {
             0) return;; *) warn "无效选项。"; pause;;
           esac
         fi
-        ;;
-      shadowsocks)
-        warn "此入站使用已停止支持的 Shadowsocks，仅保留查看入口；删除请返回入站列表。"
-        printf '1) 查看 JSON\n0) 返回列表\n'
-        read -r -p "请选择: " choice || { echo; return; }
-        case $choice in
-          1) run_menu_action show_inbound "$tag"; pause;;
-          0) return;; *) warn "无效选项。"; pause;;
-        esac
         ;;
       *) warn "不支持的入站协议：${protocol}"; return;;
     esac
@@ -405,8 +396,8 @@ xrayctl - Xray Linux 管理脚本
   xrayctl diagnose                系统诊断
   xrayctl version
 
-支持协议: VLESS、VMess、Trojan、SOCKS5、HTTP
-支持传输: RAW、XHTTP、WebSocket、gRPC；支持 TLS 和 REALITY。
+支持协议: VLESS、SOCKS5、HTTP
+支持传输: RAW、XHTTP、WebSocket；支持 TLS 和 REALITY。
 EOF
 }
 

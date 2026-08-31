@@ -46,17 +46,20 @@ run_fixture() {
 }
 
 run_fixture vless 1
-run_fixture vmess 2
-run_fixture trojan 3
-run_fixture socks 4
-run_fixture http 5
+run_fixture socks 2
+run_fixture http 3
 
-assert_eq $'vless\nvmess\ntrojan\nsocks\nhttp' "$(protocol_list)" "protocol registry changed"
+assert_eq $'vless\nsocks\nhttp' "$(protocol_list)" "protocol registry changed"
+assert_success protocol_is_supported vless
+assert_failure protocol_is_supported vmess
+assert_failure protocol_is_supported trojan
 assert_success protocol_supports_stream vless
 assert_failure protocol_supports_stream socks
-assert_success protocol_supports_reality trojan
-assert_failure protocol_supports_reality vmess
+assert_success protocol_supports_reality vless
+assert_failure protocol_supports_reality socks
+declare -F protocol_build_vmess >/dev/null && fail 'VMess builder still exists'
+declare -F protocol_build_trojan >/dev/null && fail 'Trojan builder still exists'
 assert_eq id "$(protocol_client_credential_field vless)" "VLESS credential capability changed"
 assert_eq pass "$(protocol_client_credential_field http)" "HTTP credential capability changed"
 
-pass "protocol builders match recorded JSON fixtures"
+pass "supported protocol builders match fixtures and removed protocols stay unavailable"

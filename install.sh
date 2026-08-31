@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 readonly SCRIPT_URL="${XRAYCTL_SCRIPT_URL:-https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/dist/xrayctl}"
-readonly TARGET="/usr/local/sbin/xrayctl"
+readonly TARGET="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"
 
 info() { printf '[xrayctl] %s\n' "$*"; }
 die() { printf '[xrayctl] 错误: %s\n' "$*" >&2; exit 1; }
@@ -20,6 +20,14 @@ trap cleanup EXIT
 
 info "正在下载 xrayctl..."
 curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 120 "$SCRIPT_URL" -o "${temp_dir}/xrayctl"
+grep -q '^# xrayctl - Xray Linux terminal manager' "${temp_dir}/xrayctl" \
+  || die "下载内容不是有效的 xrayctl 发行版。"
+bash -n "${temp_dir}/xrayctl" || die "下载的 xrayctl 未通过 Bash 语法检查。"
+
+[[ ! -L $TARGET ]] || die "目标路径是符号链接，拒绝覆盖：${TARGET}"
+if [[ -e $TARGET ]] && ! grep -q '^# xrayctl - Xray Linux terminal manager' "$TARGET" 2>/dev/null; then
+  die "${TARGET} 已存在且不是 xrayctl，拒绝覆盖。"
+fi
 
 install -d -m 755 "$(dirname "$TARGET")"
 install -m 755 "${temp_dir}/xrayctl" "$TARGET"

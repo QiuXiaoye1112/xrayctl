@@ -50,5 +50,5 @@ xrayctl - Xray Linux 管理脚本
   xrayctl diagnose                系统诊断
   xrayctl version
 
-支持协议: VLESS、VMess、Trojan、SOCKS5、HTTP
-支持传输: RAW、XHTTP、WebSocket、gRPC；支持 TLS 和 REALITY。
+支持协议: VLESS、SOCKS5、HTTP
+支持传输: RAW、XHTTP、WebSocket；支持 TLS 和 REALITY。

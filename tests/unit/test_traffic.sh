@@ -25,7 +25,7 @@ candidate=$(temp_file)
 jq '.inbounds=[
   {"protocol":"vless","tag":"vless","listen":"0.0.0.0","port":17225,"settings":{"clients":[]}},
   {"protocol":"socks","tag":"socks","listen":"0.0.0.0","port":5000,"settings":{"accounts":[]}},
-  {"protocol":"vmess","tag":"vmess","listen":"0.0.0.0","port":24443,"settings":{"clients":[]}}
+  {"protocol":"http","tag":"http","listen":"0.0.0.0","port":24443,"settings":{"accounts":[]}}
 ]' "$CONFIG_FILE" >"$candidate"
 mv -f "$candidate" "$CONFIG_FILE"
 
@@ -60,7 +60,7 @@ jq -e '.limitsEnabled==false' "$TRAFFIC_FILE" >/dev/null
 # Collection adds one sample to the current daily bucket and resets rules only
 # after the file was committed. Backend functions are mocked at this boundary.
 traffic_set_enabled true
-MOCK_COUNTERS=$'vless\t1073741824\nsocks\t2048\nvmess\t4096'
+MOCK_COUNTERS=$'vless\t1073741824\nsocks\t2048\nhttp\t4096'
 RESTORE_CALLS=0
 traffic_read_counters() { printf '%s\n' "$MOCK_COUNTERS"; }
 traffic_rules_restore() { RESTORE_CALLS=$((RESTORE_CALLS + 1)); }
@@ -71,7 +71,7 @@ jq -e '
   .limitsEnabled==false and
   .inbounds.vless.daily["2026-08-24"]==1073741824 and
   .inbounds.socks.daily["2026-08-24"]==2048 and
-  .inbounds.vmess.daily["2026-08-24"]==4096
+  .inbounds.http.daily["2026-08-24"]==4096
 ' "$TRAFFIC_FILE" >/dev/null
 last=$(jq -r .lastCollectedAt "$TRAFFIC_FILE")
 traffic_sync_inventory
@@ -83,8 +83,8 @@ grep -Fq '1.00 GB' <<<"$output"
 grep -Fq '全部入站：1.00 GB' <<<"$output"
 vless_line=$(grep -n '^vless[[:space:]]' <<<"$output" | cut -d: -f1)
 socks_line=$(grep -n '^socks[[:space:]]' <<<"$output" | cut -d: -f1)
-vmess_line=$(grep -n '^vmess[[:space:]]' <<<"$output" | cut -d: -f1)
-[[ $vless_line -lt $socks_line && $socks_line -lt $vmess_line ]]
+http_line=$(grep -n '^http[[:space:]]' <<<"$output" | cut -d: -f1)
+[[ $vless_line -lt $socks_line && $socks_line -lt $http_line ]]
 # jq 1.6 parses `end` as a keyword, so date range filters must not expose it
 # as a jq variable even though newer jq releases accept it in some contexts.
 ! grep -Eq -- '--arg(json)?[[:space:]]+end([[:space:]]|$)' src/traffic.sh
@@ -394,7 +394,7 @@ tmp=$(temp_file)
 jq '.inbounds=[
   {"protocol":"vless","tag":"vless","listen":"0.0.0.0","port":17225,"settings":{"clients":[]}},
   {"protocol":"socks","tag":"socks","listen":"0.0.0.0","port":5000,"settings":{"accounts":[]}},
-  {"protocol":"vmess","tag":"vmess","listen":"0.0.0.0","port":24443,"settings":{"clients":[]}}
+  {"protocol":"http","tag":"http","listen":"0.0.0.0","port":24443,"settings":{"accounts":[]}}
 ]' "$CONFIG_FILE" >"$tmp"; mv -f "$tmp" "$CONFIG_FILE"
 traffic_set_backend nft
 traffic_init_file
@@ -411,7 +411,7 @@ grep -Fq 'add rule inet xrayctl_traffic input tcp dport 17225 comment "xrayctl-t
 grep -Fq 'add rule inet xrayctl_traffic input tcp dport 17225 counter comment "xrayctl-traffic:count:vless"' "$CASE_DIR/nft-calls"
 grep -Fq 'add rule inet xrayctl_traffic input tcp dport 5000 counter comment "xrayctl-traffic:count:socks"' "$CASE_DIR/nft-calls"
 grep -Fq 'add rule inet xrayctl_traffic input udp dport 5000 counter comment "xrayctl-traffic:count:socks"' "$CASE_DIR/nft-calls"
-grep -Fq 'add rule inet xrayctl_traffic input tcp dport 24443 counter comment "xrayctl-traffic:count:vmess"' "$CASE_DIR/nft-calls"
+grep -Fq 'add rule inet xrayctl_traffic input tcp dport 24443 counter comment "xrayctl-traffic:count:http"' "$CASE_DIR/nft-calls"
 ! grep -Fq 'xrayctl-traffic:block:socks' "$CASE_DIR/nft-calls"
 ! grep -Fq 'udp dport 17225' "$CASE_DIR/nft-calls"
 

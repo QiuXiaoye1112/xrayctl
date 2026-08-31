@@ -2,16 +2,16 @@
 
 `xrayctl` 是一个同时支持 systemd 与 Alpine/OpenRC 的 Xray 管理工具。开发源码按领域保存在 `src/`，发布时构建为单文件 `dist/xrayctl`。交互界面按“先看对象、再直接操作”设计；每次生产配置变更都会先创建 candidate，执行 JSON/Xray 校验，再联合提交 config 与 metadata，服务重启失败时一起回滚。
 
-当前版本：`1.3.0`
+当前版本：`1.4.0`
 
 > Alpine Linux 使用兼容 bootstrap，但安装的是同一个 `dist/xrayctl`。平台差异由 `platform.sh` 统一处理。参见 [Alpine/OpenRC 安装说明](alpine/README.md)。
 
 ## 功能
 
 - 安装、修复、指定版本安装、升级、保留配置卸载、彻底卸载
-- VLESS、VMess、Trojan、SOCKS5、HTTP 入站
+- VLESS、SOCKS5、HTTP 入站
 - 新建 SOCKS5/HTTP 入站时用户名可留空；留空即无认证，并自动跳过密码输入
-- RAW、XHTTP、WebSocket、gRPC 传输
+- RAW、XHTTP、WebSocket 传输
 - REALITY、TLS、无传输安全（仅建议可信私网）
 - 入站新增、重命名、修改监听信息、修改传输、安全方式、删除、JSON 高级编辑
 - 删除入站时同步删除其中的全部用户、专属出站规则和其他入站路由引用
@@ -21,7 +21,7 @@
 - 更换凭据时支持自定义输入；UUID 格式错误会要求重试，密码或 UUID 留空则自动生成
 - 密码输入过程可见；留空时自动生成并在添加完成后显示（请避免在共享终端或录屏中操作）
 - SOCKS5、HTTP 出站新增、入站绑定和删除
-- VLESS、VMess、Trojan 分享链接与 Base64 订阅输出
+- VLESS 分享链接与 Base64 订阅输出；SOCKS5、HTTP 客户端链接输出
 - Let's Encrypt 域名/公网 IP 签发、自动续期、已有证书导入和安全删除
 - IP 证书优先免 APT 创建 Certbot 环境；证书依赖安装均带硬超时，避免 NAT 主机无限等待软件源
 - 配置校验、systemd/OpenRC 服务与日志管理
@@ -200,14 +200,14 @@ xrayctl help
 
 ## 安全说明
 
-- VLESS 或 Trojan 暴露在公网时不要选择“无传输安全”。这个选项只用于可信私网。
+- VLESS 暴露在公网时不要选择“无传输安全”。这个选项只用于可信私网。
 - SOCKS5/HTTP 无认证模式只应监听 `127.0.0.1`、`::1` 或受控内网。
 - SOCKS5/HTTP 出站本身不加密，只应连接可信代理；HTTP 出站仅支持 TCP。
 - 用户管理页和代理出站详情会直接显示 UUID 或密码，请避免在录屏、截图和共享终端中泄露。
 - 分享链接、配置和手动备份含有 UUID 或密码，应按密钥材料保护。
 - 流量统计依赖 nftables 或 iptables，并会创建独立计数/阻断规则；云厂商安全组仍需在控制台单独管理。
 - 云厂商安全组需要在云控制台单独设置。
-- VMess 和传统 Trojan 仍被支持，但新部署优先使用 VLESS + REALITY/TLS。Shadowsocks 已停止新增和分享；旧入站只保留查看与删除入口。
+- 配置校验只接受上述协议和传输；其他入站协议或传输会被拒绝。
 - 请遵守服务器所在地法律、服务商条款和网络使用政策。
 
 ## 回滚与卸载
@@ -249,7 +249,13 @@ bash -n dist/xrayctl
 bash tests/run.sh
 ```
 
-测试覆盖 Bash syntax、ShellCheck、重复函数、模块 source 依赖、validator、协议 fixture、config/metadata 联合事务、migration 幂等、inbound/client/outbound 生命周期、流量统计与月度限额、防火墙隔离、CLI 与单文件构建。重构前审计见 [`architecture-audit.md`](architecture-audit.md)。
+测试覆盖 Bash syntax、ShellCheck、重复函数、模块 source 依赖、validator、协议 fixture、config/metadata 联合事务、migration 幂等、inbound/client/outbound 生命周期、流量统计与月度限额、防火墙隔离、安装器安全检查、CLI 与单文件构建。CI 还会下载并校验当前 Xray release，用真实核心检查默认配置和全部协议 fixture，并在 Alpine 容器复跑统一测试套件。本地已有 Xray 二进制时可执行：
+
+```bash
+XRAYCTL_REAL_XRAY_BIN=/path/to/xray bash tests/integration/test_real_xray.sh
+```
+
+同一 Certbot 数据目录存在多个 Let's Encrypt 账户时，已有证书优先沿用 lineage 记录的账户；非交互式新签发可通过 `XRAYCTL_CERTBOT_ACCOUNT=<账户ID>` 明确选择。重构前审计见 [`architecture-audit.md`](architecture-audit.md)。
 
 ## 安装卡在 APT
 

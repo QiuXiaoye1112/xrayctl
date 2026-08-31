@@ -173,6 +173,71 @@ certbot_cmd() {
   return "$rc"
 }
 
+certbot_account_ids() {
+  local file id
+  for file in "$CERTBOT_CONFIG_DIR"/accounts/*/*/*/regr.json; do
+    [[ -f $file ]] || continue
+    id=$(basename "$(dirname "$file")")
+    printf '%s\n' "$id"
+  done | sort -u
+}
+
+certbot_account_exists() {
+  local wanted=$1 id
+  while IFS= read -r id; do
+    [[ $id == "$wanted" ]] && return 0
+  done < <(certbot_account_ids)
+  return 1
+}
+
+certbot_lineage_account() {
+  local cert_name=$1 conf
+  conf="${CERTBOT_CONFIG_DIR}/renewal/${cert_name}.conf"
+  [[ -r $conf ]] || return 1
+  sed -n 's/^[[:space:]]*account[[:space:]]*=[[:space:]]*//p' "$conf" | sed -n '1p'
+}
+
+select_certbot_account() {
+  local __var=$1 cert_name=${2:-} configured=${XRAYCTL_CERTBOT_ACCOUNT:-} lineage="" id answer
+  local ids=()
+  if [[ -n $cert_name ]]; then
+    lineage=$(certbot_lineage_account "$cert_name" 2>/dev/null || true)
+    if [[ -n $lineage ]]; then
+      if certbot_account_exists "$lineage"; then
+        printf -v "$__var" '%s' "$lineage"
+        return 0
+      fi
+      warn "证书 ${cert_name} 记录的 Certbot 账户 ${lineage} 已不存在。"
+    fi
+  fi
+  if [[ -n $configured ]]; then
+    certbot_account_exists "$configured" \
+      || { warn "XRAYCTL_CERTBOT_ACCOUNT 指定的账户不存在：${configured}"; return 1; }
+    printf -v "$__var" '%s' "$configured"
+    return 0
+  fi
+  while IFS= read -r id; do [[ -n $id ]] && ids+=("$id"); done < <(certbot_account_ids)
+  case ${#ids[@]} in
+    0) printf -v "$__var" '%s' ""; return 0;;
+    1) printf -v "$__var" '%s' "${ids[0]}"; return 0;;
+  esac
+  if [[ ! -t 0 ]]; then
+    warn "检测到多个 Certbot 账户；非交互模式请设置 XRAYCTL_CERTBOT_ACCOUNT=<账户ID>。"
+    return 1
+  fi
+  choose answer "选择 Let's Encrypt / Certbot 账户" "${ids[@]}" || return 1
+  printf -v "$__var" '%s' "${ids[$((answer-1))]}"
+}
+
+certbot_issue_cmd() {
+  local cert_name=$1 account=""
+  shift
+  local args=("$@")
+  select_certbot_account account "$cert_name" || return 1
+  [[ -z $account ]] || args+=(--account "$account")
+  certbot_cmd "${args[@]}"
+}
+
 setup_certbot_renewal_timer() {
   local quick_command="${QUICK_COMMAND:-/usr/local/sbin/xrayctl}"
   [[ -x $quick_command ]] || install_quick_command
@@ -325,20 +390,25 @@ certificate_identifier_for_subject() {
 }
 
 detect_port80_owner() {
-  local pid pname
-  pid=$(ss -tlnp 2>/dev/null | awk '/:80 /{print $NF}' | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)
-  if [[ -z $pid ]]; then
-    pid=$(netstat -tlnp 2>/dev/null | awk '/:80 /{print $NF}' | sed -n 's/.*\///p' | head -1)
-    if [[ -z $pid ]]; then printf 'free'; return 0; fi
-    pname="$pid"
+  local pid pname="" line
+  if command_exists ss; then
+    line=$(ss -H -ltnp 2>/dev/null | awk '$4 ~ /:80$/ || $4 ~ /\]:80$/ {print; exit}')
+    [[ -n $line ]] || { printf 'free'; return 0; }
+    pid=$(sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' <<<"$line" | head -1)
+    [[ -z $pid ]] || pname=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]')
+  elif command_exists netstat; then
+    line=$(netstat -ltnp 2>/dev/null | awk '$4 ~ /:80$/ {print; exit}')
+    [[ -n $line ]] || { printf 'free'; return 0; }
+    pname=$(awk '{print $7}' <<<"$line" | sed 's#^[0-9]*/##')
   else
-    pname=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+    printf 'unknown'
+    return 0
   fi
   case $pname in
     xray) printf 'xray';;
     nginx) printf 'nginx';;
     httpd|apache2) printf 'apache';;
-    "") printf 'free';;
+    "") printf 'other';;
     *) printf 'other';;
   esac
 }
@@ -457,7 +527,7 @@ issue_domain_cloudflare() {
   local certbot_args=(certonly --dns-cloudflare --dns-cloudflare-credentials "$CLOUDFLARE_INI" \
     --non-interactive --agree-tos --cert-name "$domain" -m "$email" -d "$domain")
   [[ $force == 1 ]] && certbot_args+=(--force-renewal)
-  certbot_cmd "${certbot_args[@]}"
+  certbot_issue_cmd "$domain" "${certbot_args[@]}"
 }
 
 issue_domain_http() {
@@ -470,11 +540,11 @@ issue_domain_http() {
 
   case $owner in
     free)
-      certbot_cmd "${certbot_args[@]}"
+      certbot_issue_cmd "$domain" "${certbot_args[@]}"
       ;;
     xray)
       service_is_active && { was_active=1; platform_service_stop; CERT_STOPPED_SERVICE=1; }
-      if ! certbot_cmd "${certbot_args[@]}"; then
+      if ! certbot_issue_cmd "$domain" "${certbot_args[@]}"; then
         ((was_active)) && { platform_service_start || true; CERT_STOPPED_SERVICE=0; }
         return 1
       fi
@@ -486,7 +556,7 @@ issue_domain_http() {
       certbot_args=(certonly --nginx --non-interactive --agree-tos \
         --cert-name "$domain" -m "$email" -d "$domain")
       [[ $force == 1 ]] && certbot_args+=(--force-renewal)
-      certbot_cmd "${certbot_args[@]}"
+      certbot_issue_cmd "$domain" "${certbot_args[@]}"
       ;;
     apache)
       warn "80 端口被 Apache 占用，暂不支持 certbot --apache 自动验证。"
@@ -505,7 +575,7 @@ issue_domain_manual_dns() {
   local certbot_args=(certonly --manual --agree-tos -m "$email" --preferred-challenges dns --cert-name "$domain" -d "$domain")
   [[ $force == 1 ]] && certbot_args+=(--force-renewal)
   info "Certbot 将提示添加 TXT 记录，请在 DNS 面板添加后回车继续。"
-  certbot_cmd "${certbot_args[@]}"
+  certbot_issue_cmd "$domain" "${certbot_args[@]}"
 }
 
 issue_ip_certificate() {
@@ -518,10 +588,10 @@ issue_ip_certificate() {
   [[ $force == 1 ]] && certbot_args+=(--force-renewal)
 
   case $owner in
-    free) certbot_cmd "${certbot_args[@]}";;
+    free) certbot_issue_cmd "$identifier" "${certbot_args[@]}";;
     xray)
       service_is_active && { was_active=1; platform_service_stop; CERT_STOPPED_SERVICE=1; }
-      if ! certbot_cmd "${certbot_args[@]}"; then
+      if ! certbot_issue_cmd "$identifier" "${certbot_args[@]}"; then
         ((was_active)) && { platform_service_start || true; CERT_STOPPED_SERVICE=0; }
         return 1
       fi
