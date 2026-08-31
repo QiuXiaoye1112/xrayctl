@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq openssl shellcheck unzip
+        run: sudo apt-get update && sudo apt-get install -y jq openssl ripgrep shellcheck unzip
       - name: Download and verify current Xray release
         shell: bash
         run: |
@@ -38,7 +38,8 @@ jobs:
         env:
           REQUIRE_SHELLCHECK: "1"
         run: |
-          bash scripts/build.sh
+          recorded_commit=$(sed -n 's/^readonly XRAYCTL_BUILD_COMMIT="\([^"]*\)"/\1/p' dist/xrayctl | head -1)
+          XRAYCTL_BUILD_COMMIT="$recorded_commit" bash scripts/build.sh
           git diff --exit-code -- dist/xrayctl
           bash tests/run.sh
 
@@ -49,9 +50,10 @@ jobs:
       - name: Run unified suite on Alpine
         run: |
           docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -ec '
-            apk add --no-cache bash curl jq openssl coreutils unzip >/dev/null
+            apk add --no-cache bash curl jq openssl coreutils ripgrep unzip >/dev/null
             export TERM=xterm XRAYCTL_TESTING=1
-            bash scripts/build.sh
+            recorded_commit=$(sed -n 's/^readonly XRAYCTL_BUILD_COMMIT="\([^"]*\)"/\1/p' dist/xrayctl | head -1)
+            XRAYCTL_BUILD_COMMIT="$recorded_commit" bash scripts/build.sh
             sh -n alpine/install.sh
             bash tests/run.sh
           '
