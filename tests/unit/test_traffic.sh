@@ -36,6 +36,9 @@ mv -f "$candidate" "$CONFIG_FILE"
 [[ $(traffic_limit_next_timestamp '2026-08-07 18:00:00' 7 '18:00:00') == '2026-09-07 18:00:00' ]]
 [[ $(traffic_limit_next_timestamp '2026-01-31 18:00:00' 31 '18:00:00') == '2026-02-28 18:00:00' ]]
 [[ $(traffic_limit_next_timestamp '2026-02-28 18:00:00' 31 '18:00:00') == '2026-03-31 18:00:00' ]]
+[[ $(traffic_limit_first_cycle_end '2026-08-10 12:00:00' 15 '12:34:56') == '2026-08-15 12:34:56' ]]
+[[ $(traffic_limit_first_cycle_end '2026-08-20 12:00:00' 15 '12:34:56') == '2026-09-15 12:34:56' ]]
+[[ $(traffic_limit_first_cycle_end '2026-01-20 12:00:00' 31 '12:34:56') == '2026-02-28 12:34:56' ]]
 traffic_validate_date 2024-02-29
 ! traffic_validate_date 2025-02-29
 ! traffic_validate_date 2026-13-01
@@ -189,7 +192,7 @@ traffic_limits_are_enabled
 traffic_limits_disable >/dev/null
 ! traffic_limits_are_enabled
 traffic_limits_enable >/dev/null
-traffic_limit_set vless 1 >/dev/null
+traffic_limit_set vless 1 7 >/dev/null
 jq -e '
   .limitsEnabled==true and
   .inbounds.vless.limit.quotaBytes==1073741824 and
@@ -226,7 +229,7 @@ traffic_is_enabled
 XRAYCTL_TRAFFIC_NOW='2026-08-20 12:34:56'
 XRAYCTL_TRAFFIC_TODAY=2026-08-20
 MOCK_COUNTERS=""
-traffic_limit_set vless 2 >/dev/null
+traffic_limit_set vless 2 7 >/dev/null
 jq -e '
   .inbounds.vless.limit.quotaBytes==2147483648 and
   .inbounds.vless.limit.usedBytes==1073741824 and

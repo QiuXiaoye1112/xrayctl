@@ -359,7 +359,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl traffic [开始日期] [结束日期] 查看按入站累计流量
   xrayctl traffic enable|disable       开启/停止流量统计
   xrayctl traffic limit show|enable|disable
-  xrayctl traffic limit set <标签> <GB>
+  xrayctl traffic limit set <标签> <GB> <重置日>
   xrayctl traffic limit remove <标签>
   xrayctl inbound list            列出入站
   xrayctl inbound add             交互新增入站
@@ -431,7 +431,7 @@ dispatch() {
             show) traffic_limits_show;;
             enable|start) traffic_limits_enable;;
             disable|stop) traffic_limits_disable;;
-            set) traffic_limit_set "${3-}" "${4-}";;
+            set) traffic_limit_set "${3-}" "${4-}" "${5-}";;
             remove|delete) traffic_limit_remove "${3-}";;
             *) die "未知 traffic limit 子命令：${2}";;
           esac

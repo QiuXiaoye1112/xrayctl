@@ -26,7 +26,7 @@
 - IP 证书优先免 APT 创建 Certbot 环境；证书依赖安装均带硬超时，避免 NAT 主机无限等待软件源
 - 配置校验、systemd/OpenRC 服务与日志管理
 - 按入站累计 TCP/UDP 流量，总量按天保存，只保留最近三个自然月；统计周期可自定义选择
-- 可选月度流量限制（默认关闭）：额度从首次设置的精确时刻起算，用尽后只禁用对应入站，下个周期自动恢复
+- 可选月度流量限制（默认关闭）：按指定日期每月重置，用尽后只禁用对应入站，下个周期自动恢复
 - 配置校验失败时显示 Xray 核心的原始错误，便于准确定位问题
 - BBR 环境检测和开启/关闭、系统诊断
 - 安装后通过 `xrayctl` 快捷命令启动
@@ -171,7 +171,7 @@ xrayctl logs 100                 # 最近 100 行日志
 xrayctl traffic                  # 查看最近三个月各入站总流量
 xrayctl traffic enable           # 开启每分钟采集
 xrayctl traffic limit enable     # 启用月度流量限制功能
-xrayctl traffic limit set TAG 100 # 为 TAG 设置每月 100 GB
+xrayctl traffic limit set TAG 100 15 # 为 TAG 设置每月 100 GB，每月 15 日重置
 xrayctl traffic limit remove TAG # 取消该入站额度
 xrayctl cert issue example.com admin@example.com
 xrayctl diagnose

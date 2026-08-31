@@ -78,6 +78,19 @@ traffic_limit_next_timestamp() {
   printf '%04d-%02d-%02d %s' "$year" "$month" "$((10#$anchor_day))" "$anchor_time"
 }
 
+traffic_limit_first_cycle_end() {
+  local reference=$1 reset_day=$2 reset_time=$3 year month max_day candidate
+  traffic_validate_timestamp "$reference" || return 1
+  [[ $reset_day =~ ^[0-9]+$ ]] && ((10#$reset_day >= 1 && 10#$reset_day <= 31)) || return 1
+  [[ $reset_time =~ ^([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]] || return 1
+  ((10#${BASH_REMATCH[1]} <= 23 && 10#${BASH_REMATCH[2]} <= 59 && 10#${BASH_REMATCH[3]} <= 59)) || return 1
+  year=$((10#${reference:0:4})); month=$((10#${reference:5:2}))
+  max_day=$(traffic_days_in_month "$year" "$month")
+  ((10#$reset_day <= max_day)) || reset_day=$max_day
+  candidate=$(printf '%04d-%02d-%02d %s' "$year" "$month" "$reset_day" "$reset_time")
+  if [[ $candidate > "$reference" ]]; then printf '%s' "$candidate"; else traffic_limit_next_timestamp "$reference" "$2" "$reset_time"; fi
+}
+
 traffic_retention_start() { traffic_months_ago "$(traffic_today)" 3; }
 
 traffic_validate_range() {
@@ -160,7 +173,7 @@ traffic_inventory_json() {
 }
 
 traffic_rolled_limits_json() {
-  local now=$1 tag quota anchor_day anchor_time cycle_start cycle_end used next
+  local now=$1 tag quota reset_day anchor_day anchor_time cycle_start cycle_end used next
   traffic_init_file
   while IFS=$'\t' read -r tag quota anchor_day anchor_time cycle_start cycle_end used; do
     [[ -n $tag ]] || continue
@@ -171,12 +184,13 @@ traffic_rolled_limits_json() {
       cycle_end=$next
       used=0
     done
-    jq -nc --arg key "$tag" --argjson quota "$quota" --argjson anchorDay "$anchor_day" \
+    reset_day=$anchor_day
+    jq -nc --arg key "$tag" --argjson quota "$quota" --argjson resetDay "$reset_day" --argjson anchorDay "$anchor_day" \
       --arg anchorTime "$anchor_time" --arg cycleStart "$cycle_start" --arg cycleEnd "$cycle_end" --argjson used "$used" \
-      '{key:$key,value:{enabled:true,quotaBytes:$quota,anchorDay:$anchorDay,anchorTime:$anchorTime,cycleStart:$cycleStart,cycleEnd:$cycleEnd,usedBytes:$used}}'
+      '{key:$key,value:{enabled:true,quotaBytes:$quota,resetDay:$resetDay,anchorDay:$anchorDay,anchorTime:$anchorTime,cycleStart:$cycleStart,cycleEnd:$cycleEnd,usedBytes:$used}}'
   done < <(jq -r '
     .inbounds | to_entries[]? | select(.value.limit.enabled==true) |
-    [.key,((.value.limit.quotaBytes // 0)|floor|tostring),((.value.limit.anchorDay // 0)|floor|tostring),
+    [.key,((.value.limit.quotaBytes // 0)|floor|tostring),((.value.limit.resetDay // .value.limit.anchorDay // 0)|floor|tostring),
      (.value.limit.anchorTime // ""),(.value.limit.cycleStart // ""),(.value.limit.cycleEnd // ""),
      ((.value.limit.usedBytes // 0)|floor|tostring)] | @tsv
   ' "$TRAFFIC_FILE") | jq -s 'from_entries'
@@ -665,7 +679,7 @@ traffic_limits_disable() {
 }
 
 traffic_limit_set() {
-  local tag=${1-} quota_gb=${2-} quota now anchor_day anchor_time cycle_end tmp rc=0 existing
+  local tag=${1-} quota_gb=${2-} reset_day=${3-} quota now anchor_day anchor_time cycle_end tmp rc=0 existing
   traffic_require_root traffic-limit-set; ensure_config
   traffic_is_enabled || { warn "请先开启流量统计。"; return 1; }
   traffic_limits_are_enabled || { warn "请先启用流量限制功能。"; return 1; }
@@ -677,17 +691,28 @@ traffic_limit_set() {
   done
   quota=${quota:-$(traffic_limit_quota_bytes "$quota_gb")} || { warn "流量额度无效。"; return 1; }
   traffic_collect || return 1
-  now=$(traffic_now); anchor_day=$((10#${now:8:2})); anchor_time=${now:11:8}
-  cycle_end=$(traffic_limit_next_timestamp "$now" "$anchor_day" "$anchor_time") || return 1
+  now=$(traffic_now); anchor_time=${now:11:8}
+  if [[ -z $reset_day && -t 0 ]]; then
+    read -r -p "每月重置日期（1-31）: " reset_day || { echo; return 0; }
+  fi
+  reset_day=${reset_day:-$((10#${now:8:2}))}
+  if ! [[ $reset_day =~ ^[0-9]+$ ]] || ((10#$reset_day < 1 || 10#$reset_day > 31)); then
+    warn "重置日期无效，请输入 1 到 31。"; return 1
+  fi
   existing=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.enabled==true' "$TRAFFIC_FILE")
+  if [[ $existing == true ]]; then
+    anchor_time=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.anchorTime // empty' "$TRAFFIC_FILE")
+  fi
+  anchor_day=$reset_day
+  cycle_end=$(traffic_limit_first_cycle_end "$now" "$reset_day" "$anchor_time") || return 1
   traffic_lock_acquire || return 1
   tmp=$(temp_file)
-  jq --arg tag "$tag" --argjson quota "$quota" --arg now "$now" --argjson anchorDay "$anchor_day" \
+  jq --arg tag "$tag" --argjson quota "$quota" --arg now "$now" --argjson resetDay "$reset_day" --argjson anchorDay "$anchor_day" \
     --arg anchorTime "$anchor_time" --arg cycleEnd "$cycle_end" '
       if .inbounds[$tag].limit.enabled==true then
-        .inbounds[$tag].limit.quotaBytes=$quota
+        .inbounds[$tag].limit.quotaBytes=$quota | .inbounds[$tag].limit.resetDay=$resetDay | .inbounds[$tag].limit.anchorDay=$anchorDay | .inbounds[$tag].limit.cycleEnd=$cycleEnd
       else
-        .inbounds[$tag].limit={enabled:true,quotaBytes:$quota,anchorDay:$anchorDay,anchorTime:$anchorTime,
+        .inbounds[$tag].limit={enabled:true,quotaBytes:$quota,resetDay:$resetDay,anchorDay:$anchorDay,anchorTime:$anchorTime,
           cycleStart:$now,cycleEnd:$cycleEnd,usedBytes:0}
       end
     ' "$TRAFFIC_FILE" >"$tmp" || rc=1
