@@ -449,8 +449,8 @@ startup_state_summary() {
 }
 
 show_main_summary() {
-  printf '服务: %s  |  入站: %s  |  Xray: %s\n' \
-    "$(service_state_summary)" "$(node_count_summary)" "$(xray_version_summary)"
+  printf '服务: %s  |  入站: %s  |  BBR: %s  |  Xray: %s\n' \
+    "$(service_state_summary)" "$(node_count_summary)" "$(bbr_state_summary)" "$(xray_version_summary)"
 }
 
 show_main_inbounds() {
