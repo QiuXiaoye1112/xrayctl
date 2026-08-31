@@ -14,7 +14,12 @@ die() { printf '[xrayctl] 错误: %s\n' "$*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || die "缺少 curl，请先安装 curl。"
 command -v install >/dev/null 2>&1 || die "缺少 install 命令（通常由 coreutils 提供）。"
 
-temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-bootstrap.XXXXXX")
+bootstrap_tmp_dir() {
+  local base=${XRAYCTL_TMP_DIR:-/var/tmp}
+  mkdir -p "$base" && mktemp -d "$base/xrayctl-bootstrap.XXXXXX"
+}
+
+temp_dir=$(bootstrap_tmp_dir) || die "无法创建引导安装临时目录。"
 cleanup() { rm -rf "$temp_dir"; }
 trap cleanup EXIT
 

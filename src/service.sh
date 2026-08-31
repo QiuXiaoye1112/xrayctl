@@ -132,7 +132,7 @@ install_xray_core_openrc() {
     [[ $version == v* ]] || die "无法获取 Xray 最新版本。"
   fi
   base="${XRAY_RELEASE_BASE}/${version}"
-  work=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-openrc.XXXXXX")
+  work=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-openrc.XXXXXX")
   archive="${work}/${asset}"
   digest="${archive}.dgst"
   info "正在下载 Xray ${version}。"
@@ -188,8 +188,8 @@ install_or_update_xray() {
     info "从 XTLS 官方仓库下载安装脚本。"
     curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
     chmod 700 "$installer"
-    if [[ -n $version ]]; then TERM="${TERM:-xterm}" bash "$installer" install --version "${version#v}";
-    else TERM="${TERM:-xterm}" bash "$installer" install; fi
+    if [[ -n $version ]]; then TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" install --version "${version#v}";
+    else TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" install; fi
     rm -f "$installer"
   fi
   [[ -x $XRAY_BIN ]] || { rm -f "$preserved_config"; die "Xray 安装后未找到：$XRAY_BIN"; }

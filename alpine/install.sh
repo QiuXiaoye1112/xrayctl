@@ -20,7 +20,9 @@ info "正在准备运行环境。"
 apk add --no-cache bash curl ca-certificates unzip openssl
 update-ca-certificates >/dev/null 2>&1 || true
 
-temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-alpine-bootstrap.XXXXXX")
+tmp_base="${XRAYCTL_TMP_DIR:-/var/tmp}"
+mkdir -p "$tmp_base" || die "无法创建引导安装临时目录。"
+temp_dir=$(mktemp -d "$tmp_base/xrayctl-alpine-bootstrap.XXXXXX")
 cleanup() { rm -rf "$temp_dir"; }
 trap cleanup EXIT HUP INT TERM
 

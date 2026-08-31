@@ -406,7 +406,13 @@ state_apply_candidate_file() {
   return "$rc"
 }
 
-temp_file() { mktemp "${TMPDIR:-/tmp}/xrayctl.XXXXXX"; }
+runtime_tmp_dir() {
+  local base=${XRAYCTL_TMP_DIR:-/var/tmp}
+  mkdir -p "$base" || return 1
+  printf '%s\n' "$base"
+}
+
+temp_file() { mktemp "$(runtime_tmp_dir)/xrayctl.XXXXXX"; }
 
 _state_build_inbound_meta_set() {
   local current=$1 candidate=$2 tag=$3 host=$4
@@ -488,7 +494,7 @@ restore_backup() {
   fi
   extract_config="${CONFIG_FILE#/}"
   tar -tzf "$archive" | grep -Fxq "$extract_config" || die "备份中没有 ${extract_config}。"
-  temp=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-restore.XXXXXX")
+  temp=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-restore.XXXXXX")
   tar -xzf "$archive" -C "$temp"
   if find "$temp" -type l -print -quit | grep -q .; then rm -rf "$temp"; die "备份中不允许包含符号链接。"; fi
   [[ -f "$temp/$extract_config" ]] || { rm -rf "$temp"; die "备份配置不是普通文件。"; }

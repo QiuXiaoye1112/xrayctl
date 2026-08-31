@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="62a60b359ffb"
+readonly XRAYCTL_BUILD_COMMIT="d2739b5a5ae1"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -1041,7 +1041,13 @@ state_apply_candidate_file() {
   return "$rc"
 }
 
-temp_file() { mktemp "${TMPDIR:-/tmp}/xrayctl.XXXXXX"; }
+runtime_tmp_dir() {
+  local base=${XRAYCTL_TMP_DIR:-/var/tmp}
+  mkdir -p "$base" || return 1
+  printf '%s\n' "$base"
+}
+
+temp_file() { mktemp "$(runtime_tmp_dir)/xrayctl.XXXXXX"; }
 
 _state_build_inbound_meta_set() {
   local current=$1 candidate=$2 tag=$3 host=$4
@@ -1123,7 +1129,7 @@ restore_backup() {
   fi
   extract_config="${CONFIG_FILE#/}"
   tar -tzf "$archive" | grep -Fxq "$extract_config" || die "备份中没有 ${extract_config}。"
-  temp=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-restore.XXXXXX")
+  temp=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-restore.XXXXXX")
   tar -xzf "$archive" -C "$temp"
   if find "$temp" -type l -print -quit | grep -q .; then rm -rf "$temp"; die "备份中不允许包含符号链接。"; fi
   [[ -f "$temp/$extract_config" ]] || { rm -rf "$temp"; die "备份配置不是普通文件。"; }
@@ -4904,7 +4910,7 @@ install_xray_core_openrc() {
     [[ $version == v* ]] || die "无法获取 Xray 最新版本。"
   fi
   base="${XRAY_RELEASE_BASE}/${version}"
-  work=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-openrc.XXXXXX")
+  work=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-openrc.XXXXXX")
   archive="${work}/${asset}"
   digest="${archive}.dgst"
   info "正在下载 Xray ${version}。"
@@ -4960,8 +4966,8 @@ install_or_update_xray() {
     info "从 XTLS 官方仓库下载安装脚本。"
     curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
     chmod 700 "$installer"
-    if [[ -n $version ]]; then TERM="${TERM:-xterm}" bash "$installer" install --version "${version#v}";
-    else TERM="${TERM:-xterm}" bash "$installer" install; fi
+    if [[ -n $version ]]; then TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" install --version "${version#v}";
+    else TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" install; fi
     rm -f "$installer"
   fi
   [[ -x $XRAY_BIN ]] || { rm -f "$preserved_config"; die "Xray 安装后未找到：$XRAY_BIN"; }
