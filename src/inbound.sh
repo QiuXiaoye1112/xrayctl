@@ -72,12 +72,20 @@ prompt_port() {
 }
 
 prompt_public_host() {
-  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} preferred=${3:-} value ipv4="" ipv6="" address_choice prompt_label="客户端连接地址"
+  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} preferred=${3:-} value ipv4="" ipv6="" address_choice prompt_label="客户端连接地址" cert_id cert_subject
   local labels=() values=()
   if [[ -z $default ]]; then
     ipv4=$(detect_public_ipv4 || true)
     ipv6=$(detect_public_ipv6 || true)
     if [[ -n $preferred ]]; then labels+=("证书域名/IP  ${preferred}"); values+=("$preferred"); fi
+    while IFS= read -r cert_id; do
+      [[ -n $cert_id ]] || continue
+      cert_subject=$(meta_cert_get_field "$cert_id" subject 2>/dev/null || true)
+      [[ -n $cert_subject ]] || continue
+      [[ $cert_subject == "$preferred" ]] && continue
+      [[ " ${values[*]} " == *" $cert_subject "* ]] && continue
+      labels+=("证书域名/IP  ${cert_subject}"); values+=("$cert_subject")
+    done < <(meta_cert_list 2>/dev/null || true)
     if [[ -n $ipv4 && $ipv4 != "$preferred" ]]; then labels+=("IPv4  ${ipv4}"); values+=("$ipv4"); fi
     if [[ -n $ipv6 && $ipv6 != "$preferred" ]]; then labels+=("IPv6  ${ipv6}"); values+=("$ipv6"); fi
     if ((${#values[@]} > 1)); then
