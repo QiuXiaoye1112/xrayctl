@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="48b803cc8733"
+readonly XRAYCTL_BUILD_COMMIT="49f6131969e1"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -1130,7 +1130,7 @@ restore_backup() {
     die "备份包含不安全的路径。"
   fi
   extract_config="${CONFIG_FILE#/}"
-  tar -tzf "$archive" | grep -Fxq "$extract_config" || die "备份中没有 ${extract_config}。"
+  tar -tzf "$archive" | grep -Fx "$extract_config" >/dev/null || die "备份中没有 ${extract_config}。"
   temp=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-restore.XXXXXX")
   tar -xzf "$archive" -C "$temp"
   if find "$temp" -type l -print -quit | grep -q .; then rm -rf "$temp"; die "备份中不允许包含符号链接。"; fi

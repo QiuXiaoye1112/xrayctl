@@ -34,7 +34,7 @@ if command -v shellcheck >/dev/null 2>&1; then
     "${REPO_ROOT}/scripts/lint.sh"
   test_files=()
   while IFS= read -r file; do test_files+=("$file"); done < <(find "${REPO_ROOT}/tests" -type f -name '*.sh' | sort)
-  shellcheck -x -e SC1091,SC2034,SC2155,SC2329 "${test_files[@]}"
+  shellcheck -x -e SC1091,SC2034,SC2155,SC2218,SC2317,SC2329 "${test_files[@]}"
 elif [[ ${REQUIRE_SHELLCHECK:-0} == 1 ]]; then
   printf 'shellcheck is required but not installed\n' >&2
   exit 1

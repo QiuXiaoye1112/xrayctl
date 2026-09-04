@@ -493,7 +493,7 @@ restore_backup() {
     die "备份包含不安全的路径。"
   fi
   extract_config="${CONFIG_FILE#/}"
-  tar -tzf "$archive" | grep -Fxq "$extract_config" || die "备份中没有 ${extract_config}。"
+  tar -tzf "$archive" | grep -Fx "$extract_config" >/dev/null || die "备份中没有 ${extract_config}。"
   temp=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-restore.XXXXXX")
   tar -xzf "$archive" -C "$temp"
   if find "$temp" -type l -print -quit | grep -q .; then rm -rf "$temp"; die "备份中不允许包含符号链接。"; fi
