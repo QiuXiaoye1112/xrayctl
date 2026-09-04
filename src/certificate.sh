@@ -135,7 +135,7 @@ _certbot_shared_lock_acquire() {
   mkdir -p "$parent" || { warn "无法创建 Certbot 共享锁目录：${parent}"; return 1; }
   while ! mkdir "$lock" 2>/dev/null; do
     owner=""
-    [[ -r $lock/pid ]] && IFS= read -r owner <"$lock/pid" || true
+    if [[ -r $lock/pid ]]; then IFS= read -r owner <"$lock/pid" || true; fi
     if [[ $owner =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
       rm -f "$lock/pid" "$lock/tool"
       rmdir "$lock" 2>/dev/null || true
@@ -155,7 +155,7 @@ _certbot_shared_lock_acquire() {
 
 _certbot_shared_lock_release() {
   local owner="" lock=$CERTBOT_SHARED_LOCK
-  [[ -r $lock/pid ]] && IFS= read -r owner <"$lock/pid" || true
+  if [[ -r $lock/pid ]]; then IFS= read -r owner <"$lock/pid" || true; fi
   [[ $owner == "$$" ]] || return 0
   rm -f "$lock/pid" "$lock/tool"
   rmdir "$lock" 2>/dev/null || true

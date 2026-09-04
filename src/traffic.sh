@@ -747,7 +747,7 @@ traffic_limit_remove() {
   confirm "取消入站 ${tag} 的流量限制并删除当前周期累计值？" N || return 0
   traffic_collect || true
   traffic_remove_limit_data "$tag" || return 1
-  traffic_is_enabled && traffic_rules_restore_serialized || true
+  if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
   info "已取消入站 ${tag} 的流量限制。"
 }
 
@@ -851,7 +851,7 @@ traffic_clear_tag_records() {
   if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   ((rc == 0)) || return 1
-  traffic_is_enabled && traffic_rules_restore_serialized || true
+  if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
   info "已清空入站 ${tag} 的流量记录。"
 }
 
@@ -871,7 +871,7 @@ traffic_clear_all_records() {
   if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   ((rc == 0)) || return 1
-  traffic_is_enabled && traffic_rules_restore_serialized || true
+  if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
   info "已清空全部流量记录。"
 }
 

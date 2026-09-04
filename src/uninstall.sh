@@ -155,7 +155,7 @@ _uninstall_remove_config() {
   [[ -f $CONFIG_FILE ]] && rm -f "$CONFIG_FILE"
   [[ -d $CERT_DIR ]] && safe_remove_managed_dir "certDir" "$CERT_DIR"
   [[ -f $META_FILE ]] && rm -f "$META_FILE"
-  [[ -d $CONFIG_DIR ]] && rmdir "$CONFIG_DIR" 2>/dev/null || true
+  if [[ -d $CONFIG_DIR ]]; then rmdir "$CONFIG_DIR" 2>/dev/null || true; fi
 }
 
 _uninstall_remove_runtime_group() {
@@ -167,12 +167,12 @@ _uninstall_remove_runtime_group() {
   fi
   if [[ -n $owned_group && $owned_group == "$RUNTIME_GROUP" ]]; then
     if [[ $(platform_init_system) == openrc ]]; then
-      grep -qE "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null && delgroup "$RUNTIME_GROUP" 2>/dev/null || true
+      if grep -qE "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null; then delgroup "$RUNTIME_GROUP" 2>/dev/null || true; fi
     else
-      getent group "$RUNTIME_GROUP" >/dev/null 2>&1 && groupdel "$RUNTIME_GROUP" 2>/dev/null || true
+      if getent group "$RUNTIME_GROUP" >/dev/null 2>&1; then groupdel "$RUNTIME_GROUP" 2>/dev/null || true; fi
     fi
   elif [[ $(platform_init_system) == systemd && $RUNTIME_GROUP == xrayctl ]]; then
-    getent group "$RUNTIME_GROUP" >/dev/null 2>&1 && groupdel "$RUNTIME_GROUP" 2>/dev/null || true
+    if getent group "$RUNTIME_GROUP" >/dev/null 2>&1; then groupdel "$RUNTIME_GROUP" 2>/dev/null || true; fi
   fi
   meta_resource_remove_existing "runtimeUserOwned"
   meta_resource_remove_existing "runtimeGroupOwned"

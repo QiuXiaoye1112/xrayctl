@@ -471,7 +471,7 @@ backup_all() {
   require_root backup; ensure_config
   local target=${1:-${BACKUP_DIR}/xrayctl-$(timestamp).tar.gz}
   local paths=("${CONFIG_FILE#/}")
-  traffic_is_enabled && traffic_collect || true
+  if traffic_is_enabled; then traffic_collect || true; fi
   ensure_backup_dir
   mkdir -p "$(dirname "$target")"
   [[ ! -f $META_FILE ]] || paths+=("${META_FILE#/}")

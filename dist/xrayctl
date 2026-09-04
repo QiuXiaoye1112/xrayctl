@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="d7aa034d1ad3"
+readonly XRAYCTL_BUILD_COMMIT="48b803cc8733"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -391,7 +391,9 @@ platform_service_hook_command() {
 }
 
 platform_daemon_reload() {
-  [[ $(platform_init_system) == systemd ]] && systemctl daemon-reload || true
+  if [[ $(platform_init_system) == systemd ]]; then
+    systemctl daemon-reload || true
+  fi
 }
 
 validate_ip_literal() {
@@ -1106,7 +1108,7 @@ backup_all() {
   require_root backup; ensure_config
   local target=${1:-${BACKUP_DIR}/xrayctl-$(timestamp).tar.gz}
   local paths=("${CONFIG_FILE#/}")
-  traffic_is_enabled && traffic_collect || true
+  if traffic_is_enabled; then traffic_collect || true; fi
   ensure_backup_dir
   mkdir -p "$(dirname "$target")"
   [[ ! -f $META_FILE ]] || paths+=("${META_FILE#/}")
@@ -1434,7 +1436,7 @@ _certbot_shared_lock_acquire() {
   mkdir -p "$parent" || { warn "无法创建 Certbot 共享锁目录：${parent}"; return 1; }
   while ! mkdir "$lock" 2>/dev/null; do
     owner=""
-    [[ -r $lock/pid ]] && IFS= read -r owner <"$lock/pid" || true
+    if [[ -r $lock/pid ]]; then IFS= read -r owner <"$lock/pid" || true; fi
     if [[ $owner =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
       rm -f "$lock/pid" "$lock/tool"
       rmdir "$lock" 2>/dev/null || true
@@ -1454,7 +1456,7 @@ _certbot_shared_lock_acquire() {
 
 _certbot_shared_lock_release() {
   local owner="" lock=$CERTBOT_SHARED_LOCK
-  [[ -r $lock/pid ]] && IFS= read -r owner <"$lock/pid" || true
+  if [[ -r $lock/pid ]]; then IFS= read -r owner <"$lock/pid" || true; fi
   [[ $owner == "$$" ]] || return 0
   rm -f "$lock/pid" "$lock/tool"
   rmdir "$lock" 2>/dev/null || true
@@ -3877,7 +3879,7 @@ traffic_limit_remove() {
   confirm "取消入站 ${tag} 的流量限制并删除当前周期累计值？" N || return 0
   traffic_collect || true
   traffic_remove_limit_data "$tag" || return 1
-  traffic_is_enabled && traffic_rules_restore_serialized || true
+  if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
   info "已取消入站 ${tag} 的流量限制。"
 }
 
@@ -3981,7 +3983,7 @@ traffic_clear_tag_records() {
   if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   ((rc == 0)) || return 1
-  traffic_is_enabled && traffic_rules_restore_serialized || true
+  if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
   info "已清空入站 ${tag} 的流量记录。"
 }
 
@@ -4001,7 +4003,7 @@ traffic_clear_all_records() {
   if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   ((rc == 0)) || return 1
-  traffic_is_enabled && traffic_rules_restore_serialized || true
+  if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
   info "已清空全部流量记录。"
 }
 
@@ -5132,7 +5134,7 @@ bbr_remove_known_persistence() {
 
 _enable_bbr() {
   local qdisc_enabled=0 config=$BBR_CONFIG
-  command_exists modprobe && run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true
+  if command_exists modprobe; then run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true; fi
   if [[ -e /proc/sys/net/core/default_qdisc ]]; then
     if run_bounded 5 sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then qdisc_enabled=1;
     else warn "无法设置 net.core.default_qdisc，跳过 fq。"; fi
@@ -5454,7 +5456,7 @@ _uninstall_remove_config() {
   [[ -f $CONFIG_FILE ]] && rm -f "$CONFIG_FILE"
   [[ -d $CERT_DIR ]] && safe_remove_managed_dir "certDir" "$CERT_DIR"
   [[ -f $META_FILE ]] && rm -f "$META_FILE"
-  [[ -d $CONFIG_DIR ]] && rmdir "$CONFIG_DIR" 2>/dev/null || true
+  if [[ -d $CONFIG_DIR ]]; then rmdir "$CONFIG_DIR" 2>/dev/null || true; fi
 }
 
 _uninstall_remove_runtime_group() {
@@ -5466,12 +5468,12 @@ _uninstall_remove_runtime_group() {
   fi
   if [[ -n $owned_group && $owned_group == "$RUNTIME_GROUP" ]]; then
     if [[ $(platform_init_system) == openrc ]]; then
-      grep -qE "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null && delgroup "$RUNTIME_GROUP" 2>/dev/null || true
+      if grep -qE "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null; then delgroup "$RUNTIME_GROUP" 2>/dev/null || true; fi
     else
-      getent group "$RUNTIME_GROUP" >/dev/null 2>&1 && groupdel "$RUNTIME_GROUP" 2>/dev/null || true
+      if getent group "$RUNTIME_GROUP" >/dev/null 2>&1; then groupdel "$RUNTIME_GROUP" 2>/dev/null || true; fi
     fi
   elif [[ $(platform_init_system) == systemd && $RUNTIME_GROUP == xrayctl ]]; then
-    getent group "$RUNTIME_GROUP" >/dev/null 2>&1 && groupdel "$RUNTIME_GROUP" 2>/dev/null || true
+    if getent group "$RUNTIME_GROUP" >/dev/null 2>&1; then groupdel "$RUNTIME_GROUP" 2>/dev/null || true; fi
   fi
   meta_resource_remove_existing "runtimeUserOwned"
   meta_resource_remove_existing "runtimeGroupOwned"

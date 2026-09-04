@@ -324,7 +324,7 @@ bbr_remove_known_persistence() {
 
 _enable_bbr() {
   local qdisc_enabled=0 config=$BBR_CONFIG
-  command_exists modprobe && run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true
+  if command_exists modprobe; then run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true; fi
   if [[ -e /proc/sys/net/core/default_qdisc ]]; then
     if run_bounded 5 sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then qdisc_enabled=1;
     else warn "无法设置 net.core.default_qdisc，跳过 fq。"; fi

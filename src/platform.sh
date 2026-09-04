@@ -121,7 +121,9 @@ platform_service_hook_command() {
 }
 
 platform_daemon_reload() {
-  [[ $(platform_init_system) == systemd ]] && systemctl daemon-reload || true
+  if [[ $(platform_init_system) == systemd ]]; then
+    systemctl daemon-reload || true
+  fi
 }
 
 validate_ip_literal() {
