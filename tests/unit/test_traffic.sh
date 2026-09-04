@@ -38,7 +38,10 @@ mv -f "$candidate" "$CONFIG_FILE"
 [[ $(traffic_limit_next_timestamp '2026-02-28 18:00:00' 31 '18:00:00') == '2026-03-31 18:00:00' ]]
 [[ $(traffic_limit_first_cycle_end '2026-08-10 12:00:00' 15 '12:34:56') == '2026-08-15 12:34:56' ]]
 [[ $(traffic_limit_first_cycle_end '2026-08-20 12:00:00' 15 '12:34:56') == '2026-09-15 12:34:56' ]]
-[[ $(traffic_limit_first_cycle_end '2026-01-20 12:00:00' 31 '12:34:56') == '2026-02-28 12:34:56' ]]
+[[ $(traffic_limit_first_cycle_end '2026-01-20 12:00:00' 31 '12:34:56') == '2026-01-31 12:34:56' ]]
+traffic_iso_compare '2026-01-31 12:34:56' gt '2026-01-20 12:00:00'
+traffic_iso_compare 2026-08-24 ge 2026-08-24
+! traffic_iso_compare 2026-08-23 ge 2026-08-24
 traffic_validate_date 2024-02-29
 ! traffic_validate_date 2025-02-29
 ! traffic_validate_date 2026-13-01

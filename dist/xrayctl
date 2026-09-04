@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="51baf661e0e1"
+readonly XRAYCTL_BUILD_COMMIT="d7aa034d1ad3"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -3208,6 +3208,18 @@ traffic_limit_next_timestamp() {
   printf '%04d-%02d-%02d %s' "$year" "$month" "$((10#$anchor_day))" "$anchor_time"
 }
 
+traffic_iso_compare() {
+  local left=${1//[-: ]/} operator=$2 right=${3//[-: ]/}
+  [[ $left =~ ^[0-9]+$ && $right =~ ^[0-9]+$ ]] || return 2
+  case $operator in
+    lt) ((10#$left < 10#$right)) ;;
+    le) ((10#$left <= 10#$right)) ;;
+    ge) ((10#$left >= 10#$right)) ;;
+    gt) ((10#$left > 10#$right)) ;;
+    *) return 2 ;;
+  esac
+}
+
 traffic_limit_first_cycle_end() {
   local reference=$1 reset_day=$2 reset_time=$3 year month max_day candidate
   traffic_validate_timestamp "$reference" || return 1
@@ -3218,7 +3230,7 @@ traffic_limit_first_cycle_end() {
   max_day=$(traffic_days_in_month "$year" "$month")
   ((10#$reset_day <= max_day)) || reset_day=$max_day
   candidate=$(printf '%04d-%02d-%02d %s' "$year" "$month" "$reset_day" "$reset_time")
-  if [[ $candidate > "$reference" ]]; then printf '%s' "$candidate"; else traffic_limit_next_timestamp "$reference" "$2" "$reset_time"; fi
+  if traffic_iso_compare "$candidate" gt "$reference"; then printf '%s' "$candidate"; else traffic_limit_next_timestamp "$reference" "$2" "$reset_time"; fi
 }
 
 traffic_retention_start() { traffic_months_ago "$(traffic_today)" 3; }
@@ -3227,9 +3239,9 @@ traffic_validate_range() {
   local start=${1-} end=${2-} cutoff today
   traffic_validate_date "$start" && traffic_validate_date "$end" || return 1
   cutoff=$(traffic_retention_start); today=$(traffic_today)
-  [[ $start < $end || $start == "$end" ]] || return 1
-  [[ $start > $cutoff || $start == "$cutoff" ]] || return 1
-  [[ $end < $today || $end == "$today" ]]
+  traffic_iso_compare "$start" le "$end" || return 1
+  traffic_iso_compare "$start" ge "$cutoff" || return 1
+  traffic_iso_compare "$end" le "$today"
 }
 
 traffic_default_json() {
@@ -3308,7 +3320,7 @@ traffic_rolled_limits_json() {
   while IFS=$'\t' read -r tag quota anchor_day anchor_time cycle_start cycle_end used; do
     [[ -n $tag ]] || continue
     if ! traffic_validate_timestamp "$cycle_start" || ! traffic_validate_timestamp "$cycle_end"; then continue; fi
-    while [[ $now > $cycle_end || $now == "$cycle_end" ]]; do
+    while traffic_iso_compare "$now" ge "$cycle_end"; do
       cycle_start=$cycle_end
       next=$(traffic_limit_next_timestamp "$cycle_start" "$anchor_day" "$anchor_time") || break 2
       cycle_end=$next
@@ -3912,14 +3924,14 @@ traffic_prompt_range() {
   while true; do
     prompt_value candidate_start "开始日期" "$cutoff" || return 1
     traffic_validate_date "$candidate_start" || { warn "开始日期格式无效，请使用 YYYY-MM-DD。"; continue; }
-    [[ $candidate_start > $cutoff || $candidate_start == "$cutoff" ]] || { warn "只保留最近三个月的数据，最早可选 ${cutoff}。"; continue; }
+    traffic_iso_compare "$candidate_start" ge "$cutoff" || { warn "只保留最近三个月的数据，最早可选 ${cutoff}。"; continue; }
     break
   done
   while true; do
     prompt_value candidate_end "结束日期" "$today" || return 1
     traffic_validate_date "$candidate_end" || { warn "结束日期格式无效，请使用 YYYY-MM-DD。"; continue; }
-    [[ $candidate_end < $today || $candidate_end == "$today" ]] || { warn "结束日期不能晚于今天 ${today}。"; continue; }
-    [[ $candidate_end > $candidate_start || $candidate_end == "$candidate_start" ]] || { warn "结束日期不能早于开始日期。"; continue; }
+    traffic_iso_compare "$candidate_end" le "$today" || { warn "结束日期不能晚于今天 ${today}。"; continue; }
+    traffic_iso_compare "$candidate_end" ge "$candidate_start" || { warn "结束日期不能早于开始日期。"; continue; }
     break
   done
   printf -v "$__start_var" '%s' "$candidate_start"; printf -v "$__end_var" '%s' "$candidate_end"
