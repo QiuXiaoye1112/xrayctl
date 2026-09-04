@@ -267,7 +267,7 @@ generate_domain_rule_id() {
 }
 
 list_domain_rules() {
-  ensure_runtime_dependencies outbound-rule-list; ensure_config
+  ensure_config
   local inbound=${1-} context=${2-} rows group_inbound="" number=0 match domain outbound group_start display display_match
   [[ -z $inbound ]] || inbound_exists "$inbound" || die "找不到入站：$inbound"
   rows=$(jq -r --arg inbound "$inbound" "$(_xrayctl_domain_rule_jq)

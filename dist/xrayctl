@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="c54cdd7e8343"
+readonly XRAYCTL_BUILD_COMMIT="751e8c44ad74"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -4401,7 +4401,7 @@ generate_domain_rule_id() {
 }
 
 list_domain_rules() {
-  ensure_runtime_dependencies outbound-rule-list; ensure_config
+  ensure_config
   local inbound=${1-} context=${2-} rows group_inbound="" number=0 match domain outbound group_start display display_match
   [[ -z $inbound ]] || inbound_exists "$inbound" || die "找不到入站：$inbound"
   rows=$(jq -r --arg inbound "$inbound" "$(_xrayctl_domain_rule_jq)

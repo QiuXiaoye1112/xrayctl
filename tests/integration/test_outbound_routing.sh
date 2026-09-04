@@ -55,6 +55,11 @@ source "${REPO_ROOT}/xrayctl.sh"
 trap - ERR
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+ensure_runtime_dependencies() {
+  fail 'listing domain rules attempted to acquire the global operation lock'
+}
+list_domain_rules vless-443 >/dev/null
+
 ensure_runtime_dependencies() { :; }
 require_xray_installed() { :; }
 setup_runtime_access() { :; }
