@@ -65,6 +65,8 @@ require_xray_installed() { :; }
 setup_runtime_access() { :; }
 service_is_active() { return 1; }
 confirm() { return 0; }
+apply_candidate_call_count=0
+apply_candidate() { ((apply_candidate_call_count+=1)); state_commit "$1"; }
 
 assert_domain_rules_before_default() {
   local inbound=$1 default_index domain_index rule_tag
@@ -140,7 +142,16 @@ assert_eq socks-us "$(jq -r '.routing.rules[]|select(.domain==["domain:openai.co
   'duplicate domain warning changed outbound'
 assert_domain_rules_before_default vless-443
 
-add_domain_rule vless-443 suffix 'batch-one.example.com, batch-two.example.com' socks-us >/dev/null
+batch_apply_count_before=$apply_candidate_call_count
+batch_output_file="${TEST_ROOT}/batch-add.out"
+add_domain_rule vless-443 suffix \
+  'OPENAI.COM,batch-one.example.com,batch-two.example.com,batch-one.example.com' \
+  socks-us >"$batch_output_file" 2>&1
+batch_output=$(<"$batch_output_file")
+[[ $batch_output == *'已跳过已有域名规则：vless-443 suffix openai.com。'* ]] \
+  || fail 'mixed batch did not report the skipped existing domain'
+assert_eq "$((batch_apply_count_before+1))" "$apply_candidate_call_count" \
+  'batch domain add applied the configuration more than once'
 assert_eq 1 "$(jq '[.routing.rules[]|select(.domain==["domain:batch-one.example.com"])]|length' "$CONFIG_FILE")" \
   'first comma-separated domain was not added'
 assert_eq 1 "$(jq '[.routing.rules[]|select(.domain==["domain:batch-two.example.com"])]|length' "$CONFIG_FILE")" \

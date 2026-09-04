@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="751e8c44ad74"
+readonly XRAYCTL_BUILD_COMMIT="51baf661e0e1"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -4389,11 +4389,11 @@ _normalize_domain_input() {
 }
 
 generate_domain_rule_id() {
-  local id
+  local config=${1:-$CONFIG_FILE} id
   while true; do
     id=$(random_hex 4)
     if ! jq -e --arg ruleTag "xrayctl-domain:${id}" \
-      '[.routing.rules[]?|select(.ruleTag==$ruleTag)]|length>0' "$CONFIG_FILE" >/dev/null 2>&1; then
+      '[.routing.rules[]?|select(.ruleTag==$ruleTag)]|length>0' "$config" >/dev/null 2>&1; then
       printf '%s' "$id"
       return 0
     fi
@@ -4471,7 +4471,7 @@ _normalize_domain_list() {
 add_domain_rule() {
   ensure_runtime_dependencies outbound-rule-add; ensure_config
   local inbound=${1-} match=${2-} domain=${3-} outbound=${4-} prompt_details=${5-}
-  local choice normalized_domains rule_tag new_rule tmp existing_domains domains_json
+  local choice normalized_domains rule_tag new_rule tmp candidate existing_domains existing_domains_json domains_json
   local -a domains=()
   local cli=0
   if [[ $prompt_details == --prompt ]]; then
@@ -4509,34 +4509,44 @@ add_domain_rule() {
   done <<<"$normalized_domains"
   ((${#domains[@]} > 0)) || die "域名格式无效。"
 
-  domains_json=$(printf '%s\n' "${domains[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
-  if ! jq -e 'length == (unique | length)' <<<"$domains_json" >/dev/null; then
-    warn "域名列表中不能重复添加同一个域名。"
-    return 0
-  fi
-  existing_domains=$(jq -r --arg inbound "$inbound" --arg match "$match" --argjson domains "$domains_json" "$(_xrayctl_domain_rule_jq)
+  domains_json=$(printf '%s\n' "${domains[@]}" | jq -Rsc '
+    split("\n") | map(select(length > 0)) |
+    reduce .[] as $domain ([]; if index($domain) then . else . + [$domain] end)')
+  existing_domains_json=$(jq -c --arg inbound "$inbound" --arg match "$match" --argjson domains "$domains_json" "$(_xrayctl_domain_rule_jq)
     [.routing.rules[]? |
       select(xrayctl_domain_rule and ((.inboundTag // []) == [\$inbound])) |
       .domain[0] as \$rule_domain |
       select(any(\$domains[]; \$rule_domain == ((if \$match==\"suffix\" then \"domain:\" else \"full:\" end) + .))) |
       if \$match==\"suffix\" then \$rule_domain[7:] else \$rule_domain[5:] end] |
-      unique | join(\",\")" "$CONFIG_FILE")
+      unique" "$CONFIG_FILE")
+  existing_domains=$(jq -r 'join(",")' <<<"$existing_domains_json")
   if [[ -n $existing_domains ]]; then
-    warn "已有此域名规则：${inbound} ${match} ${existing_domains}！"
+    warn "已跳过已有域名规则：${inbound} ${match} ${existing_domains}。"
+  fi
+
+  domains=()
+  while IFS= read -r domain; do
+    [[ -n $domain ]] && domains+=("$domain")
+  done < <(jq -r --argjson existing "$existing_domains_json" '
+    .[] as $domain | select(($existing | index($domain)) == null) | $domain' <<<"$domains_json")
+  if ((${#domains[@]} == 0)); then
+    info "没有需要添加的新域名规则。"
     return 0
   fi
 
+  candidate=$(temp_file)
+  cp "$CONFIG_FILE" "$candidate"
   for domain in "${domains[@]}"; do
-    rule_tag="xrayctl-domain:$(generate_domain_rule_id)"
+    rule_tag="xrayctl-domain:$(generate_domain_rule_id "$candidate")"
     new_rule=$(jq -n --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
       --arg outbound "$outbound" --arg ruleTag "$rule_tag" '
       {type:"field",inboundTag:[$inbound],
        domain:(if $match=="suffix" then ["domain:"+$domain] else ["full:"+$domain] end),
        outboundTag:$outbound,ruleTag:$ruleTag}')
 
-  tmp=$(temp_file)
-  jq --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
-    --arg outbound "$outbound" --argjson new_rule "$new_rule" "$(_xrayctl_domain_rule_jq)
+    tmp=$(temp_file)
+    jq --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
+      --arg outbound "$outbound" --argjson new_rule "$new_rule" "$(_xrayctl_domain_rule_jq)
     def domain_value:
       if (.domain|type)==\"array\" and (.domain|length)==1 and (.domain[0]|type)==\"string\" then .domain[0] else \"\" end;
     def managed_for_inbound:
@@ -4576,9 +4586,11 @@ add_domain_rule() {
       if \$i==\$insert_index then \$new_rule
       elif \$i < \$insert_index then \$rules[\$i]
       else \$rules[\$i-1]
-      end]" "$CONFIG_FILE" >"$tmp"
-    state_apply_candidate_file "$tmp" apply_candidate >/dev/null || return
+      end]" "$candidate" >"$tmp"
+    rm -f "$candidate"
+    candidate=$tmp
   done
+  state_apply_candidate_file "$candidate" apply_candidate >/dev/null || return
   info "已添加域名规则：${inbound} ${match}（${#domains[@]} 条） -> ${outbound}。"
 }
 
