@@ -26,7 +26,7 @@ protocol_build_vless() {
   local __out=$1 tag=$2 listen=$3 port=$4 email=$5 stream=$6
   local uuid method flow user result
   uuid=$(generate_uuid)
-  method=$(jq -r '.method' <<<"$stream")
+  method=$(jq -r '.network // .method // "raw"' <<<"$stream")
   if [[ $method == raw && $(jq -r '.security' <<<"$stream") != none ]]; then
     flow=xtls-rprx-vision
   else
@@ -53,7 +53,6 @@ protocol_build_socks() {
         ip:"0.0.0.0"
       }}')
   else
-    [[ $listen == 127.0.0.1 || $listen == ::1 ]] || warn "公网监听的无认证 SOCKS5 风险极高。"
     result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
       '{tag:$tag,listen:$listen,port:$port,protocol:"socks",settings:{auth:"noauth",udp:true,ip:"0.0.0.0"}}')
   fi
@@ -71,7 +70,6 @@ protocol_build_http() {
         allowTransparent:false
       }}')
   else
-    [[ $listen == 127.0.0.1 || $listen == ::1 ]] || warn "公网监听的无认证 HTTP 代理风险极高。"
     result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
       '{tag:$tag,listen:$listen,port:$port,protocol:"http",settings:{allowTransparent:false}}')
   fi
@@ -103,7 +101,11 @@ build_inbound() {
   fi
 
   prompt_tag tag "${protocol}-$(random_hex 2)"
-  prompt_value listen "监听地址" "0.0.0.0"
+  if [[ $protocol == socks || $protocol == http ]]; then
+    prompt_value listen "监听地址" "127.0.0.1"
+  else
+    prompt_value listen "监听地址" "0.0.0.0"
+  fi
   suggest_available_port suggested_port || suggested_port=443
   prompt_port port "$suggested_port"
   if [[ -n $suggested_host ]]; then

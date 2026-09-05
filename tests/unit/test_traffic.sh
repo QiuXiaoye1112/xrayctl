@@ -79,6 +79,18 @@ jq -e '
   .inbounds.socks.daily["2026-08-24"]==2048 and
   .inbounds.http.daily["2026-08-24"]==4096
 ' "$TRAFFIC_FILE" >/dev/null
+
+# A failed rule rebuild must not commit counters that will be read again on
+# the next retry.
+before_retry=$(jq -S . "$TRAFFIC_FILE")
+traffic_rules_restore() { return 1; }
+traffic_collect || true
+traffic_collect || true
+[[ $before_retry == "$(jq -S . "$TRAFFIC_FILE")" ]] || {
+  printf 'failed rule rebuild double-counted traffic\n' >&2
+  exit 1
+}
+traffic_rules_restore() { RESTORE_CALLS=$((RESTORE_CALLS + 1)); }
 last=$(jq -r .lastCollectedAt "$TRAFFIC_FILE")
 traffic_sync_inventory
 [[ $(jq -r .lastCollectedAt "$TRAFFIC_FILE") == "$last" ]]

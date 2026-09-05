@@ -8,8 +8,8 @@ print_share_entry() {
 
 link_query_for_stream() {
   local tag=$1 protocol=$2 stream method security query="" path sni sid pbk flow
-  stream=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings // {method:"raw",security:"none"}' "$CONFIG_FILE")
-  method=$(jq -r '.method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
+  stream=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings // {network:"raw",security:"none"}' "$CONFIG_FILE")
+  method=$(jq -r '.network // .method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
   case $method in
     raw) query="type=tcp" ;;
     websocket) path=$(jq -r '.wsSettings.path // "/"' <<<"$stream"); query="type=ws&path=$(url_encode "$path")" ;;
@@ -53,19 +53,19 @@ print_links() {
   case $protocol in
     vless)
       query=$(link_query_for_stream "$tag" "$protocol")
-      while IFS=$'\t' read -r label id; do
+      while IFS= read -r -d '' label && IFS= read -r -d '' id; do
         [[ -z $filter || $label == "$filter" ]] || continue
         link="vless://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")"
         print_share_entry "$label" "链接" "$link"
-      done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|[.email,.id]|@tsv' "$CONFIG_FILE")
+      done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.email // ""), "\u0000", (.id // ""), "\u0000"' "$CONFIG_FILE")
       ;;
     socks)
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
-        while IFS=$'\t' read -r label password; do
+        while IFS= read -r -d '' label && IFS= read -r -d '' password; do
           [[ -z $filter || $label == "$filter" ]] || continue
           link="socks5://$(url_encode "$label"):$(url_encode "$password")@${uri_host}:${port}#$(url_encode "${tag}-${label}")"
           print_share_entry "$label" "链接" "$link"
-        done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
+        done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|(.user // ""), "\u0000", (.pass // ""), "\u0000"' "$CONFIG_FILE")
       else
         link="socks5://${uri_host}:${port}#$(url_encode "${tag}")"
         print_share_entry "无认证" "链接" "$link"
@@ -73,11 +73,11 @@ print_links() {
       ;;
     http)
       if http_inbound_has_auth "$tag"; then
-        while IFS=$'\t' read -r label password; do
+        while IFS= read -r -d '' label && IFS= read -r -d '' password; do
           [[ -z $filter || $label == "$filter" ]] || continue
           link="http://$(url_encode "$label"):$(url_encode "$password")@${uri_host}:${port}#$(url_encode "${tag}-${label}")"
           print_share_entry "$label" "链接" "$link"
-        done < <(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|[.user,.pass]|@tsv' "$CONFIG_FILE")
+        done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|(.user // ""), "\u0000", (.pass // ""), "\u0000"' "$CONFIG_FILE")
       else
         link="http://${uri_host}:${port}#$(url_encode "${tag}")"
         print_share_entry "无认证" "链接" "$link"

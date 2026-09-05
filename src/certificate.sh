@@ -419,7 +419,7 @@ update_tls_inbound_certificate() {
   [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE") == tls ]] \
     || { warn "只有使用 TLS 的入站可以更换证书。"; return 1; }
   validate_certificate_pair_files "$cert_path" "$key_path" || return 1
-  method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.method // "raw"' "$CONFIG_FILE")
+  method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.network // .streamSettings.method // "raw"' "$CONFIG_FILE")
   tmp=$(temp_file)
   jq --arg tag "$tag" --arg cert "$cert_path" --arg key "$key_path" --arg sni "$sni" --arg method "$method" '
     (.inbounds[]|select(.tag==$tag)|.streamSettings) |= (

@@ -5,7 +5,7 @@ inbound_configuration_is_supported() {
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   protocol_is_supported "$protocol" || return 1
   if protocol_supports_stream "$protocol"; then
-    method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.method // "raw"' "$CONFIG_FILE")
+    method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.network // .streamSettings.method // "raw"' "$CONFIG_FILE")
     case $method in raw|xhttp|websocket) ;; *) return 1;; esac
   fi
 }
@@ -137,7 +137,7 @@ list_inbounds() {
   print_table_cell_clipped "安全" 10; printf '| 监听\n'
   jq -r '.inbounds | to_entries[] |
     [.value.tag,.value.protocol,(.value.port|tostring),
-     (if (.value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.method // "raw") end),
+     (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end),
      (.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port method security listen; do
         print_table_cell_clipped "$tag" 20; printf '| '; print_table_cell_clipped "$protocol" 8; printf '| '
@@ -243,7 +243,7 @@ modify_inbound_transport() {
   confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
   build_stream_settings "$protocol" stream public_key
   : "$public_key"
-  method=$(jq -r '.method' <<<"$stream"); security=$(jq -r '.security' <<<"$stream")
+  method=$(jq -r '.network // .method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
   tmp=$(temp_file)
   jq --arg tag "$tag" --argjson stream "$stream" --arg method "$method" --arg security "$security" '
     (.inbounds[]|select(.tag==$tag)|.streamSettings)=$stream |
@@ -377,7 +377,7 @@ add_client() {
   case $protocol in
     vless)
       id=$(generate_uuid)
-      method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.method // "raw"' "$CONFIG_FILE")
+      method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.network // .streamSettings.method // "raw"' "$CONFIG_FILE")
       security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
       [[ $method == raw && $security != none ]] && flow=xtls-rprx-vision || flow=""
       user=$(jq -n --arg id "$id" --arg email "$label" --arg flow "$flow" '{id:$id,email:$email,level:0}+(if $flow!="" then {flow:$flow} else {} end)')
@@ -407,22 +407,6 @@ delete_client() {
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
   [[ -n $label ]] || select_client label "$tag" || return
-  # HTTP: refuse to delete the last user on a non-localhost address
-  if [[ $protocol == http ]]; then
-    local total_users listen_addr
-    total_users=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|length' "$CONFIG_FILE")
-    if ((total_users == 1)); then
-      listen_addr=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.listen // "0.0.0.0"' "$CONFIG_FILE")
-      if [[ $listen_addr != "127.0.0.1" && $listen_addr != "::1" ]]; then
-        warn "这是 HTTP 入站 ${tag} 的最后一个用户。"
-        warn "当前监听地址为 ${listen_addr}，删除后将变成无认证公网代理。"
-        warn "如需无认证 HTTP，请先将监听地址改为 127.0.0.1/::1。"
-        return 1
-      fi
-      confirm "删除最后一个用户后 HTTP 入站将变为无认证，确定？" N || return 0
-    fi
-  fi
-
   [[ $assume_yes == 1 ]] || confirm "从 ${tag} 删除用户 ${label}？" N || return 0
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then

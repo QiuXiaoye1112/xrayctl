@@ -9,6 +9,20 @@ init_meta_base() {
     return 0
   fi
 
+  # Read-only commands call ensure_meta too.  Once metadata has the current
+  # shape, do not rewrite it: a stale reader must never overwrite a concurrent
+  # writer's newer file.
+  if jq -e '
+    type=="object" and (.schema|type)=="number" and (.schema >= 4) and
+    ((.inbounds // {})|type)=="object" and
+    ((.certificates // {})|type)=="object" and
+    ((.managedResources // {})|type)=="object" and
+    ((.migrations // {})|type)=="object"
+  ' "$META_FILE" >/dev/null 2>&1; then
+    chmod 600 "$META_FILE"
+    return 0
+  fi
+
   local tmp
   tmp=$(temp_file)
 
@@ -241,8 +255,8 @@ ensure_config() {
   [[ -f $CONFIG_FILE ]] || write_default_config
   jq -e 'type=="object" and (.inbounds|type=="array")' "$CONFIG_FILE" >/dev/null \
     || die "配置文件不是有效的 Xray JSON：$CONFIG_FILE"
-  validate_supported_capabilities "$CONFIG_FILE" \
-    || die "配置包含 xrayctl 当前不支持的入站协议或传输：$CONFIG_FILE"
+  # Legacy inbounds remain readable and removable.  Capability checks belong
+  # to candidate writes, not to loading an installed configuration.
   init_meta
 }
 
@@ -253,7 +267,7 @@ validate_supported_capabilities() {
   jq -e '
     all(.inbounds[];
       if .protocol=="vless" then
-        ((.streamSettings.method // "raw") as $method | ["raw","xhttp","websocket"] | index($method)) != null
+        ((.streamSettings.network // .streamSettings.method // "raw") as $method | ["raw","xhttp","websocket"] | index($method)) != null
       else .protocol=="socks" or .protocol=="http"
       end
     )' "$1" >/dev/null 2>&1
@@ -276,6 +290,19 @@ validate_candidate() {
       [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
       return 1
     fi
+  fi
+}
+
+validate_restore_config() {
+  local candidate=$1 validation_output
+  jq -e 'type=="object" and (.inbounds|type)=="array" and (.outbounds|type)=="array"' \
+    "$candidate" >/dev/null || return 1
+  if xray_installed; then
+    validation_output=$("$XRAY_BIN" run -test -format json -config "$candidate" 2>&1) || {
+      error "恢复配置未通过 Xray 核心检查。"
+      [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+      return 1
+    }
   fi
 }
 
@@ -484,8 +511,9 @@ backup_all() {
 }
 
 restore_backup() {
-  ensure_runtime_dependencies restore; ensure_config
+  ensure_runtime_dependencies restore
   local archive=${1-} temp extract_config snapshot had_meta=0 had_certs=0 had_traffic=0 restored_traffic=0
+  local metadata_source traffic_source
   [[ -n $archive ]] || prompt_value archive "备份文件路径"
   [[ -r $archive ]] || die "无法读取备份：$archive"
   tar -tzf "$archive" >/dev/null || die "不是有效的 tar.gz 备份。"
@@ -500,6 +528,17 @@ restore_backup() {
   [[ -f "$temp/$extract_config" ]] || { rm -rf "$temp"; die "备份配置不是普通文件。"; }
   jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' \
     "$temp/$extract_config" >/dev/null || { rm -rf "$temp"; die "备份配置 JSON 结构无效。"; }
+  validate_restore_config "$temp/$extract_config" || { rm -rf "$temp"; die "备份配置未通过检查。"; }
+  metadata_source="$temp/${META_FILE#/}"
+  traffic_source="$temp/${TRAFFIC_FILE#/}"
+  if [[ -f $metadata_source ]]; then
+    state_validate_metadata_candidate "$metadata_source" \
+      || { rm -rf "$temp"; die "备份 metadata 无效，未修改当前配置。"; }
+  fi
+  if [[ -f $traffic_source ]]; then
+    jq -e 'type=="object" and ((.inbounds // {})|type)=="object"' "$traffic_source" >/dev/null \
+      || { rm -rf "$temp"; die "备份流量记录无效，未修改当前配置。"; }
+  fi
   confirm "恢复会覆盖当前配置和托管证书，继续吗？" N || { rm -rf "$temp"; return; }
 
   if traffic_is_enabled; then
@@ -509,7 +548,7 @@ restore_backup() {
   backup_config_quiet >/dev/null || true
   snapshot="$temp/.current"
   mkdir -p "$snapshot"
-  cp -a "$CONFIG_FILE" "$snapshot/config.json"
+  [[ ! -f $CONFIG_FILE ]] || cp -a "$CONFIG_FILE" "$snapshot/config.json"
   if [[ -f $META_FILE ]]; then cp -a "$META_FILE" "$snapshot/meta.json"; had_meta=1; fi
   if [[ -d $CERT_DIR ]]; then cp -a "$CERT_DIR" "$snapshot/certs"; had_certs=1; fi
   if [[ -f $TRAFFIC_FILE ]]; then cp -a "$TRAFFIC_FILE" "$snapshot/traffic.json"; had_traffic=1; fi
@@ -517,30 +556,28 @@ restore_backup() {
   cp -a "$temp/$extract_config" "$CONFIG_FILE"
   if [[ -f "$temp/${META_FILE#/}" ]]; then cp -a "$temp/${META_FILE#/}" "$META_FILE"; else rm -f "$META_FILE"; fi
   rm -rf "$CERT_DIR"
-  setup_certificate_access
+  mkdir -p "$CERT_DIR"
   if [[ -d "$temp/${CERT_DIR#/}" ]]; then cp -a "$temp/${CERT_DIR#/}/." "$CERT_DIR/"; fi
   if [[ -f "$temp/${TRAFFIC_FILE#/}" ]]; then
     mkdir -p "$(dirname "$TRAFFIC_FILE")"
     install -m 600 "$temp/${TRAFFIC_FILE#/}" "$TRAFFIC_FILE"
     restored_traffic=1
   fi
-  init_meta
-  setup_runtime_access
-
-  if ! validate_candidate "$CONFIG_FILE" || ! restart_service || ! traffic_runtime_ensure; then
+  if ! init_meta || ! setup_runtime_access || \
+    ! validate_restore_config "$CONFIG_FILE" || ! restart_service || ! traffic_runtime_ensure; then
     error "恢复后配置、服务或流量统计运行时失败，正在整体回滚。"
-    cp -a "$snapshot/config.json" "$CONFIG_FILE"
+    if [[ -f "$snapshot/config.json" ]]; then cp -a "$snapshot/config.json" "$CONFIG_FILE"; else rm -f "$CONFIG_FILE"; fi
     if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE"; else rm -f "$META_FILE"; fi
     rm -rf "$CERT_DIR"
-    setup_certificate_access
+    mkdir -p "$CERT_DIR"
     if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/"; fi
     if ((had_traffic)); then
       mkdir -p "$(dirname "$TRAFFIC_FILE")"; install -m 600 "$snapshot/traffic.json" "$TRAFFIC_FILE"
     elif ((restored_traffic)); then
       rm -f "$TRAFFIC_FILE"
     fi
-    init_meta
-    setup_runtime_access
+    init_meta || true
+    setup_runtime_access || true
     restart_service || true
     traffic_runtime_ensure || true
     rm -rf "$temp"

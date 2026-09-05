@@ -22,7 +22,7 @@
     "routeOnly": true
   },
   "streamSettings": {
-    "method": "raw",
+    "network": "raw",
     "rawSettings": {
       "acceptProxyProtocol": false,
       "header": {

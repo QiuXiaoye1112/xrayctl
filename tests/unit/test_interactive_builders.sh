@@ -34,7 +34,7 @@ assert_stream_choice() {
   set_choices "$security_choice" "$transport_choice"
   build_stream_settings "$protocol" stream public_key
   assert_eq "$expected_security" "$(jq -r .security <<<"$stream")" "$protocol security choice routed incorrectly"
-  assert_eq "$expected_method" "$(jq -r .method <<<"$stream")" "$protocol transport choice routed incorrectly"
+  assert_eq "$expected_method" "$(jq -r '.network // .method' <<<"$stream")" "$protocol transport choice routed incorrectly"
   case $expected_security in
     reality) assert_eq public-key "$public_key" "REALITY public key was not returned";;
     tls) assert_eq example.com "$(jq -r .tlsSettings.serverName <<<"$stream")" "TLS certificate selection was not applied";;

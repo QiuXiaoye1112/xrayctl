@@ -18,6 +18,7 @@ tests=(
   "tests/integration/test_coexistence.sh"
   "tests/integration/test_share.sh"
   "tests/integration/test_interactive_menus.sh"
+  "tests/integration/test_regressions.sh"
   "tests/integration/test_real_xray.sh"
   "tests/smoke/test_cli.sh"
   "tests/smoke/test_build.sh"

@@ -504,13 +504,22 @@ traffic_collect() {
   traffic_is_enabled || return 0
   traffic_require_root internal-traffic-collect
   traffic_lock_acquire || { warn "另一个流量采集任务正在运行。"; return 1; }
-  local counters samples rc=0
+  local counters samples rc=0 snapshot=""
+  snapshot=$(temp_file) || { traffic_lock_release; return 1; }
+  cp -p "$TRAFFIC_FILE" "$snapshot" || { rm -f "$snapshot"; traffic_lock_release; return 1; }
   counters=$(traffic_read_counters) || rc=1
   if ((rc == 0)); then
     samples=$(traffic_samples_json <<<"$counters") || rc=1
   fi
   if ((rc == 0)); then traffic_update_file "$samples" || rc=1; fi
   if ((rc == 0)); then traffic_rules_restore || rc=1; fi
+  # Rule replacement clears packet counters.  If replacement fails, the
+  # counters still represent the same packets and the next retry would add
+  # them again.  Restore the pre-collection file so the retry is idempotent.
+  if ((rc != 0)); then
+    install -m 600 "$snapshot" "$TRAFFIC_FILE" || true
+  fi
+  rm -f "$snapshot"
   traffic_lock_release
   ((rc == 0)) || { warn "流量采集未完成，现有累计记录已尽量保留。"; return 1; }
 }

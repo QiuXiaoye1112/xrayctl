@@ -20,7 +20,7 @@ choose() {
 }
 
 build_stream_settings() {
-  printf -v "$2" '%s' '{"method":"raw","security":"none","rawSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}}}'
+  printf -v "$2" '%s' '{"network":"raw","security":"none","rawSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}}}'
   printf -v "$3" '%s' ''
 }
 

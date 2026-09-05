@@ -467,7 +467,7 @@ show_main_inbounds() {
   print_table_cell "端口" 7; printf '|'; print_table_cell_clipped "传输" 7; printf '|'
   print_table_cell_clipped "安全" 10; printf '\n'
   jq -r '.inbounds[] | [.tag,.protocol,
-    (.port|tostring),(if (.streamSettings.method // "raw")=="websocket" then "ws" else (.streamSettings.method // "raw") end),
+    (.port|tostring),(if (.streamSettings.network // .streamSettings.method // "raw")=="websocket" then "ws" else (.streamSettings.network // .streamSettings.method // "raw") end),
     (.streamSettings.security // "none")] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port method security; do
         print_table_cell_clipped "$tag" 20; printf '|'; print_table_cell_clipped "$protocol" 8; printf '|'
@@ -481,7 +481,7 @@ show_node_summary() {
   local tag=$1 protocol port method security listen
   IFS=$'\t' read -r protocol port method security listen < <(
     jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|[
-      .protocol,(.port|tostring),(.streamSettings.method // "raw"),
+      .protocol,(.port|tostring),(.streamSettings.network // .streamSettings.method // "raw"),
       (.streamSettings.security // "none"),(.listen // "0.0.0.0")]|@tsv' "$CONFIG_FILE"
   )
   printf '协议: %s  |  端口: %s  |  传输: %s  |  安全: %s  |  监听: %s\n\n' \

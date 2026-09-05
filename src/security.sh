@@ -49,7 +49,9 @@ build_stream_settings() {
     case $transport_choice in 1) method=raw;; 2) method=xhttp;; 3) method=websocket;; esac
   fi
 
-  json=$(jq -n --arg method "$method" --arg security "$security" '{method:$method,security:$security}')
+  # Released Xray builds use `network`; keep readers compatible with the
+  # legacy `method` field but always emit the current schema.
+  json=$(jq -n --arg network "$method" --arg security "$security" '{network:$network,security:$security}')
   case $method in
     raw) json=$(jq '. + {rawSettings:{acceptProxyProtocol:false,header:{type:"none"}}}' <<<"$json") ;;
     xhttp)
