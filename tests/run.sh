@@ -16,6 +16,7 @@ tests=(
   "tests/integration/test_certificate_transaction.sh"
   "tests/integration/test_lifecycle.sh"
   "tests/integration/test_outbound_routing.sh"
+  "tests/integration/test_domain_templates.sh"
   "tests/integration/test_coexistence.sh"
   "tests/integration/test_share.sh"
   "tests/integration/test_interactive_menus.sh"

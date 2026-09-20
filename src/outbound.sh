@@ -62,6 +62,375 @@ def xrayctl_domain_rule:
 JQ
 }
 
+_meta_template_add() {
+  local current=$1 candidate=$2 name=$3
+  jq --arg name "$name" '
+    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
+    if any(.domainTemplates.templates[]?; .name==$name) then
+      error("模板已存在")
+    else
+      .domainTemplates.templates += [{name:$name,exact:[],suffix:[]}]
+    end' "$current" >"$candidate"
+}
+
+_meta_template_domains_add() {
+  local current=$1 candidate=$2 name=$3 match=$4 domains_json=$5
+  jq --arg name "$name" --arg match "$match" --argjson domains "$domains_json" '
+    .domainTemplates.templates |= map(
+      if .name==$name then
+        .[$match] = (((.[$match] // []) + $domains) | unique)
+      else . end
+    )' "$current" >"$candidate"
+}
+
+_meta_template_domains_delete() {
+  local current=$1 candidate=$2 name=$3 match=$4 domains_json=$5
+  jq --arg name "$name" --arg match "$match" --argjson domains "$domains_json" '
+    .domainTemplates.templates |= map(
+      if .name==$name then
+        .[$match] = [(.[$match] // [])[] | . as $d | select(($domains | index($d)) == null)]
+      else . end
+    )' "$current" >"$candidate"
+}
+
+_meta_template_bind() {
+  local current=$1 candidate=$2 inbound=$3 name=$4 outbound=$5
+  jq --arg inbound "$inbound" --arg name "$name" --arg outbound "$outbound" '
+    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
+    if any(.domainTemplates.templates[]?; .name==$name) then
+      .domainTemplates.bindings = ([.domainTemplates.bindings[]? |
+        select(.inbound!=$inbound or .template!=$name)] +
+        [{inbound:$inbound,template:$name,outbound:$outbound}])
+    else error("找不到模板") end' "$current" >"$candidate"
+}
+
+_meta_template_unbind() {
+  local current=$1 candidate=$2 inbound=$3 name=$4
+  jq --arg inbound "$inbound" --arg name "$name" '
+    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? |
+      select(.inbound!=$inbound or .template!=$name)]' "$current" >"$candidate"
+}
+
+_meta_template_set_outbound() {
+  local current=$1 candidate=$2 inbound=$3 name=$4 outbound=$5
+  jq --arg inbound "$inbound" --arg name "$name" --arg outbound "$outbound" '
+    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
+    if any(.domainTemplates.bindings[]?; .inbound==$inbound and .template==$name) then
+      .domainTemplates.bindings |= map(
+        if .inbound==$inbound and .template==$name then .outbound=$outbound else . end)
+    else error("该入站未应用此模板")
+    end' "$current" >"$candidate"
+}
+
+list_domain_templates() {
+  ensure_meta
+  jq -r '.domainTemplates.templates[]? |
+    [.name, ((.exact // [])|length), ((.suffix // [])|length)] | @tsv' "$META_FILE"
+}
+
+domain_template_exists() {
+  ensure_meta
+  jq -e --arg name "$1" 'any(.domainTemplates.templates[]?; .name==$name)' "$META_FILE" >/dev/null
+}
+
+list_inbound_template_bindings() {
+  ensure_meta
+  jq -r --arg inbound "$1" '.domainTemplates.bindings[]? |
+    select(.inbound==$inbound) | [.template,.outbound] | @tsv' "$META_FILE"
+}
+
+_desired_to_additions() {
+  local __var=$1 desired_json=$2 inbound=$3
+  local count i item match domain template outbound tag rule result='[]'
+  count=$(jq 'length' <<<"$desired_json")
+  for ((i=0; i<count; i++)); do
+    item=$(jq -c ".[$i]" <<<"$desired_json")
+    match=$(jq -r '.match' <<<"$item")
+    domain=$(jq -r '.domain' <<<"$item")
+    template=$(jq -r '.template' <<<"$item")
+    outbound=$(jq -r '.outbound' <<<"$item")
+    tag="xrayctl-domain:$(random_hex 4)"
+    rule=$(jq -n --arg inbound "$inbound" --arg outbound "$outbound" \
+      --arg match "$match" --arg domain "$domain" --arg tag "$tag" --arg template "$template" '
+      {type:"field",inboundTag:[$inbound],
+       domain:(if $match=="suffix" then ["domain:"+$domain] else ["full:"+$domain] end),
+       outboundTag:$outbound,ruleTag:$tag,template:$template}')
+    result=$(jq -c --argjson rule "$rule" --arg inbound "$inbound" \
+      --arg match "$match" --arg domain "$domain" \
+      '. + [{rule:$rule,inbound:$inbound,match:$match,domain:$domain}]' <<<"$result")
+  done
+  printf -v "$__var" '%s' "$result"
+}
+
+# Later bindings in metadata order override earlier ones for the same domain.
+_inbound_desired_entries() {
+  local __var=$1 metadata=$2 inbound=$3 result
+  result=$(jq -c --arg inbound "$inbound" '
+    .domainTemplates as $dt |
+    [$dt.bindings[]? | select(.inbound==$inbound)] as $bound |
+    reduce (
+      $bound[] as $b |
+      ($dt.templates[]? | select(.name==$b.template)) as $t |
+      (($t.exact[]? | {match:"exact", domain:., key:("full:"+.)}),
+       ($t.suffix[]? | {match:"suffix", domain:., key:("domain:"+.)})) |
+      {key:.key, match:.match, domain:.domain, template:$b.template, outbound:$b.outbound}
+    ) as $entry ({}; .[$entry.key]=$entry) |
+    [.[]]
+  ' "$metadata")
+  printf -v "$__var" '%s' "$result"
+}
+
+_template_key_jq() {
+  cat <<'JQ'
+def template_rule_key:
+  if has("domain_suffix") then .domain_suffix[0]
+  elif has("domain") then .domain[0]
+  else null end;
+JQ
+}
+
+_reconcile_template_rules_jq() {
+  _xrayctl_domain_rule_jq
+  _template_key_jq
+  cat <<'JQ'
+def inbound_template_rule($inbound):
+  xrayctl_domain_rule and (.inboundTag // [])==[$inbound] and ((.template // "")!="");
+($desired | map({key:.key, value:.}) | from_entries) as $desired_map |
+.routing=(.routing // {}) |
+.routing.rules=[(.routing.rules // [])[] |
+  if inbound_template_rule($inbound) then
+    (template_rule_key) as $k |
+    if $desired_map[$k] != null then
+      .outboundTag=$desired_map[$k].outbound | .template=$desired_map[$k].template
+    else empty end
+  else . end]
+JQ
+}
+
+_missing_template_rules_jq() {
+  _xrayctl_domain_rule_jq
+  _template_key_jq
+  cat <<'JQ'
+def inbound_managed($inbound):
+  xrayctl_domain_rule and (.inboundTag // [])==[$inbound];
+([.routing.rules[]? | select(inbound_managed($inbound)) | template_rule_key]) as $present |
+[$desired[] | select(((.key) as $k | $present | index($k)) == null)]
+JQ
+}
+
+_rebuild_inbound_template_config() {
+  local __var=$1 base=$2 inbound=$3 metadata=$4
+  local desired missing additions tmpA out
+  _inbound_desired_entries desired "$metadata" "$inbound"
+  tmpA=$(temp_file)
+  if ! jq --arg inbound "$inbound" --argjson desired "$desired" \
+    "$(_reconcile_template_rules_jq)" "$base" >"$tmpA"; then
+    rm -f "$tmpA"
+    return 1
+  fi
+  missing=$(jq -c --arg inbound "$inbound" --argjson desired "$desired" \
+    "$(_missing_template_rules_jq)" "$tmpA") || {
+    rm -f "$tmpA"
+    return 1
+  }
+  if [[ $missing == '[]' ]]; then
+    printf -v "$__var" '%s' "$tmpA"
+    return 0
+  fi
+  _desired_to_additions additions "$missing" "$inbound"
+  out=$(temp_file)
+  if ! _build_template_config_candidate "$tmpA" "$out" "$additions"; then
+    rm -f "$tmpA" "$out"
+    return 1
+  fi
+  rm -f "$tmpA"
+  printf -v "$__var" '%s' "$out"
+}
+
+_rebuild_template_bound_inbounds_config() {
+  local __var=$1 metadata=$2 name=$3
+  local current next inbound rc=0
+  current=$(temp_file)
+  cp "$CONFIG_FILE" "$current"
+  while IFS=$'\t' read -r inbound; do
+    [[ -n $inbound ]] || continue
+    if ! _rebuild_inbound_template_config next "$current" "$inbound" "$metadata"; then
+      rc=1
+      break
+    fi
+    rm -f "$current"
+    current=$next
+  done < <(jq -r --arg name "$name" \
+    '.domainTemplates.bindings[]? | select(.template==$name) | .inbound' "$metadata")
+  if ((rc)); then
+    rm -f "$current"
+    return 1
+  fi
+  printf -v "$__var" '%s' "$current"
+}
+
+_build_template_config_candidate() {
+  local current=$1 candidate=$2 additions_json=$3
+  jq --argjson additions "$additions_json" "$(_template_config_jq)" "$current" >"$candidate"
+}
+
+_template_config_jq() {
+  _xrayctl_domain_rule_jq
+  cat <<'JQ'
+def managed_for($rule; $inbound):
+  ($rule | xrayctl_domain_rule) and (($rule.inboundTag // []) == [$inbound]);
+def same_rule($rule; $new):
+  managed_for($rule; $new.inbound) and
+  ($rule.domain == [(if $new.match=="suffix" then "domain:" else "full:" end)+$new.domain]);
+def insert_rule($rules; $new):
+  ([range(0; ($rules|length)) as $i |
+    select(
+      if $new.match=="exact" then
+        ($rules[$i] | managed_for(.; $new.inbound) and (.domain[0] | startswith("domain:")))
+      else
+        ($rules[$i] | managed_for(.; $new.inbound) and (.domain[0] | startswith("domain:")) and
+          ((.domain[0][7:]|split(".")|length) < ($new.domain|split(".")|length) or
+           ((.domain[0][7:]|split(".")|length) == ($new.domain|split(".")|length) and
+            (.domain[0][7:]|length) < ($new.domain|length))))
+      end
+    ) | $i] | .[0] // null) as $priority |
+  ([range(0; ($rules|length)) as $i |
+    select(($rules[$i].ruleTag // "") == ("xrayctl-outbound:"+$new.inbound)) | $i] | .[0] // null) as $default |
+  ([range(0; ($rules|length)) as $i |
+    select($rules[$i] | managed_for(.; $new.inbound)) | $i] | .[-1] // null) as $last |
+  (if $priority != null then $priority
+   elif $default != null then $default
+   elif $last != null then $last + 1
+   else ($rules|length) end) as $index |
+  [range(0; (($rules|length)+1)) as $i |
+    if $i==$index then $new.rule
+    elif $i < $index then $rules[$i]
+    else $rules[$i-1] end];
+.routing=(.routing // {domainStrategy:"IPIfNonMatch",rules:[]}) |
+.routing.rules=reduce $additions[] as $new (.routing.rules;
+  if any(.[]; same_rule(.; $new)) then
+    map(if same_rule(.; $new) and ((.template // "") == ($new.rule.template // ""))
+        then .outboundTag=$new.rule.outboundTag else . end)
+  else insert_rule(.; $new) end)
+JQ
+}
+
+create_domain_template() {
+  ensure_runtime_dependencies outbound-template-create; ensure_config; ensure_meta
+  local name
+  prompt_value name "模板名称" || return
+  validate_tag "$name" || { warn "模板名称只能包含字母、数字、点、下划线和横线。"; return 1; }
+  if domain_template_exists "$name"; then
+    warn "模板已存在：${name}"
+    return 1
+  fi
+  state_commit_metadata _meta_template_add "$name" || return
+  info "模板 ${name} 已创建。"
+}
+
+_commit_template_change() {
+  local config_candidate=$1 meta_candidate=$2 message=$3 rc=0
+  if cmp -s "$CONFIG_FILE" "$config_candidate"; then
+    state_commit_metadata _state_copy_metadata "$meta_candidate"
+    rc=$?
+    rm -f "$config_candidate" "$meta_candidate"
+    ((rc == 0)) || return "$rc"
+  else
+    state_commit_candidate_with_metadata "$config_candidate" "$meta_candidate" || {
+      rm -f "$config_candidate" "$meta_candidate"
+      return 1
+    }
+    rm -f "$config_candidate" "$meta_candidate"
+  fi
+  info "$message"
+}
+
+apply_domain_template() {
+  ensure_runtime_dependencies outbound-template-apply; ensure_config; ensure_meta
+  local inbound=$1 name=$2 outbound=$3 meta_candidate config_candidate
+  inbound_exists "$inbound" || die "找不到入站：$inbound"
+  domain_template_exists "$name" || die "找不到模板：$name"
+  outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
+  meta_candidate=$(temp_file)
+  _meta_template_bind "$META_FILE" "$meta_candidate" "$inbound" "$name" "$outbound" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _rebuild_inbound_template_config config_candidate "$CONFIG_FILE" "$inbound" "$meta_candidate" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _commit_template_change "$config_candidate" "$meta_candidate" "模板 ${name} 已应用到入站 ${inbound}（出站：${outbound}）。"
+}
+
+add_domain_template_domains() {
+  ensure_runtime_dependencies outbound-template-edit; ensure_config; ensure_meta
+  local name=$1 match=$2 raw=$3 normalized domains_json meta_candidate config_candidate
+  normalized=$(_normalize_domain_list "$raw") || return 1
+  domains_json=$(printf '%s\n' "$normalized" | jq -Rsc 'split("\n") | map(select(length>0)) | unique')
+  meta_candidate=$(temp_file)
+  _meta_template_domains_add "$META_FILE" "$meta_candidate" "$name" "$match" "$domains_json" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _rebuild_template_bound_inbounds_config config_candidate "$meta_candidate" "$name" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _commit_template_change "$config_candidate" "$meta_candidate" "模板 ${name} 已更新，已同步到已应用的入站。"
+}
+
+delete_domain_template_domains() {
+  ensure_runtime_dependencies outbound-template-edit; ensure_config; ensure_meta
+  local name=$1 match=$2 raw=$3 normalized domains_json meta_candidate config_candidate
+  normalized=$(_normalize_domain_list "$raw") || return 1
+  domains_json=$(printf '%s\n' "$normalized" | jq -Rsc 'split("\n") | map(select(length>0)) | unique')
+  meta_candidate=$(temp_file)
+  _meta_template_domains_delete "$META_FILE" "$meta_candidate" "$name" "$match" "$domains_json" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _rebuild_template_bound_inbounds_config config_candidate "$meta_candidate" "$name" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _commit_template_change "$config_candidate" "$meta_candidate" "模板 ${name} 已更新，已同步删除已应用入站中的规则。"
+}
+
+remove_domain_template() {
+  ensure_runtime_dependencies outbound-template-remove; ensure_config; ensure_meta
+  local inbound=$1 name=$2 meta_candidate config_candidate
+  meta_candidate=$(temp_file)
+  _meta_template_unbind "$META_FILE" "$meta_candidate" "$inbound" "$name" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _rebuild_inbound_template_config config_candidate "$CONFIG_FILE" "$inbound" "$meta_candidate" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _commit_template_change "$config_candidate" "$meta_candidate" "已从入站 ${inbound} 移除模板 ${name}。"
+}
+
+update_domain_template_outbound() {
+  ensure_runtime_dependencies outbound-template-set-outbound; ensure_config; ensure_meta
+  local inbound=$1 name=$2 outbound=$3 meta_candidate config_candidate
+  inbound_exists "$inbound" || die "找不到入站：$inbound"
+  domain_template_exists "$name" || die "找不到模板：$name"
+  outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
+  meta_candidate=$(temp_file)
+  _meta_template_set_outbound "$META_FILE" "$meta_candidate" "$inbound" "$name" "$outbound" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _rebuild_inbound_template_config config_candidate "$CONFIG_FILE" "$inbound" "$meta_candidate" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _commit_template_change "$config_candidate" "$meta_candidate" "模板 ${name} 的出站已更新为 ${outbound}（入站：${inbound}）。"
+}
+
 list_outbound_overview() {
   local rows number tag protocol address port username endpoint
   ensure_config
@@ -268,11 +637,12 @@ generate_domain_rule_id() {
 
 list_domain_rules() {
   ensure_config
-  local inbound=${1-} context=${2-} rows group_inbound="" number=0 match domain outbound group_start display display_match
+  local inbound=${1-} context=${2-} rows group_inbound="" number=0 match domain outbound group_start display display_match hide_templates=0
   [[ -z $inbound ]] || inbound_exists "$inbound" || die "找不到入站：$inbound"
-  rows=$(jq -r --arg inbound "$inbound" "$(_xrayctl_domain_rule_jq)
+  [[ $context == --menu ]] && hide_templates=1
+  rows=$(jq -r --arg inbound "$inbound" --arg hideTemplates "$hide_templates" "$(_xrayctl_domain_rule_jq)
     ([.routing.rules[]? |
-      select(xrayctl_domain_rule) |
+       select(xrayctl_domain_rule and (\$hideTemplates!=\"1\" or (.template // \"\")==\"\")) |
       (if (.inboundTag|type)==\"array\" then (.inboundTag[0] // \"?\") else \"?\" end) as \$rule_inbound |
       (if (.domain|type)==\"array\" then (.domain[0] // \"\") else \"\" end) as \$domain_value |
       (if (\$domain_value|startswith(\"full:\")) then \"exact\" elif (\$domain_value|startswith(\"domain:\")) then \"suffix\" else \"?\" end) as \$match |
@@ -290,7 +660,7 @@ list_domain_rules() {
       .value + [(if .key==0 then \"first\" else \"\" end)]
     ) | @tsv" "$CONFIG_FILE")
   heading "域名分流规则"
-  [[ -n $rows ]] || { info "还没有域名分流规则。"; return 0; }
+  [[ -n $rows ]] || { info "还没有直接域名规则。"; return 0; }
   while IFS=$'\t' read -r inbound match domain outbound group_start; do
     [[ -n $inbound ]] || continue
     if [[ $inbound != "$group_inbound" ]]; then
@@ -462,8 +832,9 @@ add_domain_rule() {
 
 delete_domain_rule() {
   ensure_runtime_dependencies outbound-rule-delete; ensure_config
-  local inbound=${1-} match=${2-} domain=${3-} rows choice selected_inbound tmp selection token idx
-  local row_inbound row_match row_domain row_outbound
+  local inbound=${1-} match=${2-} domain=${3-} scope=${4-} rows choice selected_inbound tmp selection token idx
+  local row_inbound row_match row_domain row_outbound template_owned
+  [[ -n $scope ]] || scope=--direct-only
   local -a rule_matches=() rule_domains=() rule_outbounds=() delete_indices=()
   local -a inbound_tags=() inbound_labels=() inbound_counts=()
 
@@ -479,9 +850,9 @@ delete_domain_rule() {
     selected_inbound=$inbound
   fi
 
-  rows=$(jq -r --arg inbound "${selected_inbound:-$inbound}" "$(_xrayctl_domain_rule_jq)
+  rows=$(jq -r --arg inbound "${selected_inbound:-$inbound}" --arg scope "$scope" "$(_xrayctl_domain_rule_jq)
     [.routing.rules[]? |
-      select(xrayctl_domain_rule) |
+       select(xrayctl_domain_rule and (\$scope!=\"--direct-only\" or (.template // \"\")==\"\")) |
       select(\$inbound==\"\" or ((.inboundTag // [])|index(\$inbound))!=null) |
       (if (.inboundTag|type)==\"array\" then (.inboundTag[0] // \"?\") else \"?\" end) as \$rule_inbound |
       (if (.domain|type)==\"array\" then (.domain[0] // \"\") else \"\" end) as \$domain_value |
@@ -495,7 +866,16 @@ delete_domain_rule() {
       [[ $row_inbound == "$selected_inbound" && $row_match == "$match" && $row_domain == "$domain" ]] || continue
       ((matching_count+=1))
     done <<<"$rows"
-    ((matching_count > 0)) || die "找不到域名规则：${selected_inbound} ${match} ${domain}"
+    if ((matching_count == 0)); then
+      template_owned=$(jq -r --arg inbound "$selected_inbound" --arg match "$match" --arg domain "$domain" "$(_xrayctl_domain_rule_jq)
+        [.routing.rules[]? |
+          select(xrayctl_domain_rule and (.inboundTag // [])==[\$inbound] and ((.template // \"\") != \"\")) |
+          select(.domain == [(if \$match==\"suffix\" then \"domain:\" else \"full:\" end) + \$domain])] | length" "$CONFIG_FILE")
+      if ((template_owned > 0)); then
+        die "该域名规则由模板管理，请在“管理模板”中调整模板或移除模板。"
+      fi
+      die "找不到域名规则：${selected_inbound} ${match} ${domain}"
+    fi
     ((matching_count == 1)) || die "域名规则存在重复项，请先使用交互菜单处理。"
     delete_indices=(1)
     rule_matches=("$match")
@@ -527,8 +907,9 @@ delete_domain_rule() {
         choose choice "选择入站" "${inbound_labels[@]}" || return
         selected_inbound=${inbound_tags[$((choice-1))]}
       fi
-      rows=$(jq -r --arg inbound "$selected_inbound" "$(_xrayctl_domain_rule_jq)
+      rows=$(jq -r --arg inbound "$selected_inbound" --arg scope "$scope" "$(_xrayctl_domain_rule_jq)
         [.routing.rules[]? | select(xrayctl_domain_rule and (.inboundTag // [])==[\$inbound]) |
+         select(\$scope!=\"--direct-only\" or (.template // \"\")==\"\") |
          (if .domain[0]|startswith(\"full:\") then \"exact\" else \"suffix\" end) as \$match |
          (if \$match==\"exact\" then .domain[0][5:] else .domain[0][7:] end) as \$domain |
          [\$match,\$domain,(.outboundTag // \"?\")]] as \$rules |
@@ -538,8 +919,9 @@ delete_domain_rule() {
           sort_by([(.[1] | ascii_downcase), .[1]])[]
         ) | @tsv" "$CONFIG_FILE")
     else
-      rows=$(jq -r --arg inbound "$selected_inbound" "$(_xrayctl_domain_rule_jq)
+      rows=$(jq -r --arg inbound "$selected_inbound" --arg scope "$scope" "$(_xrayctl_domain_rule_jq)
         [.routing.rules[]? | select(xrayctl_domain_rule and (.inboundTag // [])==[\$inbound]) |
+         select(\$scope!=\"--direct-only\" or (.template // \"\")==\"\") |
          (if .domain[0]|startswith(\"full:\") then \"exact\" else \"suffix\" end) as \$match |
          (if \$match==\"exact\" then .domain[0][5:] else .domain[0][7:] end) as \$domain |
          [\$match,\$domain,(.outboundTag // \"?\")]] as \$rules |
@@ -618,9 +1000,17 @@ delete_domain_rule() {
   fi
 }
 
+_meta_template_remove_outbound_bindings() {
+  local current=$1 candidate=$2 outbound=$3
+  jq --arg tag "$outbound" '
+    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? | select(.outbound != $tag)]' \
+    "$current" >"$candidate"
+}
+
 delete_outbound() {
-  ensure_runtime_dependencies outbound-delete; ensure_config
-  local tag=${1-} tmp default_refs domain_refs custom_refs
+  ensure_runtime_dependencies outbound-delete; ensure_config; ensure_meta
+  local tag=${1-} tmp default_refs domain_refs custom_refs binding_refs meta_candidate=""
   [[ -n $tag ]] || select_outbound tag 0 0 || return
   outbound_exists "$tag" || die "找不到出站：$tag"
   [[ $tag != direct && $tag != blocked ]] || { warn "${tag} 出站不能删除。"; return 0; }
@@ -639,14 +1029,18 @@ delete_outbound() {
         (((.ruleTag|startswith("xrayctl-outbound:"))|not) and
          ((.ruleTag|startswith("xrayctl-domain:"))|not))
       )] | length' "$CONFIG_FILE")
+  binding_refs=$(jq -r --arg tag "$tag" '
+    [.domainTemplates.bindings[]? | select(.outbound==$tag)] | length' "$META_FILE")
   if ((custom_refs > 0)); then
     die "该出站仍被自定义路由规则引用，请先在完整配置中处理。"
   fi
-  if ((default_refs > 0 || domain_refs > 0)); then
+  if ((default_refs > 0 || domain_refs > 0 || binding_refs > 0)); then
     warn "出站 ${tag} 当前被 xrayctl 管理规则引用："
     ((default_refs > 0)) && printf '%s 个入站默认出站使用\n' "$default_refs"
     ((domain_refs > 0)) && printf '%s 条域名规则使用\n' "$domain_refs"
+    ((binding_refs > 0)) && printf '%s 个模板绑定使用\n' "$binding_refs"
     warn "删除后这些管理规则会一并删除。"
+    ((binding_refs > 0)) && warn "相关的模板绑定也会一并移除。"
     confirm "继续删除出站 ${tag}？" N || return 0
   else
     confirm "删除出站 ${tag}？" N || return 0
@@ -655,6 +1049,16 @@ delete_outbound() {
   jq --arg tag "$tag" '
     .outbounds |= map(select(.tag!=$tag)) |
     .routing.rules=((.routing.rules // []) | map(select(.outboundTag!=$tag)))' "$CONFIG_FILE" >"$tmp"
-  state_apply_candidate_file "$tmp" apply_candidate || return
+  if ((binding_refs > 0)); then
+    meta_candidate=$(temp_file)
+    _meta_template_remove_outbound_bindings "$META_FILE" "$meta_candidate" "$tag" || {
+      rm -f "$tmp" "$meta_candidate"
+      return 1
+    }
+    state_commit_candidate_with_metadata "$tmp" "$meta_candidate" || return
+    rm -f "$meta_candidate"
+  else
+    state_apply_candidate_file "$tmp" apply_candidate || return
+  fi
   info "出站 ${tag} 已删除。"
 }

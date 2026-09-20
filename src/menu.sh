@@ -15,21 +15,267 @@ outbound_menu() {
   done
 }
 
-domain_rule_menu() {
-  local tag choice
-  select_inbound tag '^(vless|socks|http)$' || { pause; return; }
+domain_rule_detail_menu() {
+  local tag=$1 choice template outbound has_binding=0
   while inbound_exists "$tag"; do
     clear_screen
     heading "域名分流 · ${tag}"
+    printf '模板：\n'
+    has_binding=0
+    while IFS=$'\t' read -r template outbound; do
+      [[ -n $template ]] || continue
+      printf '  %s → %s\n' "$template" "$outbound"
+      has_binding=1
+    done < <(list_inbound_template_bindings "$tag")
+    ((has_binding)) || printf '  无\n'
+    printf '\n'
     list_domain_rules "$tag" --menu
-    printf '\n1) 添加规则\n2) 删除规则\n0) 返回\n'
+    printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
-      1) run_menu_action add_domain_rule "$tag" "" "" "" --prompt; pause;;
-      2) run_menu_action delete_domain_rule "$tag"; pause;;
+      1) inbound_template_manage_menu "$tag";;
+      2) if run_menu_action add_domain_rule "$tag" "" "" "" --prompt; then pause; fi;;
+      3) if run_menu_action delete_domain_rule "$tag" "" "" --direct-only; then pause; fi;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
+}
+
+domain_rule_inbound_templates() {
+  local tag=$1 template outbound summary=''
+  while IFS=$'\t' read -r template outbound; do
+    [[ -n $template ]] || continue
+    [[ -n $summary ]] && summary+=', '
+    summary+="$template"
+  done < <(list_inbound_template_bindings "$tag")
+  printf '%s' "${summary:-无}"
+}
+
+domain_rule_inbound_count() {
+  local tag=$1
+  jq -r --arg tag "$tag" "$(_xrayctl_domain_rule_jq)
+    [.routing.rules[]? | select(xrayctl_domain_rule and (.inboundTag // [])==[\$tag])] | length" \
+    "$CONFIG_FILE"
+}
+
+domain_rule_menu() {
+  local choice tag number=0
+  local -a tags=()
+  ensure_config
+  while true; do
+    clear_screen
+    heading '域名分流'
+    printf '入站列表\n\n'
+    tags=()
+    while IFS= read -r tag; do
+      [[ -n $tag ]] && tags+=("$tag")
+    done < <(jq -r '.inbounds[] | select(.protocol|test("^(vless|socks|http)$")) | .tag' "$CONFIG_FILE")
+    if ((${#tags[@]} == 0)); then
+      info '还没有可管理的入站。'
+    else
+      for ((number=0; number<${#tags[@]}; number++)); do
+        tag=${tags[$number]}
+        printf '%d) %s\n' "$((number + 1))" "$tag"
+        printf '   模板：%s\n' "$(domain_rule_inbound_templates "$tag")"
+        printf '   域名规则：%s 条\n\n' "$(domain_rule_inbound_count "$tag")"
+      done
+    fi
+    printf '操作：\n'
+    printf '  [%d] 管理模板\n' "$(( ${#tags[@]} + 1 ))"
+    printf '  [0] 返回\n'
+    read -r -p '请选择: ' choice || return
+    case $choice in
+      0) return;;
+      ''|*[!0-9]*) warn '无效选项。'; pause;;
+      *)
+        if ((choice == ${#tags[@]} + 1)); then
+          template_library_menu
+        elif ((choice >= 1 && choice <= ${#tags[@]})); then
+          domain_rule_detail_menu "${tags[$((choice-1))]}"
+        else
+          warn '无效选项。'
+          pause
+        fi
+        ;;
+    esac
+  done
+}
+
+select_inbound_template() {
+  local inbound=$1 __var=$2 answer template_name template_outbound
+  local -a names=()
+  while IFS=$'\t' read -r template_name template_outbound; do
+    [[ -n $template_name ]] && names+=("$template_name")
+  done < <(list_inbound_template_bindings "$inbound")
+  ((${#names[@]})) || { warn "当前入站还没有应用模板。"; return 1; }
+  choose answer "选择模板" "${names[@]}" || return 1
+  printf -v "$__var" '%s' "${names[$((answer-1))]}"
+}
+
+inbound_template_manage_menu() {
+  local inbound=$1 choice name outbound
+  while inbound_exists "$inbound"; do
+    clear_screen
+    heading "入站模板 · ${inbound}"
+    printf '已应用模板：\n'
+    while IFS=$'\t' read -r name outbound; do
+      [[ -n $name ]] || continue
+      printf '  %s → %s\n' "$name" "$outbound"
+    done < <(list_inbound_template_bindings "$inbound")
+    printf '\n1) 添加模板\n2) 移除模板\n3) 修改出站\n0) 返回\n'
+    read -r -p '请选择: ' choice || return
+    case $choice in
+      1) if apply_domain_template_menu "$inbound"; then pause; fi;;
+      2)
+        select_inbound_template "$inbound" name || continue
+        confirm "从入站 ${inbound} 移除模板 ${name}？" N || continue
+        run_menu_action remove_domain_template "$inbound" "$name"
+        pause
+        ;;
+      3)
+        select_inbound_template "$inbound" name || continue
+        select_outbound outbound 1 || continue
+        run_menu_action update_domain_template_outbound "$inbound" "$name" "$outbound"
+        pause
+        ;;
+      0) return;; *) warn '无效选项。'; pause;;
+    esac
+  done
+}
+
+select_domain_template() {
+  local __var=$1 answer template_name
+  local -a names=()
+  while IFS=$'\t' read -r template_name _ _; do
+    [[ -n $template_name ]] && names+=("$template_name")
+  done < <(list_domain_templates)
+  ((${#names[@]})) || { warn "还没有模板。"; return 1; }
+  choose answer "选择模板" "${names[@]}" || return 1
+  printf -v "$__var" '%s' "${names[$((answer-1))]}"
+}
+
+delete_domain_template_domains_menu() {
+  local name=$1 match=$2 selection token idx valid type_label choice joined domain
+  local -a domains=() selected=() tokens=()
+  if [[ $match == suffix ]]; then type_label=子域名; else type_label=精确域名; fi
+  while IFS= read -r domain; do
+    [[ -n $domain ]] && domains+=("$domain")
+  done < <(jq -r --arg name "$name" --arg match "$match" \
+    '.domainTemplates.templates[]? | select(.name==$name) | .[$match][]? // empty' "$META_FILE")
+  ((${#domains[@]})) || { warn "当前模板没有${type_label}。"; return 1; }
+  printf '\n%s：\n\n' "$type_label"
+  for ((idx=0; idx<${#domains[@]}; idx++)); do
+    printf '%d) %s\n' "$((idx+1))" "${domains[$idx]}"
+  done
+  while true; do
+    read -r -p '请选择要删除的域名（支持 1,3,2）: ' selection || return 1
+    selection=$(printf '%s' "$selection" | tr -d '[:space:]')
+    [[ -n $selection ]] || return 1
+    selected=()
+    IFS=',' read -r -a tokens <<<"$selection"
+    valid=1
+    for token in "${tokens[@]}"; do
+      if [[ ! $token =~ ^[0-9]+$ ]] || ((10#$token < 1 || 10#$token > ${#domains[@]})); then
+        valid=0
+        break
+      fi
+      idx=$((10#$token))
+      if ((${#selected[@]})); then
+        for choice in "${selected[@]}"; do
+          if ((choice == idx)); then
+            valid=0
+            break 2
+          fi
+        done
+      fi
+      selected+=("$idx")
+    done
+    ((valid)) && ((${#selected[@]})) && break
+    warn "请输入有效且不重复的序号，例如 1,3,2。"
+  done
+  printf '\n将删除：\n'
+  for idx in "${selected[@]}"; do
+    printf -- '- %s\n' "${domains[$((idx-1))]}"
+  done
+  confirm "确认从模板 ${name} 删除这些域名？" N || return 1
+  joined=''
+  for idx in "${selected[@]}"; do
+    [[ -n $joined ]] && joined+=','
+    joined+="${domains[$((idx-1))]}"
+  done
+  run_menu_action delete_domain_template_domains "$name" "$match" "$joined"
+}
+
+template_manage_menu() {
+  local name=$1 choice type domains match
+  while domain_template_exists "$name"; do
+    clear_screen
+    heading "模板 · ${name}"
+    printf '精确域名：\n'
+    jq -r --arg name "$name" '.domainTemplates.templates[]? |
+      select(.name==$name) | .exact[]? // empty | "  "+.' "$META_FILE"
+    printf '子域名：\n'
+    jq -r --arg name "$name" '.domainTemplates.templates[]? |
+      select(.name==$name) | .suffix[]? // empty | "  "+.' "$META_FILE"
+    printf '\n1) 添加域名\n2) 删除域名\n0) 返回\n'
+    read -r -p '请选择: ' choice || return
+    case $choice in
+      1)
+        choose type "域名类型" "精确域名" "域名及所有子域名" || continue
+        [[ $type == 1 ]] && match=exact || match=suffix
+        prompt_value domains "域名（多个请用英文逗号分隔）" || continue
+        run_menu_action add_domain_template_domains "$name" "$match" "$domains"
+        pause
+        ;;
+      2)
+        choose type "域名类型" "精确域名" "域名及所有子域名" || continue
+        [[ $type == 1 ]] && match=exact || match=suffix
+        if delete_domain_template_domains_menu "$name" "$match"; then pause; fi
+        ;;
+      0) return;; *) warn '无效选项。'; pause;;
+    esac
+  done
+}
+
+template_library_menu() {
+  local choice name number=0
+  local -a names=()
+  while true; do
+    clear_screen
+    heading '模板库'
+    names=()
+    number=0
+    while IFS=$'\t' read -r name exact suffix; do
+      [[ -n $name ]] || continue
+      names+=("$name")
+      ((number+=1))
+      printf '%s) %-16s 精确 %s 个，子域名 %s 个\n' "$number" "$name" "$exact" "$suffix"
+    done < <(list_domain_templates)
+    printf '\n%s) 新建模板\n0) 返回\n' "$((number + 1))"
+    read -r -p '请选择: ' choice || return
+    case $choice in
+      0) return;;
+      ''|*[!0-9]*) warn '无效选项。'; pause;;
+      *)
+        if ((choice == ${#names[@]} + 1)); then
+          run_menu_action create_domain_template
+          pause
+        elif ((choice >= 1 && choice <= ${#names[@]})); then
+          template_manage_menu "${names[$((choice-1))]}"
+        else
+          warn '无效选项。'
+          pause
+        fi
+        ;;
+    esac
+  done
+}
+
+apply_domain_template_menu() {
+  local inbound=$1 name outbound
+  select_domain_template name || return 1
+  select_outbound outbound 1 || return 1
+  run_menu_action apply_domain_template "$inbound" "$name" "$outbound"
 }
 
 client_menu_for_tag() {

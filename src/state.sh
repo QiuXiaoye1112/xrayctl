@@ -17,7 +17,10 @@ init_meta_base() {
     ((.inbounds // {})|type)=="object" and
     ((.certificates // {})|type)=="object" and
     ((.managedResources // {})|type)=="object" and
-    ((.migrations // {})|type)=="object"
+     ((.migrations // {})|type)=="object" and
+     ((.domainTemplates // {templates:[],bindings:[]})|type)=="object" and
+     ((.domainTemplates.templates // [])|type)=="array" and
+     ((.domainTemplates.bindings // [])|type)=="array"
   ' "$META_FILE" >/dev/null 2>&1; then
     chmod 600 "$META_FILE"
     return 0
@@ -31,7 +34,8 @@ init_meta_base() {
     .inbounds = (.inbounds // {}) |
     .certificates = (.certificates // {}) |
     .managedResources = (.managedResources // {}) |
-    .migrations = (.migrations // {})
+     .migrations = (.migrations // {}) |
+     .domainTemplates = (.domainTemplates // {templates:[],bindings:[]})
   ' "$META_FILE" >"$tmp" || {
     rm -f "$tmp"
     return 1
@@ -348,7 +352,10 @@ state_validate_metadata_candidate() {
     ((.inbounds // {}) | type=="object") and
     ((.certificates // {}) | type=="object") and
     ((.managedResources // {}) | type=="object") and
-    ((.migrations // {}) | type=="object")
+    ((.migrations // {}) | type=="object") and
+    ((.domainTemplates // {templates:[],bindings:[]}) | type=="object") and
+    ((.domainTemplates.templates // []) | type=="array") and
+    ((.domainTemplates.bindings // []) | type=="array")
   ' "$candidate" 2>&1); then
     error "metadata JSON 结构检查失败。"
     [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
@@ -433,6 +440,39 @@ state_apply_candidate_file() {
   return "$rc"
 }
 
+state_commit_metadata() {
+  local meta_mutator=$1 meta_candidate meta_snapshot rc=0
+  shift
+  ensure_meta
+  meta_candidate=$(temp_file)
+  if ! "$meta_mutator" "$META_FILE" "$meta_candidate" "$@"; then
+    rm -f "$meta_candidate"
+    return 1
+  fi
+  state_validate_metadata_candidate "$meta_candidate" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  meta_snapshot=$(temp_file)
+  cp -p "$META_FILE" "$meta_snapshot"
+  if ! install -m 600 "$meta_candidate" "$META_FILE"; then
+    install -m 600 "$meta_snapshot" "$META_FILE" || true
+    rc=1
+  fi
+  rm -f "$meta_candidate" "$meta_snapshot"
+  return "$rc"
+}
+
+_state_copy_metadata() {
+  local current=$1 candidate=$2 source=$3
+  cp "$source" "$candidate"
+}
+
+state_commit_candidate_with_metadata() {
+  local config_candidate=$1 metadata_candidate=$2
+  state_commit "$config_candidate" _state_copy_metadata "$metadata_candidate"
+}
+
 runtime_tmp_dir() {
   local base=${XRAYCTL_TMP_DIR:-/var/tmp}
   mkdir -p "$base" || return 1
@@ -451,7 +491,11 @@ _state_build_inbound_meta_set() {
 
 _state_build_inbound_meta_delete() {
   local current=$1 candidate=$2 tag=$3
-  jq --arg tag "$tag" 'del(.inbounds[$tag])' "$current" >"$candidate"
+  jq --arg tag "$tag" '
+    del(.inbounds[$tag]) |
+    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? | select(.inbound != $tag)]' \
+    "$current" >"$candidate"
 }
 
 _state_build_inbound_meta_rename() {
@@ -459,7 +503,10 @@ _state_build_inbound_meta_rename() {
   jq --arg old "$old_tag" --arg new "$new_tag" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '
     if .inbounds[$old] then
       .inbounds[$new]=(.inbounds[$old] + {updatedAt:$now}) | del(.inbounds[$old])
-    else . end' \
+    else . end |
+    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? |
+      if .inbound==$old then .inbound=$new else . end]' \
     "$current" >"$candidate"
 }
 
