@@ -88,6 +88,7 @@ ensure_certbot_environment() {
         || die "Python venv 安装失败或超时。" ;;
     dnf) run_bounded "$apt_timeout" dnf install -y python3 python3-pip || die "Python 环境安装失败或超时。" ;;
     yum) run_bounded "$apt_timeout" yum install -y python3 python3-pip || die "Python 环境安装失败或超时。" ;;
+    apk) install_packages python3 py3-pip py3-virtualenv || die "Python 环境安装失败或超时。" ;;
     pacman) run_bounded "$apt_timeout" pacman -Sy --noconfirm python python-pip || die "Python 环境安装失败或超时。" ;;
     zypper) run_bounded "$apt_timeout" zypper --non-interactive install python3 python3-pip || die "Python 环境安装失败或超时。" ;;
   esac
@@ -341,6 +342,40 @@ replace_certificate_pair() {
   fi
   return 0
 }
+
+certificate_transaction_snapshot() {
+  local __var=$1 cert_target=$2 key_target=$3 snapshot_dir
+  snapshot_dir=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-cert-transaction.XXXXXX") || return 1
+  if [[ -f $cert_target ]]; then cp -p "$cert_target" "$snapshot_dir/cert" || { rm -rf "$snapshot_dir"; return 1; }; fi
+  if [[ -f $key_target ]]; then cp -p "$key_target" "$snapshot_dir/key" || { rm -rf "$snapshot_dir"; return 1; }; fi
+  if [[ -f $META_FILE ]]; then
+    cp -p "$META_FILE" "$snapshot_dir/meta" || { rm -rf "$snapshot_dir"; return 1; }
+  fi
+  printf -v "$__var" '%s' "$snapshot_dir"
+}
+
+certificate_transaction_rollback() {
+  local snapshot=$1 cert_target=$2 key_target=$3
+  [[ -d $snapshot ]] || return 1
+  if [[ -f $snapshot/cert ]]; then
+    install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$snapshot/cert" "$cert_target" || return 1
+  else
+    rm -f "$cert_target"
+  fi
+  if [[ -f $snapshot/key ]]; then
+    install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$snapshot/key" "$key_target" || return 1
+  else
+    rm -f "$key_target"
+  fi
+  if [[ -f $snapshot/meta ]]; then
+    install -m 600 "$snapshot/meta" "$META_FILE" || return 1
+  else
+    rm -f "$META_FILE"
+  fi
+  rm -rf "$snapshot"
+}
+
+certificate_transaction_commit() { rm -rf "$1"; }
 
 restart_xray_if_certificate_changed() {
   local changed=$1
@@ -695,16 +730,31 @@ issue_certificate() {
     return 1
   fi
 
-  # Sync cert to CERT_DIR and register metadata
-  local changed
+  # Sync cert and metadata as one recoverable transaction.
+  local changed transaction cert_target="${CERT_DIR}/${identifier}.crt" key_target="${CERT_DIR}/${identifier}.key"
+  certificate_transaction_snapshot transaction "$cert_target" "$key_target" || return 1
   if ! sync_managed_certificate "$identifier" "$cert_name" changed; then
+    certificate_transaction_rollback "$transaction" "$cert_target" "$key_target" || true
     warn "证书已经由 Let's Encrypt 签发，但无法同步到 Xray 证书目录。"
     warn "Certbot 原始证书仍保留在 ${CERTBOT_CONFIG_DIR}，可修复权限后重新同步。"
     return 1
   fi
-  register_certificate_metadata "$identifier" "$domain" "$cert_name" "letsencrypt" "$validation" "$auto_renew"
-  setup_certbot_renewal_timer
-  restart_xray_if_certificate_changed "$changed" || return 1
+  if ! register_certificate_metadata "$identifier" "$domain" "$cert_name" "letsencrypt" "$validation" "$auto_renew"; then
+    certificate_transaction_rollback "$transaction" "$cert_target" "$key_target" || true
+    warn "证书 metadata 写入失败，证书文件已回滚。"
+    return 1
+  fi
+  if ! setup_certbot_renewal_timer; then
+    certificate_transaction_rollback "$transaction" "$cert_target" "$key_target" || true
+    warn "证书续期任务设置失败，证书文件和 metadata 已回滚。"
+    return 1
+  fi
+  if ! restart_xray_if_certificate_changed "$changed"; then
+    certificate_transaction_rollback "$transaction" "$cert_target" "$key_target" || true
+    restart_service || true
+    return 1
+  fi
+  certificate_transaction_commit "$transaction"
   info "证书已签发并托管：${identifier}"
 }
 
@@ -724,15 +774,26 @@ import_certificate() {
   [[ $domain =~ ^[A-Za-z0-9.-]+$ ]] || die "证书标识无效。"
   [[ -n $cert ]] || prompt_validated_value cert "证书文件路径" "" validate_readable_file "证书文件不存在或不可读，请重新输入。"
   [[ -n $key ]] || prompt_validated_value key "私钥文件路径" "" validate_readable_file "私钥文件不存在或不可读，请重新输入。"
-  local changed=0
+  local changed=0 transaction
   local cert_target="${CERT_DIR}/${domain}.crt"
   local key_target="${CERT_DIR}/${domain}.key"
+  certificate_transaction_snapshot transaction "$cert_target" "$key_target" || return 1
   if ! replace_certificate_pair "$cert" "$key" "$cert_target" "$key_target" changed; then
+    certificate_transaction_rollback "$transaction" "$cert_target" "$key_target" || true
     warn "证书替换失败，导入未完成。"
     return 1
   fi
-  meta_cert_set "$domain" "$domain" "$domain" "imported" "dns-manual" "false"
-  restart_xray_if_certificate_changed "$changed" || return 1
+  if ! meta_cert_set "$domain" "$domain" "$domain" "imported" "dns-manual" "false"; then
+    certificate_transaction_rollback "$transaction" "$cert_target" "$key_target" || true
+    warn "证书 metadata 写入失败，证书文件已回滚。"
+    return 1
+  fi
+  if ! restart_xray_if_certificate_changed "$changed"; then
+    certificate_transaction_rollback "$transaction" "$cert_target" "$key_target" || true
+    restart_service || true
+    return 1
+  fi
+  certificate_transaction_commit "$transaction"
   info "证书已导入：${cert_target}"
 }
 
@@ -799,6 +860,7 @@ renew_one_certificate() {
   local lineage_changed=0 sync_changed=0
   local before_serial="" after_serial=""
   local live_cert="${CERTBOT_CONFIG_DIR}/live"
+  local transaction cert_target key_target
 
   meta_cert_exists "$identifier" || {
     warn "证书不在托管列表：${identifier}"
@@ -812,6 +874,8 @@ renew_one_certificate() {
     return 1
   }
   validation=$(meta_cert_get_field "$identifier" validation)
+  cert_target="${CERT_DIR}/${identifier}.crt"
+  key_target="${CERT_DIR}/${identifier}.key"
 
   # --- Dependency / block check ---
   case $validation in
@@ -871,8 +935,10 @@ renew_one_certificate() {
   fi
 
   # --- Sync to Xray ---
+  certificate_transaction_snapshot transaction "$cert_target" "$key_target" || return 1
   if ! sync_managed_certificate "$identifier" "$cert_name" sync_changed; then
     warn "Let's Encrypt 已续期，但同步到 Xray 证书目录失败：${identifier}"
+    certificate_transaction_rollback "$transaction" "$cert_target" "$key_target" || true
     [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"
     return 1
   fi
@@ -888,11 +954,15 @@ renew_one_certificate() {
   if [[ $sync_changed == 1 ]] && service_is_active; then
     if ! restart_service; then
       warn "证书副本已更新，但 Xray 重启失败。"
+      certificate_transaction_rollback "$transaction" "$cert_target" "$key_target" || true
+      restart_service || true
       [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"
       return 1
     fi
     info "Xray 已重启以加载新证书。"
   fi
+
+  certificate_transaction_commit "$transaction"
 
   if [[ -n $__result_var ]]; then
     printf -v "$__result_var" '%s' "$renewal_result_internal"
