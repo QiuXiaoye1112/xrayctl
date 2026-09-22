@@ -17,7 +17,7 @@ fi
 command -v apk >/dev/null 2>&1 || die "未找到 apk。"
 
 info "正在准备运行环境。"
-apk add --no-cache bash curl ca-certificates unzip openssl
+apk add --no-cache bash curl ca-certificates unzip openssl iproute2
 update-ca-certificates >/dev/null 2>&1 || true
 
 tmp_base="${XRAYCTL_TMP_DIR:-/var/tmp}"

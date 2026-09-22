@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="7c140a82cc11"
+readonly XRAYCTL_BUILD_COMMIT="6bb2d8ce8b5d"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -434,6 +434,29 @@ detect_public_ipv6() {
 
 detect_public_ip() { detect_public_ipv4 || detect_public_ipv6; }
 
+_ifconfig_address_rows() {
+  ifconfig 2>/dev/null | awk '
+    /^[^[:space:]]/ {
+      iface=$1
+      sub(/:$/, "", iface)
+    }
+    {
+      for (i=1; i<=NF; i++) {
+        if ($i=="inet" || $i=="inet6") {
+          family=($i=="inet" ? "4" : "6")
+          address=$(i+1)
+          if (address=="addr:") address=$(i+2)
+          sub(/^addr:/, "", address)
+          sub(/\/.*/, "", address)
+          sub(/%.*/, "", address)
+          print family "\t" address "\t" iface
+          break
+        }
+      }
+    }
+  '
+}
+
 detect_local_ips() {
   # 输出: display_label\tip\tinterface
   # 排除 loopback、link-local、docker/虚拟网桥
@@ -457,20 +480,22 @@ detect_local_ips() {
       printf '%s (IPv6)\t%s\t%s\n' "$ip" "$ip" "$iface"
     done < <(ip -o -6 addr show 2>/dev/null)
   elif command_exists ifconfig; then
-    while IFS= read -r line; do
-      iface=$(awk '{print $1}' <<<"$line" | sed 's/:$//')
-      ip=$(awk '{print $2}' <<<"$line")
-      validate_ipv4 "$ip" || continue
-      [[ $ip =~ ^127\. ]] && continue
-      printf '%s (IPv4)\t%s\t%s\n' "$ip" "$ip" "$iface"
-    done < <(ifconfig 2>/dev/null | grep 'inet ' | grep -v '127\.')
-    while IFS= read -r line; do
-      iface=$(awk '{print $1}' <<<"$line" | sed 's/:$//')
-      ip=$(awk '{print $2}' <<<"$line")
-      ip=${ip%%%*}
-      [[ -z $ip || $ip == ::1 || $ip == fe80:* ]] && continue
-      printf '%s (IPv6)\t%s\t%s\n' "$ip" "$ip" "$iface"
-    done < <(ifconfig 2>/dev/null | grep 'inet6 ' | grep -v '::1\|fe80:')
+    local family
+    while IFS=$'\t' read -r family ip iface; do
+      [[ $iface =~ ^(docker|br-|veth|virbr|lo|lxc|cali|flannel|cilium) ]] && continue
+      case $family in
+        4)
+          validate_ipv4 "$ip" || continue
+          [[ $ip =~ ^127\. ]] && continue
+          printf '%s (IPv4)\t%s\t%s\n' "$ip" "$ip" "$iface"
+          ;;
+        6)
+          validate_ip_literal "$ip" && ! validate_ipv4 "$ip" || continue
+          [[ $ip == ::1 || $ip == fe80:* ]] && continue
+          printf '%s (IPv6)\t%s\t%s\n' "$ip" "$ip" "$iface"
+          ;;
+      esac
+    done < <(_ifconfig_address_rows)
   fi
 }
 
