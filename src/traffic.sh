@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Per-inbound rolling traffic accounting and optional monthly quotas. Linux
-# packet counters provide the samples; daily totals are retained for three
-# months while quota cycles keep their exact local start/end timestamps.
+# packet counters provide the samples; only the current display period is
+# retained while quota cycles keep their independent local timestamps.
 
 TRAFFIC_NFT_TABLE="xrayctl_traffic"
 TRAFFIC_IPTABLES_IN_CHAIN="XRAYCTL_TRAFFIC_IN"
@@ -103,7 +103,12 @@ traffic_limit_first_cycle_end() {
   if traffic_iso_compare "$candidate" gt "$reference"; then printf '%s' "$candidate"; else traffic_limit_next_timestamp "$reference" "$2" "$reset_time"; fi
 }
 
-traffic_retention_start() { traffic_months_ago "$(traffic_today)" 3; }
+traffic_retention_start() {
+  traffic_init_file
+  local start
+  start=$(traffic_period_start "$(traffic_now)") || return 1
+  printf '%s' "${start:0:10}"
+}
 
 traffic_validate_range() {
   local start=${1-} end=${2-} cutoff today
@@ -114,8 +119,39 @@ traffic_validate_range() {
   traffic_iso_compare "$end" le "$today"
 }
 
+traffic_period_anchor() {
+  local reference=$1 offset=${2:-0} day=$3 clock=$4 year month total max_day
+  traffic_validate_date "$reference" || return 1
+  year=$((10#${reference:0:4})); month=$((10#${reference:5:2}))
+  total=$((year * 12 + month - 1 + offset))
+  year=$((total / 12)); month=$((total % 12 + 1))
+  max_day=$(traffic_days_in_month "$year" "$month")
+  ((day <= max_day)) || day=$max_day
+  printf '%04d-%02d-%02d %s' "$year" "$month" "$day" "$clock"
+}
+
+traffic_period_start() {
+  local reference=$1 day clock candidate
+  day=$(jq -r '.period.day // 1' "$TRAFFIC_FILE")
+  clock=$(jq -r '.period.time // "00:00:00"' "$TRAFFIC_FILE")
+  candidate=$(traffic_period_anchor "${reference:0:10}" 0 "$day" "$clock") || return 1
+  if traffic_iso_compare "$candidate" le "$reference"; then
+    printf '%s' "$candidate"
+  else
+    traffic_period_anchor "${reference:0:10}" -1 "$day" "$clock"
+  fi
+}
+
+traffic_period_bounds() {
+  local reference=$1 start day clock
+  start=$(traffic_period_start "$reference") || return 1
+  day=$(jq -r '.period.day // 1' "$TRAFFIC_FILE")
+  clock=$(jq -r '.period.time // "00:00:00"' "$TRAFFIC_FILE")
+  printf '%s\t%s\n' "$start" "$(traffic_period_anchor "${start:0:10}" 1 "$day" "$clock")"
+}
+
 traffic_default_json() {
-  printf '%s\n' '{"schema":1,"enabled":false,"limitsEnabled":false,"backend":"","lastCollectedAt":"","inbounds":{}}'
+  printf '%s\n' '{"schema":1,"enabled":false,"limitsEnabled":false,"backend":"","lastCollectedAt":"","period":{"day":1,"time":"00:00:00"},"periodsSeeded":false,"inbounds":{}}'
 }
 
 traffic_init_file() {
@@ -126,9 +162,9 @@ traffic_init_file() {
   if [[ ! -s $TRAFFIC_FILE ]] || ! jq -e 'type=="object" and ((.inbounds // {})|type)=="object"' "$TRAFFIC_FILE" >/dev/null 2>&1; then
     [[ ! -f $TRAFFIC_FILE ]] || cp -a "$TRAFFIC_FILE" "${TRAFFIC_FILE}.broken-$(timestamp)"
     tmp=$(temp_file); traffic_default_json >"$tmp"; install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
-  elif ! jq -e '.schema==1 and (.enabled|type)=="boolean" and (.limitsEnabled|type)=="boolean" and (.backend|type)=="string" and (.lastCollectedAt|type)=="string"' "$TRAFFIC_FILE" >/dev/null 2>&1; then
+  elif ! jq -e '.schema==1 and (.enabled|type)=="boolean" and (.limitsEnabled|type)=="boolean" and (.backend|type)=="string" and (.lastCollectedAt|type)=="string" and (.period.day|type)=="number" and (.period.time|type)=="string" and (.periodsSeeded|type)=="boolean"' "$TRAFFIC_FILE" >/dev/null 2>&1; then
     tmp=$(temp_file)
-    jq '.schema=1 | .enabled=(.enabled==true) | .limitsEnabled=(.limitsEnabled==true) | .backend=(.backend // "") | .lastCollectedAt=(.lastCollectedAt // "") | .inbounds=(if (.inbounds|type)=="object" then .inbounds else {} end)' \
+    jq '.schema=1 | .enabled=(.enabled==true) | .limitsEnabled=(.limitsEnabled==true) | .backend=(.backend // "") | .lastCollectedAt=(.lastCollectedAt // "") | .period=(.period // {day:1,time:"00:00:00"}) | .periodsSeeded=(.periodsSeeded==true) | .inbounds=(if (.inbounds|type)=="object" then .inbounds else {} end)' \
       "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
     install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
   fi
@@ -208,14 +244,39 @@ traffic_rolled_limits_json() {
   ' "$TRAFFIC_FILE") | jq -s 'from_entries'
 }
 
+# Existing files contain daily totals only. Assign each old boundary day to
+# the new period as an approximation; subsequent samples use their collection
+# time and are accumulated directly in the matching period.
+traffic_seed_periods() {
+  local day start mapping='{}' tmp
+  [[ $(jq -r '.periodsSeeded // false' "$TRAFFIC_FILE") != true ]] || return 0
+  while IFS= read -r day; do
+    traffic_validate_date "$day" || continue
+    start=$(traffic_period_start "$day 23:59:59") || return 1
+    mapping=$(jq -nc --argjson mapping "$mapping" --arg day "$day" --arg start "$start" '$mapping + {($day):$start}') || return 1
+  done < <(jq -r '[.inbounds[]?.daily | keys[]?] | unique[]' "$TRAFFIC_FILE")
+  tmp=$(temp_file)
+  jq --argjson mapping "$mapping" '
+    .inbounds |= with_entries(
+      .value.cycles=(reduce ((.value.daily // {}) | to_entries[]) as $day ({};
+        ($mapping[$day.key] // null) as $start |
+        if $start == null or $start == "" then . else .[$start]=((.[$start] // 0) + $day.value) end
+      ))
+    ) | .periodsSeeded=true
+  ' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
+  install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+}
+
 traffic_update_file() {
-  local samples=${1:-'{}'} mark_collected=${2:-1} today cutoff now inventory limits tmp
+  local samples=${1:-'{}'} mark_collected=${2:-1} today cutoff now period_start inventory limits tmp
   traffic_init_file
+  traffic_seed_periods || return 1
   today=$(traffic_today); cutoff=$(traffic_retention_start); now=$(traffic_now)
+  period_start=$(traffic_period_start "$now") || return 1
   inventory=$(traffic_inventory_json)
   limits=$(traffic_rolled_limits_json "$now")
   tmp=$(temp_file)
-  jq --arg today "$today" --arg cutoff "$cutoff" --arg now "$now" --argjson markCollected "$mark_collected" \
+  jq --arg today "$today" --arg cutoff "$cutoff" --arg periodStart "$period_start" --arg now "$now" --argjson markCollected "$mark_collected" \
      --argjson samples "$samples" --argjson inventory "$inventory" --argjson limits "$limits" '
     .inbounds=(.inbounds // {}) |
     reduce ($inventory|to_entries[]) as $item (.;
@@ -225,17 +286,20 @@ traffic_update_file() {
     reduce ($limits|to_entries[]) as $item (.;
       if .inbounds[$item.key] then .inbounds[$item.key].limit=$item.value else . end
     ) |
+    .inbounds |= with_entries(
+      .value.daily=((.value.daily // {}) | with_entries(select(.key >= $cutoff and .key <= $today))) |
+      .value.cycles=((.value.cycles // {}) | with_entries(select(.key == $periodStart))) |
+      if .value.cycles[$periodStart] == null then .value.daily |= del(.[$today]) else . end
+    ) |
     reduce ($samples|to_entries[]) as $item (.;
       .inbounds[$item.key]=(.inbounds[$item.key] // {protocol:"unknown",port:0,deleted:($inventory[$item.key] == null),daily:{}}) |
       .inbounds[$item.key].daily[$today]=((.inbounds[$item.key].daily[$today] // 0) + $item.value) |
+      .inbounds[$item.key].cycles[$periodStart]=((.inbounds[$item.key].cycles[$periodStart] // 0) + $item.value) |
       if .inbounds[$item.key].limit.enabled==true then
         .inbounds[$item.key].limit.usedBytes=((.inbounds[$item.key].limit.usedBytes // 0) + $item.value)
       else . end
     ) |
-    .inbounds |= with_entries(
-      .value.daily=((.value.daily // {}) | with_entries(select(.key >= $cutoff and .key <= $today)))
-    ) |
-    .inbounds |= with_entries(select((.value.deleted != true) or ((.value.daily|length) > 0) or (.value.limit.enabled==true))) |
+    .inbounds |= with_entries(select((.value.deleted != true) or ((.value.daily|length) > 0) or ((.value.cycles|length) > 0) or (.value.limit.enabled==true))) |
     if $markCollected then .lastCollectedAt=$now else . end
   ' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
   install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
@@ -533,9 +597,12 @@ traffic_rename_records() {
     if .inbounds[$old] then
       (.inbounds[$new] // {daily:{}}) as $target |
       (.inbounds[$old]) as $source |
-      .inbounds[$new]=($source + {daily:($target.daily // {}),deleted:false}) |
+      .inbounds[$new]=($source + {daily:($target.daily // {}),cycles:($target.cycles // {}),deleted:false}) |
       reduce (($source.daily // {})|to_entries[]) as $day (.;
         .inbounds[$new].daily[$day.key]=((.inbounds[$new].daily[$day.key] // 0) + $day.value)
+      ) |
+      reduce (($source.cycles // {})|to_entries[]) as $cycle (.;
+        .inbounds[$new].cycles[$cycle.key]=((.inbounds[$new].cycles[$cycle.key] // 0) + $cycle.value)
       ) |
       del(.inbounds[$old])
     else . end
@@ -760,9 +827,54 @@ traffic_limit_remove() {
   info "已取消入站 ${tag} 的流量限制。"
 }
 
+traffic_period_show() {
+  local day clock start end
+  traffic_init_file
+  day=$(jq -r '.period.day' "$TRAFFIC_FILE")
+  clock=$(jq -r '.period.time' "$TRAFFIC_FILE")
+  IFS=$'\t' read -r start end < <(traffic_period_bounds "$(traffic_now)")
+  printf '月度统计起点：每月 %s 日 %s\n当前周期：%s ～ %s\n' "$day" "${clock:0:5}" "$start" "$end"
+}
+
+traffic_period_set() {
+  local day=${1-} clock=${2-} tmp rc=0
+  traffic_require_root traffic-period-set
+  if [[ -z $day ]]; then read -r -p '每月起始日期（1-31）: ' day || return 1; fi
+  if [[ -z $clock ]]; then read -r -p '起始时间（HH:MM）: ' clock || return 1; fi
+  [[ $day =~ ^[0-9]+$ ]] && ((10#$day >= 1 && 10#$day <= 31)) || { warn '日期必须是 1 到 31。'; return 1; }
+  [[ $clock =~ ^[0-9]{2}:[0-9]{2}$ ]] || { warn '时间格式必须是 HH:MM。'; return 1; }
+  clock+=:00
+  traffic_validate_timestamp "2026-01-01 $clock" || { warn '时间无效。'; return 1; }
+  day=$((10#$day))
+  traffic_init_file
+  if jq -e --argjson day "$day" --arg clock "$clock" '.period.day==$day and .period.time==$clock' "$TRAFFIC_FILE" >/dev/null; then
+    info '月度统计起点没有变化。'
+    traffic_period_show
+    return 0
+  fi
+  if traffic_is_enabled; then traffic_collect || return 1; fi
+  traffic_lock_acquire || return 1
+  tmp=$(temp_file)
+  jq --argjson day "$day" --arg clock "$clock" '.period={day:$day,time:$clock} | .periodsSeeded=false' "$TRAFFIC_FILE" >"$tmp" || rc=1
+  if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
+  rm -f "$tmp"
+  if ((rc == 0)); then traffic_update_file '{}' false || rc=1; fi
+  traffic_lock_release
+  ((rc == 0)) || return 1
+  info '月度统计起点已更新；已有每日记录按日期近似归入新周期。'
+  traffic_period_show
+}
+
 traffic_show() {
-  local start=${1:-$(traffic_retention_start)} end=${2:-$(traffic_today)} rows tag protocol port bytes deleted total status last limit_status exhausted display_order
-  traffic_validate_range "$start" "$end" || { warn "日期范围无效或超出最近三个月。"; return 1; }
+  local start=${1-} end=${2-} period=false rows tag protocol port bytes deleted total status last limit_status exhausted display_order
+  if [[ -n $start && -z $end ]]; then end=$(traffic_today); fi
+  if [[ -z $start && -z $end ]]; then
+    traffic_init_file
+    IFS=$'\t' read -r start end < <(traffic_period_bounds "$(traffic_now)")
+    period=true
+  else
+    traffic_validate_range "$start" "$end" || { warn "日期范围无效或超出当前周期。"; return 1; }
+  fi
   traffic_init_file; traffic_sync_inventory
   traffic_is_enabled && status="运行中" || status="已停止"
   last=$(jq -r '.lastCollectedAt // empty' "$TRAFFIC_FILE")
@@ -772,12 +884,13 @@ traffic_show() {
   print_table_cell_clipped "协议" 10; printf '| '
   print_table_cell "端口" 7; printf '| %14s\n' "总流量"
   display_order=$(jq -c '[.inbounds[]?.tag]' "$CONFIG_FILE" 2>/dev/null || printf '[]')
-  rows=$(jq -r --arg start "$start" --arg finish "$end" --argjson order "$display_order" '
+  rows=$(jq -r --arg start "$start" --arg finish "$end" --argjson period "$period" --argjson order "$display_order" '
     ($order | to_entries | map({key:.value,value:.key}) | from_entries) as $positions |
     .inbounds | to_entries |
     sort_by(if $positions[.key] != null then [0,$positions[.key]] else [1,.key] end)[] |
     [.key,(.value.protocol // "unknown"),((.value.port // 0)|tostring),
-     ([.value.daily | to_entries[]? | select(.key >= $start and .key <= $finish) | .value] | add // 0),
+     (if $period then (.value.cycles[$start] // 0)
+      else ([.value.daily | to_entries[]? | select(.key >= $start and .key <= $finish) | .value] | add // 0) end),
      (.value.deleted // false)] | @tsv
   ' "$TRAFFIC_FILE")
   if [[ -n $rows ]]; then
@@ -788,7 +901,11 @@ traffic_show() {
       print_table_cell "$port" 7; printf '| %14s\n' "$(traffic_format_bytes "$bytes")"
     done <<<"$rows"
   fi
-  total=$(traffic_range_total "$start" "$end")
+  if [[ $period == true ]]; then
+    total=$(jq --arg start "$start" '[.inbounds[]?.cycles[$start] // 0] | add // 0' "$TRAFFIC_FILE")
+  else
+    total=$(traffic_range_total "$start" "$end")
+  fi
   printf '%s\n全部入站：%s\n' '----------------------------------------------------------' "$(traffic_format_bytes "$total")"
   traffic_limits_are_enabled && limit_status="已启用" || limit_status="未启用"
   printf '流量限制：%s' "$limit_status"
@@ -803,7 +920,7 @@ traffic_prompt_range() {
   while true; do
     prompt_value candidate_start "开始日期" "$cutoff" || return 1
     traffic_validate_date "$candidate_start" || { warn "开始日期格式无效，请使用 YYYY-MM-DD。"; continue; }
-    traffic_iso_compare "$candidate_start" ge "$cutoff" || { warn "只保留最近三个月的数据，最早可选 ${cutoff}。"; continue; }
+    traffic_iso_compare "$candidate_start" ge "$cutoff" || { warn "只保留当前周期的数据，最早可选 ${cutoff}。"; continue; }
     break
   done
   while true; do
@@ -851,10 +968,10 @@ traffic_clear_tag_records() {
   [[ -n $tag ]] || traffic_select_record_tag tag || return 0
   traffic_collect || true; traffic_init_file
   jq -e --arg tag "$tag" '.inbounds[$tag] != null' "$TRAFFIC_FILE" >/dev/null || { warn "没有入站 ${tag} 的流量记录。"; return 1; }
-  confirm "清空入站 ${tag} 最近三个月的流量记录和当前周期已用流量？" N || return 0
+  confirm "清空入站 ${tag} 当前周期的流量记录和额度已用量？" N || return 0
   traffic_lock_acquire || return 1
   tmp=$(temp_file); jq --arg tag "$tag" '
-    .inbounds[$tag].daily={} |
+    .inbounds[$tag].daily={} | .inbounds[$tag].cycles={} |
     if .inbounds[$tag].limit.enabled==true then .inbounds[$tag].limit.usedBytes=0 else . end
   ' "$TRAFFIC_FILE" >"$tmp" || rc=1
   if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
@@ -873,7 +990,7 @@ traffic_clear_all_records() {
   traffic_lock_acquire || return 1
   tmp=$(temp_file); jq '
     .inbounds |= with_entries(
-      .value.daily={} |
+      .value.daily={} | .value.cycles={} |
       if .value.limit.enabled==true then .value.limit.usedBytes=0 else . end
     )
   ' "$TRAFFIC_FILE" >"$tmp" || rc=1
@@ -989,7 +1106,7 @@ traffic_enable() {
     warn "流量统计启动失败，已撤销运行时规则。"; return 1
   fi
   meta_resource_register trafficFile "$TRAFFIC_FILE"
-  info "流量统计已开启；每分钟保存一次，记录保留最近三个月。"
+  info "流量统计已开启；每分钟保存一次，只保留当前月度周期。"
 }
 
 traffic_disable() {

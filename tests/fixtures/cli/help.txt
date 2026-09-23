@@ -10,7 +10,8 @@ xrayctl - Xray Linux 管理脚本
   xrayctl status                  查看状态
   xrayctl start|stop|restart      服务控制
   xrayctl logs [行数]             查看服务日志
-  xrayctl traffic [开始日期] [结束日期] 查看按入站累计流量
+  xrayctl traffic [开始日期] [结束日期] 查看当前周期内按入站累计流量
+  xrayctl traffic period [show|set <日期> <HH:MM>] 查看/设置统一月度统计起点
   xrayctl traffic enable|disable       开启/停止流量统计
   xrayctl traffic limit show|enable|disable
   xrayctl traffic limit set <标签> <GB> <重置日>

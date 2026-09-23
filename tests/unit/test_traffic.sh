@@ -8,6 +8,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 XRAYCTL_TESTING=1 \
+XRAYCTL_TRAFFIC_NOW='2026-08-24 12:00:00' \
 XRAYCTL_CONFIG_DIR="$TMP/cfg" \
 XRAYCTL_CONFIG_FILE="$TMP/cfg/config.json" \
 XRAYCTL_META_FILE="$TMP/meta.json" \
@@ -49,14 +50,14 @@ traffic_validate_timestamp '2026-08-07 18:00:00'
 ! traffic_validate_timestamp '2026-08-07 24:00:00'
 
 XRAYCTL_TRAFFIC_TODAY=2026-08-24
-traffic_validate_range 2026-05-24 2026-08-24
+traffic_validate_range 2026-08-01 2026-08-24
 traffic_validate_range 2026-08-24 2026-08-24
-! traffic_validate_range 2026-05-23 2026-08-24
+! traffic_validate_range 2026-07-31 2026-08-24
 ! traffic_validate_range 2026-08-20 2026-08-19
 ! traffic_validate_range 2026-08-20 2026-08-25
 range_start=old; range_end=old
 traffic_prompt_range range_start range_end <<< $'\n\n'
-[[ $range_start == 2026-05-24 && $range_end == 2026-08-24 ]]
+[[ $range_start == 2026-08-01 && $range_end == 2026-08-24 ]]
 
 # Existing 0.5 traffic files gain the quota switch in the disabled state.
 printf '%s\n' '{"schema":1,"enabled":false,"backend":"","lastCollectedAt":"","inbounds":{}}' >"$TRAFFIC_FILE"
@@ -95,8 +96,8 @@ last=$(jq -r .lastCollectedAt "$TRAFFIC_FILE")
 traffic_sync_inventory
 [[ $(jq -r .lastCollectedAt "$TRAFFIC_FILE") == "$last" ]]
 
-output=$(traffic_show 2026-05-24 2026-08-24)
-grep -Fq '统计范围：2026-05-24 ～ 2026-08-24' <<<"$output"
+output=$(traffic_show 2026-08-01 2026-08-24)
+grep -Fq '统计范围：2026-08-01 ～ 2026-08-24' <<<"$output"
 grep -Fq '1.00 GB' <<<"$output"
 grep -Fq '全部入站：1.00 GB' <<<"$output"
 vless_line=$(grep -n '^vless[[:space:]]' <<<"$output" | cut -d: -f1)
@@ -107,15 +108,14 @@ http_line=$(grep -n '^http[[:space:]]' <<<"$output" | cut -d: -f1)
 # as a jq variable even though newer jq releases accept it in some contexts.
 ! grep -Eq -- '--arg(json)?[[:space:]]+end([[:space:]]|$)' src/traffic.sh
 
-# Entries older than the three-calendar-month cutoff are removed, while the
-# cutoff day and current day remain queryable.
+# Entries before the current period are removed, while its first date remains.
 tmp=$(temp_file)
-jq '.inbounds.vless.daily += {"2026-05-23":100,"2026-05-24":200}' "$TRAFFIC_FILE" >"$tmp"
+jq '.inbounds.vless.daily += {"2026-07-31":100,"2026-08-01":200}' "$TRAFFIC_FILE" >"$tmp"
 install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
 traffic_sync_inventory
 jq -e '
-  (.inbounds.vless.daily["2026-05-23"] == null) and
-  .inbounds.vless.daily["2026-05-24"]==200
+  (.inbounds.vless.daily["2026-07-31"] == null) and
+  .inbounds.vless.daily["2026-08-01"]==200
 ' "$TRAFFIC_FILE" >/dev/null
 
 # A rename preserves and merges daily history under the new inbound tag.
@@ -127,7 +127,7 @@ traffic_rename_records vless vless-new
 jq -e '
   (.inbounds.vless == null) and
   .inbounds["vless-new"].daily["2026-08-24"]==1073741824 and
-  .inbounds["vless-new"].daily["2026-05-24"]==200
+  .inbounds["vless-new"].daily["2026-08-01"]==200
 ' "$TRAFFIC_FILE" >/dev/null
 
 # Deleted inbounds keep their retained history and are marked for display.
@@ -460,5 +460,58 @@ traffic_limit_menu <<<"0" >/dev/null
 traffic_limits_are_enabled() { return 0; }
 traffic_limit_menu <<<"0" >/dev/null
 BASH_MENU_RETURN
+
+# A shared display period starts at the configured wall-clock time. Existing
+# daily data is seeded approximately, while new samples follow the exact
+# collection-side boundary; quota anchors are independent.
+XRAYCTL_TESTING=1 \
+XRAYCTL_TRAFFIC_TODAY=2026-08-24 \
+XRAYCTL_TRAFFIC_NOW='2026-08-24 12:00:00' \
+XRAYCTL_CONFIG_DIR="$TMP/period/cfg" \
+XRAYCTL_CONFIG_FILE="$TMP/period/cfg/config.json" \
+XRAYCTL_META_FILE="$TMP/period/meta.json" \
+XRAYCTL_TRAFFIC_FILE="$TMP/period/traffic.json" \
+XRAYCTL_CERT_DIR="$TMP/period/cfg/certs" \
+XRAYCTL_LOG_DIR="$TMP/period/log" \
+XRAYCTL_LOCK_FILE="$TMP/period/lock" \
+bash <<'BASH_PERIOD'
+set -Eeuo pipefail
+source ./xrayctl.sh
+write_default_config
+tmp=$(temp_file)
+jq '.inbounds=[{"protocol":"vless","tag":"vless","listen":"0.0.0.0","port":17225,"settings":{"clients":[]}}]' "$CONFIG_FILE" >"$tmp"
+mv -f "$tmp" "$CONFIG_FILE"
+traffic_init_file
+tmp=$(temp_file)
+jq '.inbounds.vless={protocol:"vless",port:17225,deleted:false,daily:{"2026-08-21":100,"2026-08-22":200,"2026-08-24":300},limit:{enabled:true,quotaBytes:1000,resetDay:7,anchorDay:7,anchorTime:"09:00:00",cycleStart:"2026-08-07 09:00:00",cycleEnd:"2026-09-07 09:00:00",usedBytes:600}}' "$TRAFFIC_FILE" >"$tmp"
+install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+traffic_period_set 22 18:30 >/dev/null
+! traffic_period_set 22 18:30:15 2>/dev/null
+[[ $(traffic_period_start '2026-08-22 18:29:59') == '2026-07-22 18:30:00' ]]
+[[ $(traffic_period_start '2026-08-22 18:30:00') == '2026-08-22 18:30:00' ]]
+[[ $(traffic_period_bounds '2026-08-24 12:00:00') == $'2026-08-22 18:30:00\t2026-09-22 18:30:00' ]]
+jq -e '.inbounds.vless.cycles["2026-08-22 18:30:00"]==500 and .inbounds.vless.limit.anchorDay==7 and .inbounds.vless.limit.usedBytes==600' "$TRAFFIC_FILE" >/dev/null
+output=$(traffic_show)
+grep -Fq '统计范围：2026-08-22 18:30:00 ～ 2026-09-22 18:30:00' <<<"$output"
+grep -Fq '全部入站：500 B' <<<"$output"
+MOCK_COUNTERS=$'vless\t50'
+traffic_read_counters() { printf '%s\n' "$MOCK_COUNTERS"; }
+traffic_rules_restore() { :; }
+traffic_set_enabled true
+tmp=$(temp_file)
+jq '.inbounds.vless.limit.cycleStart="2026-09-07 09:00:00" | .inbounds.vless.limit.cycleEnd="2026-10-07 09:00:00" | .inbounds.vless.limit.usedBytes=600' "$TRAFFIC_FILE" >"$tmp"
+install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+XRAYCTL_TRAFFIC_NOW='2026-09-22 18:29:59'
+XRAYCTL_TRAFFIC_TODAY=2026-09-22
+traffic_collect
+XRAYCTL_TRAFFIC_NOW='2026-09-22 18:30:00'
+traffic_collect
+jq -e '.inbounds.vless.cycles["2026-08-22 18:30:00"]==null and .inbounds.vless.cycles["2026-09-22 18:30:00"]==50 and .inbounds.vless.daily["2026-09-22"]==50 and (.inbounds.vless.daily|length)==1 and .inbounds.vless.limit.usedBytes==700' "$TRAFFIC_FILE" >/dev/null
+[[ $(traffic_period_start '2026-02-28 23:59:59') == '2026-02-22 18:30:00' ]]
+traffic_period_set 31 00:00 >/dev/null
+[[ $(traffic_period_bounds '2026-02-28 23:59:59') == $'2026-02-28 00:00:00\t2026-03-31 00:00:00' ]]
+[[ $(traffic_period_bounds '2028-02-29 12:00:00') == $'2028-02-29 00:00:00\t2028-03-31 00:00:00' ]]
+[[ $(traffic_period_bounds '2026-04-30 12:00:00') == $'2026-04-30 00:00:00\t2026-05-31 00:00:00' ]]
+BASH_PERIOD
 
 printf 'traffic accounting unit checks passed.\n'
