@@ -3,7 +3,7 @@ init_meta_base() {
 
   if [[ ! -s $META_FILE ]]; then
     printf '%s\n' \
-      '{"schema":4,"inbounds":{},"disabledInbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' \
+      '{"schema":4,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' \
       >"$META_FILE"
     chmod 600 "$META_FILE"
     return 0
@@ -15,7 +15,6 @@ init_meta_base() {
   if jq -e '
     type=="object" and (.schema|type)=="number" and (.schema >= 4) and
     ((.inbounds // {})|type)=="object" and
-    ((.disabledInbounds // {})|type)=="object" and
     ((.certificates // {})|type)=="object" and
     ((.managedResources // {})|type)=="object" and
      ((.migrations // {})|type)=="object" and
@@ -33,7 +32,6 @@ init_meta_base() {
   jq '
     .schema = ([.schema // 1, 4] | max) |
     .inbounds = (.inbounds // {}) |
-    .disabledInbounds = (.disabledInbounds // {}) |
     .certificates = (.certificates // {}) |
     .managedResources = (.managedResources // {}) |
      .migrations = (.migrations // {}) |
@@ -352,7 +350,6 @@ state_validate_metadata_candidate() {
     type=="object" and
     ((.schema // 1) | type=="number") and
     ((.inbounds // {}) | type=="object") and
-    ((.disabledInbounds // {}) | type=="object") and
     ((.certificates // {}) | type=="object") and
     ((.managedResources // {}) | type=="object") and
     ((.migrations // {}) | type=="object") and
@@ -495,7 +492,7 @@ _state_build_inbound_meta_set() {
 _state_build_inbound_meta_delete() {
   local current=$1 candidate=$2 tag=$3
   jq --arg tag "$tag" '
-    del(.inbounds[$tag], .disabledInbounds[$tag]) |
+    del(.inbounds[$tag]) |
     .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
     .domainTemplates.bindings = [.domainTemplates.bindings[]? | select(.inbound != $tag)]' \
     "$current" >"$candidate"
@@ -525,24 +522,6 @@ state_commit_inbound_rename() {
   state_commit "$1" _state_build_inbound_meta_rename "$2" "$3"
 }
 
-_state_build_inbound_meta_disable() {
-  local current=$1 candidate=$2 tag=$3 inbound=$4 position=$5
-  jq --arg tag "$tag" --argjson inbound "$inbound" --argjson position "$position" \
-    '.disabledInbounds[$tag]={config:$inbound,position:$position}' "$current" >"$candidate"
-}
-
-_state_build_inbound_meta_enable() {
-  local current=$1 candidate=$2 tag=$3
-  jq --arg tag "$tag" 'del(.disabledInbounds[$tag])' "$current" >"$candidate"
-}
-
-state_commit_inbound_disable() {
-  state_commit "$1" _state_build_inbound_meta_disable "$2" "$3" "$4"
-}
-
-state_commit_inbound_enable() {
-  state_commit "$1" _state_build_inbound_meta_enable "$2"
-}
 
 edit_config() {
   ensure_runtime_dependencies config-edit; ensure_config

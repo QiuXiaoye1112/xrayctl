@@ -503,7 +503,7 @@ prompt_outbound_tag() {
   local __var=$1 default=$2 tag_candidate
   while true; do
     prompt_validated_value tag_candidate "出站标签" "$default" validate_tag "标签只能包含字母、数字、点、下划线和横线。" || return 1
-    if outbound_exists "$tag_candidate" || inbound_tag_reserved "$tag_candidate"; then
+    if outbound_exists "$tag_candidate" || inbound_exists "$tag_candidate"; then
       warn "标签已存在，请重新输入。"
       continue
     fi

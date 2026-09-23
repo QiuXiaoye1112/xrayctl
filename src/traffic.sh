@@ -214,15 +214,7 @@ traffic_set_backend() {
 
 traffic_inventory_json() {
   if [[ -f $CONFIG_FILE ]]; then
-    if [[ -f $META_FILE ]]; then
-      jq --slurpfile meta "$META_FILE" '
-        ([.inbounds[]? | {key:.tag,value:{protocol:.protocol,port:.port,disabled:false}}] +
-         [($meta[0].disabledInbounds // {})[] | .config |
-           {key:.tag,value:{protocol:.protocol,port:.port,disabled:true}}]) | from_entries
-      ' "$CONFIG_FILE" 2>/dev/null || printf '{}\n'
-    else
-      jq '[.inbounds[]? | {key:.tag,value:{protocol:.protocol,port:.port,disabled:false}}] | from_entries' "$CONFIG_FILE" 2>/dev/null || printf '{}\n'
-    fi
+    jq '[.inbounds[]? | {key:.tag,value:{protocol:.protocol,port:.port,disabled:false}}] | from_entries' "$CONFIG_FILE" 2>/dev/null || printf '{}\n'
   else
     printf '{}\n'
   fi
@@ -891,7 +883,7 @@ traffic_show() {
   print_table_cell_clipped "标签" 20; printf '| '
   print_table_cell_clipped "协议" 10; printf '| '
   print_table_cell "端口" 7; printf '| %14s\n' "总流量"
-  display_order=$(jq -c --slurpfile meta "$META_FILE" '[.inbounds[]?.tag] + (($meta[0].disabledInbounds // {})|keys)' "$CONFIG_FILE" 2>/dev/null || printf '[]')
+  display_order=$(jq -c '[.inbounds[]?.tag]' "$CONFIG_FILE" 2>/dev/null || printf '[]')
   rows=$(jq -r --arg start "$start" --arg finish "$end" --argjson period "$period" --argjson order "$display_order" '
     ($order | to_entries | map({key:.value,value:.key}) | from_entries) as $positions |
     .inbounds | to_entries |
@@ -954,9 +946,8 @@ traffic_select_record_tag() {
     elif [[ $__deleted == true ]]; then labels+=("${__item}(已删除)")
     else labels+=("$__item"); fi
   done < <(
-    jq -r --slurpfile traffic "$TRAFFIC_FILE" --slurpfile meta "$META_FILE" '
+    jq -r --slurpfile traffic "$TRAFFIC_FILE" '
       ([.inbounds[]?.tag | {tag:.,deleted:false,disabled:false}] +
-       [($meta[0].disabledInbounds // {}) | keys[] | {tag:.,deleted:false,disabled:true}] +
        [($traffic[0].inbounds // {} | to_entries[]? |
          select(.value.deleted==true) | {tag:.key,deleted:true,disabled:false})]) |
       reduce .[] as $item ([];

@@ -94,7 +94,7 @@ done
 for spec in '1 add_client node' '2 rename_client node' '3 rotate_client_credential node' '4 delete_client node'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route client_menu_for_tag "$choice" "$action" node
 done
-for spec in '1 add_inbound' '3 print_all_share_links' '4 toggle_inbound' '5 delete_inbound'; do
+for spec in '1 add_inbound' '3 print_all_share_links' '4 delete_inbound'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route inbound_menu "$choice" "$action"
 done
 select_inbound() { printf -v "$1" '%s' node; }
