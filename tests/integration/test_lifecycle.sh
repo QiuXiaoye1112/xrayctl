@@ -15,6 +15,8 @@ trap cleanup_test_root EXIT
 export XRAYCTL_CONFIG_DIR="${TEST_ROOT}/config"
 export XRAYCTL_CONFIG_FILE="${XRAYCTL_CONFIG_DIR}/config.json"
 export XRAYCTL_META_FILE="${XRAYCTL_CONFIG_DIR}/meta.json"
+export XRAYCTL_TRAFFIC_FILE="${TEST_ROOT}/traffic.json"
+export XRAYCTL_LOCK_FILE="${TEST_ROOT}/xrayctl.lock"
 export XRAYCTL_CERT_DIR="${XRAYCTL_CONFIG_DIR}/certs"
 export XRAYCTL_LOG_DIR="${TEST_ROOT}/logs"
 export XRAYCTL_BACKUP_DIR="${TEST_ROOT}/backups"
@@ -91,6 +93,28 @@ assign_outbound vless-node proxy-out >/dev/null
 assert_eq proxy-out "$(jq -r '.routing.rules[]|select(.ruleTag=="xrayctl-outbound:vless-node")|.outboundTag' "$CONFIG_FILE")" \
   "outbound assignment failed"
 
+# Disabling removes only the listener; enabling restores its configuration and
+# retains routing, metadata and traffic quota state.
+traffic_init_file
+candidate=$(temp_file)
+jq '.inbounds["vless-node"]={protocol:"vless",port:8443,daily:{},cycles:{},limit:{enabled:true,usedBytes:123,quotaBytes:1000}}' "$TRAFFIC_FILE" >"$candidate"
+install -m 600 "$candidate" "$TRAFFIC_FILE"; rm -f "$candidate"
+disable_inbound vless-node 1 >/dev/null
+assert_eq 0 "$(jq '.inbounds|length' "$CONFIG_FILE")" "disabled inbound remained active"
+assert_eq 8443 "$(jq -r '.disabledInbounds["vless-node"].config.port' "$META_FILE")" "disabled inbound snapshot missing"
+assert_eq proxy-out "$(jq -r '.routing.rules[]|select(.ruleTag=="xrayctl-outbound:vless-node")|.outboundTag' "$CONFIG_FILE")" "disabled inbound lost routing"
+assert_eq 123 "$(jq -r '.inbounds["vless-node"].limit.usedBytes' "$TRAFFIC_FILE")" "disabled inbound lost quota usage"
+inbound_is_disabled vless-node || fail "disabled inbound status missing"
+[[ $(list_inbounds) == *'已禁用'* ]] || fail "disabled inbound absent from list"
+port_in_use_os() { return 0; }
+assert_failure enable_inbound vless-node
+assert_eq 0 "$(jq '.inbounds|length' "$CONFIG_FILE")" "port conflict changed running config"
+port_in_use_os() { return 1; }
+enable_inbound vless-node >/dev/null
+assert_eq 8443 "$(jq -r '.inbounds[0].port' "$CONFIG_FILE")" "enabled inbound was not restored"
+assert_eq null "$(jq -r '.disabledInbounds["vless-node"]' "$META_FILE")" "disabled snapshot remained after enable"
+assert_eq 123 "$(jq -r '.inbounds["vless-node"].limit.usedBytes' "$TRAFFIC_FILE")" "enabling reset quota usage"
+
 detect_local_ips() { printf '%s\t%s\t%s\n' '203.0.113.10 (IPv4)' 203.0.113.10 eth0; }
 selected_option_count=0
 choose() { selected_option_count=$#; printf -v "$1" '%s' 1; }
@@ -124,9 +148,12 @@ assert_eq "$before_failed_assignment" "$(jq -S . "$CONFIG_FILE")" \
 delete_client vless-node robert 1 >/dev/null
 assert_eq 1 "$(jq '.inbounds[0].settings.clients|length' "$CONFIG_FILE")" "client delete failed"
 
+disable_inbound vless-node 1 >/dev/null
 delete_inbound vless-node 1 >/dev/null
 assert_eq 0 "$(jq '.inbounds|length' "$CONFIG_FILE")" "inbound delete failed"
 assert_eq null "$(jq -r '.inbounds["vless-node"]' "$META_FILE")" "inbound metadata delete failed"
+assert_eq null "$(jq -r '.disabledInbounds["vless-node"]' "$META_FILE")" "disabled inbound snapshot survived delete"
+assert_eq null "$(jq -r '.inbounds["vless-node"].limit' "$TRAFFIC_FILE")" "disabled inbound quota survived delete"
 assert_eq 0 "$(jq '[.routing.rules[]?|select(.ruleTag=="xrayctl-outbound:vless-node")]|length' "$CONFIG_FILE")" \
   "inbound delete left routing state"
 

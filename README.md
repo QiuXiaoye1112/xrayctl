@@ -152,6 +152,8 @@ xrayctl inbound add              # 新建入站
 xrayctl inbound rename OLD NEW   # 修改入站名称
 xrayctl inbound modify TAG       # 修改监听地址/端口/公网地址
 xrayctl inbound transport TAG    # 修改传输和安全方式
+xrayctl inbound disable TAG --yes # 暂停该入站，保留配置和流量额度
+xrayctl inbound enable TAG       # 恢复入站
 xrayctl inbound delete TAG       # 删除入站
 xrayctl outbound list            # 查看入站与出站规则
 xrayctl outbound add             # 添加 SOCKS5/HTTP 出站

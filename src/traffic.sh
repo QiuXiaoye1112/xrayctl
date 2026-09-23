@@ -214,7 +214,15 @@ traffic_set_backend() {
 
 traffic_inventory_json() {
   if [[ -f $CONFIG_FILE ]]; then
-    jq '[.inbounds[]? | {key:.tag,value:{protocol:.protocol,port:.port}}] | from_entries' "$CONFIG_FILE" 2>/dev/null || printf '{}\n'
+    if [[ -f $META_FILE ]]; then
+      jq --slurpfile meta "$META_FILE" '
+        ([.inbounds[]? | {key:.tag,value:{protocol:.protocol,port:.port,disabled:false}}] +
+         [($meta[0].disabledInbounds // {})[] | .config |
+           {key:.tag,value:{protocol:.protocol,port:.port,disabled:true}}]) | from_entries
+      ' "$CONFIG_FILE" 2>/dev/null || printf '{}\n'
+    else
+      jq '[.inbounds[]? | {key:.tag,value:{protocol:.protocol,port:.port,disabled:false}}] | from_entries' "$CONFIG_FILE" 2>/dev/null || printf '{}\n'
+    fi
   else
     printf '{}\n'
   fi
@@ -282,7 +290,7 @@ traffic_update_file() {
     reduce ($inventory|to_entries[]) as $item (.;
       .inbounds[$item.key]=((.inbounds[$item.key] // {daily:{}}) + $item.value + {deleted:false})
     ) |
-    .inbounds |= with_entries(.value.deleted = ($inventory[.key] == null)) |
+    .inbounds |= with_entries(.value.deleted = ($inventory[.key] == null) | .value.disabled = ($inventory[.key].disabled // false)) |
     reduce ($limits|to_entries[]) as $item (.;
       if .inbounds[$item.key] then .inbounds[$item.key].limit=$item.value else . end
     ) |
@@ -883,7 +891,7 @@ traffic_show() {
   print_table_cell_clipped "标签" 20; printf '| '
   print_table_cell_clipped "协议" 10; printf '| '
   print_table_cell "端口" 7; printf '| %14s\n' "总流量"
-  display_order=$(jq -c '[.inbounds[]?.tag]' "$CONFIG_FILE" 2>/dev/null || printf '[]')
+  display_order=$(jq -c --slurpfile meta "$META_FILE" '[.inbounds[]?.tag] + (($meta[0].disabledInbounds // {})|keys)' "$CONFIG_FILE" 2>/dev/null || printf '[]')
   rows=$(jq -r --arg start "$start" --arg finish "$end" --argjson period "$period" --argjson order "$display_order" '
     ($order | to_entries | map({key:.value,value:.key}) | from_entries) as $positions |
     .inbounds | to_entries |
@@ -891,11 +899,11 @@ traffic_show() {
     [.key,(.value.protocol // "unknown"),((.value.port // 0)|tostring),
      (if $period then (.value.cycles[$start] // 0)
       else ([.value.daily | to_entries[]? | select(.key >= $start and .key <= $finish) | .value] | add // 0) end),
-     (.value.deleted // false)] | @tsv
+     (.value.deleted // false),(.value.disabled // false)] | @tsv
   ' "$TRAFFIC_FILE")
   if [[ -n $rows ]]; then
-    while IFS=$'\t' read -r tag protocol port bytes deleted; do
-      [[ $deleted != true ]] || tag="${tag}(已删除)"
+    while IFS=$'\t' read -r tag protocol port bytes deleted disabled; do
+      if [[ $disabled == true ]]; then tag="${tag}(已禁用)"; elif [[ $deleted == true ]]; then tag="${tag}(已删除)"; fi
       print_table_cell_clipped "$tag" 20; printf '| '
       print_table_cell_clipped "$protocol" 10; printf '| '
       print_table_cell "$port" 7; printf '| %14s\n' "$(traffic_format_bytes "$bytes")"
@@ -934,23 +942,26 @@ traffic_prompt_range() {
 }
 
 traffic_select_record_tag() {
-  local __var=$1 __item __deleted __answer __selected
+  local __var=$1 __item __deleted __disabled __answer __selected
   local tags=() labels=()
   ensure_config
   traffic_init_file
   traffic_sync_inventory || return 1
-  while IFS=$'\t' read -r __item __deleted; do
+  while IFS=$'\t' read -r __item __deleted __disabled; do
     [[ -n $__item ]] || continue
     tags+=("$__item")
-    if [[ $__deleted == true ]]; then labels+=("${__item}(已删除)"); else labels+=("$__item"); fi
+    if [[ $__disabled == true ]]; then labels+=("${__item}(已禁用)")
+    elif [[ $__deleted == true ]]; then labels+=("${__item}(已删除)")
+    else labels+=("$__item"); fi
   done < <(
-    jq -r --slurpfile traffic "$TRAFFIC_FILE" '
-      ([.inbounds[]?.tag | {tag:.,deleted:false}] +
+    jq -r --slurpfile traffic "$TRAFFIC_FILE" --slurpfile meta "$META_FILE" '
+      ([.inbounds[]?.tag | {tag:.,deleted:false,disabled:false}] +
+       [($meta[0].disabledInbounds // {}) | keys[] | {tag:.,deleted:false,disabled:true}] +
        [($traffic[0].inbounds // {} | to_entries[]? |
-         select(.value.deleted==true) | {tag:.key,deleted:true})]) |
+         select(.value.deleted==true) | {tag:.key,deleted:true,disabled:false})]) |
       reduce .[] as $item ([];
         if any(.[]; .tag==$item.tag) then . else . + [$item] end) |
-      .[] | [.tag,(.deleted|tostring)] | @tsv
+      .[] | [.tag,(.deleted|tostring),(.disabled|tostring)] | @tsv
     ' "$CONFIG_FILE"
   )
   ((${#tags[@]})) || { warn "没有可清空的入站流量记录。"; return 1; }

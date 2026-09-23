@@ -22,6 +22,8 @@ xrayctl - Xray Linux 管理脚本
   xrayctl inbound rename <旧标签> <新标签>
   xrayctl inbound modify <标签>   修改监听端口/地址
   xrayctl inbound transport <标签> 修改传输与安全方式
+  xrayctl inbound disable <标签> [--yes] 禁用入站
+  xrayctl inbound enable <标签>  启用入站
   xrayctl inbound delete <标签> [--yes]
   xrayctl outbound list
   xrayctl outbound add

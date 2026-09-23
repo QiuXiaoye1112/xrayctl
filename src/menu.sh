@@ -402,13 +402,14 @@ inbound_menu() {
     heading "入站管理"
     list_inbounds
     printf '\n完整配置: %s\n\n' "$CONFIG_FILE"
-    printf '1) 新增入站\n2) 管理已有入站\n3) 全部分享链接\n4) 删除入站\n0) 返回\n'
+    printf '1) 新增入站\n2) 管理已有入站\n3) 全部分享链接\n4) 禁用/启用入站\n5) 删除入站\n0) 返回\n'
     read -r -p "请选择: " choice || { echo; return; }
     case $choice in
       1) run_menu_action add_inbound; pause;;
       2) select_inbound tag && manage_inbound_menu "$tag";;
       3) run_menu_action print_all_share_links; pause;;
-      4) run_menu_action delete_inbound; pause;;
+      4) run_menu_action toggle_inbound; pause;;
+      5) run_menu_action delete_inbound; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -599,6 +600,8 @@ xrayctl - Xray Linux 管理脚本
   xrayctl inbound rename <旧标签> <新标签>
   xrayctl inbound modify <标签>   修改监听端口/地址
   xrayctl inbound transport <标签> 修改传输与安全方式
+  xrayctl inbound disable <标签> [--yes] 禁用入站
+  xrayctl inbound enable <标签>  启用入站
   xrayctl inbound delete <标签> [--yes]
   xrayctl outbound list
   xrayctl outbound add
@@ -684,6 +687,8 @@ dispatch() {
         list) ensure_config; list_inbounds;; add) add_inbound;; show) ensure_config; show_inbound "${2:?请提供入站标签}";;
         rename) rename_inbound "${2-}" "${3-}";;
         modify|edit) modify_inbound_basic "${2-}";; transport|stream) modify_inbound_transport "${2-}";;
+        disable) disable_inbound "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
+        enable) enable_inbound "${2-}";;
         delete|remove) delete_inbound "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
         *) die "未知 inbound 子命令：${1}";; esac;;
     outbound)
