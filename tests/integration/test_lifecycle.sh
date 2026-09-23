@@ -106,6 +106,9 @@ assert_eq proxy-out "$(jq -r '.routing.rules[]|select(.ruleTag=="xrayctl-outboun
 assert_eq 123 "$(jq -r '.inbounds["vless-node"].limit.usedBytes' "$TRAFFIC_FILE")" "disabled inbound lost quota usage"
 inbound_is_disabled vless-node || fail "disabled inbound status missing"
 [[ $(list_inbounds) == *'已禁用'* ]] || fail "disabled inbound absent from list"
+tag=""
+select_inbound_toggle tag
+assert_eq vless-node "$tag" "toggle selector did not return the selected tag"
 port_in_use_os() { return 0; }
 assert_failure enable_inbound vless-node
 assert_eq 0 "$(jq '.inbounds|length' "$CONFIG_FILE")" "port conflict changed running config"

@@ -180,12 +180,12 @@ select_inbound() {
 }
 
 select_inbound_toggle() {
-  local __var=$1 answer row tag state
+  local __var=$1 answer state __item_tag
   local tags=() labels=()
   ensure_config
-  while IFS=$'\t' read -r tag state; do
-    [[ -n $tag ]] || continue
-    tags+=("$tag"); labels+=("${tag}（${state}）")
+  while IFS=$'\t' read -r __item_tag state; do
+    [[ -n $__item_tag ]] || continue
+    tags+=("$__item_tag"); labels+=("${__item_tag}（${state}）")
   done < <(jq -r --slurpfile meta "$META_FILE" '
     ([.inbounds[] | [.tag,"运行中"]] +
      [($meta[0].disabledInbounds // {}) | keys[] | [.,"已禁用"]])[] | @tsv' "$CONFIG_FILE")
