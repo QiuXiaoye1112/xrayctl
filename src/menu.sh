@@ -601,7 +601,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl inbound modify <标签>   修改监听端口/地址
   xrayctl inbound transport <标签> 修改传输与安全方式
   xrayctl inbound disable <标签> [--yes] 禁用入站
-  xrayctl inbound enable <标签>  启用入站
+  xrayctl inbound enable <标签> [--yes] 启用入站
   xrayctl inbound delete <标签> [--yes]
   xrayctl outbound list
   xrayctl outbound add
@@ -688,7 +688,7 @@ dispatch() {
         rename) rename_inbound "${2-}" "${3-}";;
         modify|edit) modify_inbound_basic "${2-}";; transport|stream) modify_inbound_transport "${2-}";;
         disable) disable_inbound "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
-        enable) enable_inbound "${2-}";;
+        enable) enable_inbound "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
         delete|remove) delete_inbound "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
         *) die "未知 inbound 子命令：${1}";; esac;;
     outbound)

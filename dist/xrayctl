@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="b2a608bb1941"
+readonly XRAYCTL_BUILD_COMMIT="61ea1e48b9fb"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -2831,21 +2831,19 @@ add_inbound() {
 list_inbounds() {
   ensure_config
   local count
-  count=$(jq --slurpfile meta "$META_FILE" '(.inbounds|length)+(($meta[0].disabledInbounds // {})|length)' "$CONFIG_FILE")
+  count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站。"; return; fi
   print_table_cell_clipped "标签" 20; printf '| '; print_table_cell_clipped "协议" 8; printf '| '
   print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 7; printf '| '
-  print_table_cell_clipped "安全" 10; printf '| 监听 | 状态\n'
-  jq -r --slurpfile meta "$META_FILE" '
-    ([.inbounds[] | {config:.,status:"运行中"}] +
-     [($meta[0].disabledInbounds // {})[] | {config:.config,status:"已禁用"}])[] |
-    [.config.tag,.config.protocol,(.config.port|tostring),
-     (if (.config.streamSettings.network // .config.streamSettings.method // "raw")=="websocket" then "ws" else (.config.streamSettings.network // .config.streamSettings.method // "raw") end),
-     (.config.streamSettings.security // "none"),(.config.listen // "0.0.0.0"),.status] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r tag protocol port method security listen status; do
+  print_table_cell_clipped "安全" 10; printf '| 监听\n'
+  jq -r '.inbounds | to_entries[] |
+    [.value.tag,.value.protocol,(.value.port|tostring),
+     (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end),
+     (.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r tag protocol port method security listen; do
         print_table_cell_clipped "$tag" 20; printf '| '; print_table_cell_clipped "$protocol" 8; printf '| '
         print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 7; printf '| '
-        print_table_cell_clipped "$security" 10; printf '| %s | %s\n' "$listen" "$status"
+        print_table_cell_clipped "$security" 10; printf '| %s\n' "$listen"
       done
 }
 
@@ -2907,7 +2905,7 @@ disable_inbound() {
 
 enable_inbound() {
   ensure_runtime_dependencies inbound-enable; ensure_config
-  local tag=${1-} entry inbound position port candidate
+  local tag=${1-} assume_yes=${2:-0} entry inbound position port candidate
   [[ -n $tag ]] || select_inbound_toggle tag || return 0
   inbound_is_disabled "$tag" || { warn "入站 ${tag} 未处于禁用状态。"; return 1; }
   inbound_exists "$tag" && { warn "运行配置中已有同名入站：${tag}。"; return 1; }
@@ -2919,6 +2917,7 @@ enable_inbound() {
     warn "端口 ${port} 已被占用，无法启用入站 ${tag}。"
     return 1
   fi
+  [[ $assume_yes == 1 ]] || confirm "启用入站 ${tag}？将重新应用 Xray 配置。" N || return 0
   candidate=$(temp_file)
   jq --argjson inbound "$inbound" --argjson position "$position" '
     .inbounds |= (.[0:$position] + [$inbound] + .[$position:])' "$CONFIG_FILE" >"$candidate"
@@ -7218,7 +7217,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl inbound modify <标签>   修改监听端口/地址
   xrayctl inbound transport <标签> 修改传输与安全方式
   xrayctl inbound disable <标签> [--yes] 禁用入站
-  xrayctl inbound enable <标签>  启用入站
+  xrayctl inbound enable <标签> [--yes] 启用入站
   xrayctl inbound delete <标签> [--yes]
   xrayctl outbound list
   xrayctl outbound add
@@ -7305,7 +7304,7 @@ dispatch() {
         rename) rename_inbound "${2-}" "${3-}";;
         modify|edit) modify_inbound_basic "${2-}";; transport|stream) modify_inbound_transport "${2-}";;
         disable) disable_inbound "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
-        enable) enable_inbound "${2-}";;
+        enable) enable_inbound "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
         delete|remove) delete_inbound "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)";;
         *) die "未知 inbound 子命令：${1}";; esac;;
     outbound)

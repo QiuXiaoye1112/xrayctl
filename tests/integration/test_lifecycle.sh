@@ -105,7 +105,6 @@ assert_eq 8443 "$(jq -r '.disabledInbounds["vless-node"].config.port' "$META_FIL
 assert_eq proxy-out "$(jq -r '.routing.rules[]|select(.ruleTag=="xrayctl-outbound:vless-node")|.outboundTag' "$CONFIG_FILE")" "disabled inbound lost routing"
 assert_eq 123 "$(jq -r '.inbounds["vless-node"].limit.usedBytes' "$TRAFFIC_FILE")" "disabled inbound lost quota usage"
 inbound_is_disabled vless-node || fail "disabled inbound status missing"
-[[ $(list_inbounds) == *'已禁用'* ]] || fail "disabled inbound absent from list"
 tag=""
 select_inbound_toggle tag
 assert_eq vless-node "$tag" "toggle selector did not return the selected tag"
@@ -113,6 +112,10 @@ port_in_use_os() { return 0; }
 assert_failure enable_inbound vless-node
 assert_eq 0 "$(jq '.inbounds|length' "$CONFIG_FILE")" "port conflict changed running config"
 port_in_use_os() { return 1; }
+confirm() { return 1; }
+enable_inbound vless-node >/dev/null
+assert_eq 0 "$(jq '.inbounds|length' "$CONFIG_FILE")" "cancelled enable changed running config"
+confirm() { return 0; }
 enable_inbound vless-node >/dev/null
 assert_eq 8443 "$(jq -r '.inbounds[0].port' "$CONFIG_FILE")" "enabled inbound was not restored"
 assert_eq null "$(jq -r '.disabledInbounds["vless-node"]' "$META_FILE")" "disabled snapshot remained after enable"

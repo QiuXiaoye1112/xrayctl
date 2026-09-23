@@ -136,21 +136,19 @@ add_inbound() {
 list_inbounds() {
   ensure_config
   local count
-  count=$(jq --slurpfile meta "$META_FILE" '(.inbounds|length)+(($meta[0].disabledInbounds // {})|length)' "$CONFIG_FILE")
+  count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站。"; return; fi
   print_table_cell_clipped "标签" 20; printf '| '; print_table_cell_clipped "协议" 8; printf '| '
   print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 7; printf '| '
-  print_table_cell_clipped "安全" 10; printf '| 监听 | 状态\n'
-  jq -r --slurpfile meta "$META_FILE" '
-    ([.inbounds[] | {config:.,status:"运行中"}] +
-     [($meta[0].disabledInbounds // {})[] | {config:.config,status:"已禁用"}])[] |
-    [.config.tag,.config.protocol,(.config.port|tostring),
-     (if (.config.streamSettings.network // .config.streamSettings.method // "raw")=="websocket" then "ws" else (.config.streamSettings.network // .config.streamSettings.method // "raw") end),
-     (.config.streamSettings.security // "none"),(.config.listen // "0.0.0.0"),.status] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r tag protocol port method security listen status; do
+  print_table_cell_clipped "安全" 10; printf '| 监听\n'
+  jq -r '.inbounds | to_entries[] |
+    [.value.tag,.value.protocol,(.value.port|tostring),
+     (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end),
+     (.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r tag protocol port method security listen; do
         print_table_cell_clipped "$tag" 20; printf '| '; print_table_cell_clipped "$protocol" 8; printf '| '
         print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 7; printf '| '
-        print_table_cell_clipped "$security" 10; printf '| %s | %s\n' "$listen" "$status"
+        print_table_cell_clipped "$security" 10; printf '| %s\n' "$listen"
       done
 }
 
@@ -212,7 +210,7 @@ disable_inbound() {
 
 enable_inbound() {
   ensure_runtime_dependencies inbound-enable; ensure_config
-  local tag=${1-} entry inbound position port candidate
+  local tag=${1-} assume_yes=${2:-0} entry inbound position port candidate
   [[ -n $tag ]] || select_inbound_toggle tag || return 0
   inbound_is_disabled "$tag" || { warn "入站 ${tag} 未处于禁用状态。"; return 1; }
   inbound_exists "$tag" && { warn "运行配置中已有同名入站：${tag}。"; return 1; }
@@ -224,6 +222,7 @@ enable_inbound() {
     warn "端口 ${port} 已被占用，无法启用入站 ${tag}。"
     return 1
   fi
+  [[ $assume_yes == 1 ]] || confirm "启用入站 ${tag}？将重新应用 Xray 配置。" N || return 0
   candidate=$(temp_file)
   jq --argjson inbound "$inbound" --argjson position "$position" '
     .inbounds |= (.[0:$position] + [$inbound] + .[$position:])' "$CONFIG_FILE" >"$candidate"
