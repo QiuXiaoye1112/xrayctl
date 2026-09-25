@@ -42,7 +42,7 @@ set_inputs() { INPUTS=("$@"); INPUT_INDEX=0; }
 read() {
   local target=${!#} value arg prompt=0
   for arg in "$@"; do [[ $arg == -p ]] && prompt=1; done
-  if ((prompt == 0)); then builtin read "$@"; return; fi
+  if ((prompt == 0)); then builtin read -r "$@"; return; fi
   ((INPUT_INDEX < ${#INPUTS[@]})) || return 1
   value=${INPUTS[$INPUT_INDEX]}
   INPUT_INDEX=$((INPUT_INDEX + 1))
