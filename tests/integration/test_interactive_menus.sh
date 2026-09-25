@@ -40,7 +40,9 @@ INPUTS=()
 INPUT_INDEX=0
 set_inputs() { INPUTS=("$@"); INPUT_INDEX=0; }
 read() {
-  local target=${!#} value
+  local target=${!#} value arg prompt=0
+  for arg in "$@"; do [[ $arg == -p ]] && prompt=1; done
+  if ((prompt == 0)); then builtin read "$@"; return; fi
   ((INPUT_INDEX < ${#INPUTS[@]})) || return 1
   value=${INPUTS[$INPUT_INDEX]}
   INPUT_INDEX=$((INPUT_INDEX + 1))
@@ -69,7 +71,7 @@ exercise_menu_route() {
   local menu=$1 choice=$2 expected=$3
   shift 3
   : >"$EVENT_LOG"
-  set_inputs "$choice" 0
+  set_inputs "$choice" 0 0
   "$menu" "$@" >/dev/null
   assert_recorded "$expected"
 }
@@ -104,20 +106,20 @@ exercise_menu_route inbound_menu 2 'manage_inbound_menu node'
 # shellcheck source=../../src/menu.sh
 source "${REPO_ROOT}/src/menu.sh"
 
-exercise_menu_route domain_rule_menu 1 'add_domain_rule node    --prompt'
-exercise_menu_route domain_rule_menu 2 'delete_domain_rule node'
+jq -n '{inbounds:[{tag:"node",protocol:"vless"}],outbounds:[{tag:"direct",protocol:"freedom"}],routing:{rules:[]}}' >"$CONFIG_FILE"
+: >"$EVENT_LOG"; set_inputs 1 2 0 0; domain_rule_menu >/dev/null
+assert_recorded 'add_domain_rule node    --prompt'
+: >"$EVENT_LOG"; set_inputs 1 3 0 0; domain_rule_menu >/dev/null
+assert_recorded 'delete_domain_rule node   --direct-only'
 
-# An empty inbound list must leave the warning visible before returning to the
-# parent menu instead of immediately redrawing it.
-warn() { record warn "$@"; }
-pause() { record pause; }
-select_inbound() { warn '没有可选入站。'; return 1; }
+# An empty inbound list should report its state and still allow returning.
+jq -n '{inbounds:[],outbounds:[{tag:"direct",protocol:"freedom"}],routing:{rules:[]}}' >"$CONFIG_FILE"
+info() { record info "$@"; }
 : >"$EVENT_LOG"
+set_inputs 0
 domain_rule_menu >/dev/null
-assert_recorded 'warn 没有可选入站。'
-assert_recorded 'pause'
-warn() { :; }
-pause() { :; }
+assert_recorded 'info 还没有可管理的入站。'
+info() { :; }
 
 for spec in '1 issue_certificate' '2 import_certificate' '3 list_certificates' '4 delete_managed_certificate' '6 renew_managed_certificates'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route certificate_menu "$choice" "$action"
