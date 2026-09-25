@@ -102,9 +102,9 @@ domain_rule_menu() {
 }
 
 select_inbound_template() {
-  local inbound=$1 __var=$2 answer template_name template_outbound
+  local inbound=$1 __var=$2 answer template_name
   local -a names=()
-  while IFS=$'\t' read -r template_name template_outbound; do
+  while IFS=$'\t' read -r template_name _; do
     [[ -n $template_name ]] && names+=("$template_name")
   done < <(list_inbound_template_bindings "$inbound")
   ((${#names[@]})) || { warn "当前入站还没有应用模板。"; return 1; }

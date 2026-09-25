@@ -220,7 +220,7 @@ detect_local_ips() {
           printf '%s (IPv4)\t%s\t%s\n' "$ip" "$ip" "$iface"
           ;;
         6)
-          validate_ip_literal "$ip" && ! validate_ipv4 "$ip" || continue
+          if ! validate_ip_literal "$ip" || validate_ipv4 "$ip"; then continue; fi
           [[ $ip == ::1 || $ip == fe80:* ]] && continue
           printf '%s (IPv6)\t%s\t%s\n' "$ip" "$ip" "$iface"
           ;;

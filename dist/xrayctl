@@ -490,7 +490,7 @@ detect_local_ips() {
           printf '%s (IPv4)\t%s\t%s\n' "$ip" "$ip" "$iface"
           ;;
         6)
-          validate_ip_literal "$ip" && ! validate_ipv4 "$ip" || continue
+          if ! validate_ip_literal "$ip" || validate_ipv4 "$ip"; then continue; fi
           [[ $ip == ::1 || $ip == fe80:* ]] && continue
           printf '%s (IPv6)\t%s\t%s\n' "$ip" "$ip" "$iface"
           ;;
@@ -3519,15 +3519,15 @@ traffic_inventory_json() {
 }
 
 traffic_rolled_limits_json() {
-  local now=$1 tag quota reset_day anchor_day anchor_time cycle_start cycle_end used next
+  local now=$1 tag quota reset_day anchor_day anchor_time cycle_start cycle_end used next_limit_boundary
   traffic_init_file
   while IFS=$'\t' read -r tag quota anchor_day anchor_time cycle_start cycle_end used; do
     [[ -n $tag ]] || continue
     if ! traffic_validate_timestamp "$cycle_start" || ! traffic_validate_timestamp "$cycle_end"; then continue; fi
     while traffic_iso_compare "$now" ge "$cycle_end"; do
       cycle_start=$cycle_end
-      next=$(traffic_limit_next_timestamp "$cycle_start" "$anchor_day" "$anchor_time") || break 2
-      cycle_end=$next
+      next_limit_boundary=$(traffic_limit_next_timestamp "$cycle_start" "$anchor_day" "$anchor_time") || break 2
+      cycle_end=$next_limit_boundary
       used=0
     done
     reset_day=$anchor_day
@@ -4139,7 +4139,10 @@ traffic_period_set() {
   traffic_require_root traffic-period-set
   if [[ -z $day ]]; then read -r -p '每月起始日期（1-31）: ' day || return 1; fi
   if [[ -z $clock ]]; then read -r -p '起始时间（HH:MM）: ' clock || return 1; fi
-  [[ $day =~ ^[0-9]+$ ]] && ((10#$day >= 1 && 10#$day <= 31)) || { warn '日期必须是 1 到 31。'; return 1; }
+  if [[ ! $day =~ ^[0-9]+$ ]] || ((10#$day < 1 || 10#$day > 31)); then
+    warn '日期必须是 1 到 31。'
+    return 1
+  fi
   [[ $clock =~ ^[0-9]{2}:[0-9]{2}$ ]] || { warn '时间格式必须是 HH:MM。'; return 1; }
   clock+=:00
   traffic_validate_timestamp "2026-01-01 $clock" || { warn '时间无效。'; return 1; }
@@ -5324,7 +5327,7 @@ delete_domain_rule() {
           select(xrayctl_domain_rule and (.inboundTag // [])==[\$inbound] and ((.template // \"\") != \"\")) |
           select(.domain == [(if \$match==\"suffix\" then \"domain:\" else \"full:\" end) + \$domain])] | length" "$CONFIG_FILE")
       if ((template_owned > 0)); then
-        die "该域名规则由模板管理，请在“管理模板”中调整模板或移除模板。"
+        die '该域名规则由模板管理，请在“管理模板”中调整模板或移除模板。'
       fi
       die "找不到域名规则：${selected_inbound} ${match} ${domain}"
     fi
@@ -6631,9 +6634,9 @@ domain_rule_menu() {
 }
 
 select_inbound_template() {
-  local inbound=$1 __var=$2 answer template_name template_outbound
+  local inbound=$1 __var=$2 answer template_name
   local -a names=()
-  while IFS=$'\t' read -r template_name template_outbound; do
+  while IFS=$'\t' read -r template_name _; do
     [[ -n $template_name ]] && names+=("$template_name")
   done < <(list_inbound_template_bindings "$inbound")
   ((${#names[@]})) || { warn "当前入站还没有应用模板。"; return 1; }

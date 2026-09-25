@@ -882,7 +882,7 @@ delete_domain_rule() {
           select(xrayctl_domain_rule and (.inboundTag // [])==[\$inbound] and ((.template // \"\") != \"\")) |
           select(.domain == [(if \$match==\"suffix\" then \"domain:\" else \"full:\" end) + \$domain])] | length" "$CONFIG_FILE")
       if ((template_owned > 0)); then
-        die "该域名规则由模板管理，请在“管理模板”中调整模板或移除模板。"
+        die '该域名规则由模板管理，请在“管理模板”中调整模板或移除模板。'
       fi
       die "找不到域名规则：${selected_inbound} ${match} ${domain}"
     fi

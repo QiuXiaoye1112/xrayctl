@@ -221,15 +221,15 @@ traffic_inventory_json() {
 }
 
 traffic_rolled_limits_json() {
-  local now=$1 tag quota reset_day anchor_day anchor_time cycle_start cycle_end used next
+  local now=$1 tag quota reset_day anchor_day anchor_time cycle_start cycle_end used next_limit_boundary
   traffic_init_file
   while IFS=$'\t' read -r tag quota anchor_day anchor_time cycle_start cycle_end used; do
     [[ -n $tag ]] || continue
     if ! traffic_validate_timestamp "$cycle_start" || ! traffic_validate_timestamp "$cycle_end"; then continue; fi
     while traffic_iso_compare "$now" ge "$cycle_end"; do
       cycle_start=$cycle_end
-      next=$(traffic_limit_next_timestamp "$cycle_start" "$anchor_day" "$anchor_time") || break 2
-      cycle_end=$next
+      next_limit_boundary=$(traffic_limit_next_timestamp "$cycle_start" "$anchor_day" "$anchor_time") || break 2
+      cycle_end=$next_limit_boundary
       used=0
     done
     reset_day=$anchor_day
@@ -841,7 +841,10 @@ traffic_period_set() {
   traffic_require_root traffic-period-set
   if [[ -z $day ]]; then read -r -p '每月起始日期（1-31）: ' day || return 1; fi
   if [[ -z $clock ]]; then read -r -p '起始时间（HH:MM）: ' clock || return 1; fi
-  [[ $day =~ ^[0-9]+$ ]] && ((10#$day >= 1 && 10#$day <= 31)) || { warn '日期必须是 1 到 31。'; return 1; }
+  if [[ ! $day =~ ^[0-9]+$ ]] || ((10#$day < 1 || 10#$day > 31)); then
+    warn '日期必须是 1 到 31。'
+    return 1
+  fi
   [[ $clock =~ ^[0-9]{2}:[0-9]{2}$ ]] || { warn '时间格式必须是 HH:MM。'; return 1; }
   clock+=:00
   traffic_validate_timestamp "2026-01-01 $clock" || { warn '时间无效。'; return 1; }
