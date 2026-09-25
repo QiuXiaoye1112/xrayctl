@@ -387,4 +387,32 @@ assert_eq 1 "$(jq '[.outbounds[]|select(.tag=="proxy-custom")]|length' "$CONFIG_
 assert_eq 1 "$(jq '[.routing.rules[]|select(.ruleTag=="user-custom")]|length' "$CONFIG_FILE")" \
   'custom routing rule disappeared after refused outbound delete'
 
+(
+  lock_requested=0
+  ensure_runtime_dependencies() { lock_requested=1; }
+  select_inbound() {
+    [[ $lock_requested == 0 ]] || fail 'outbound assignment locked before inbound selection'
+    printf -v "$1" '%s' vless-20000
+  }
+  detect_local_ips() { printf '%s\t%s\t%s\n' '198.51.100.77 (IPv4)' 198.51.100.77 eth0; }
+  choose() {
+    [[ $lock_requested == 0 ]] || fail 'outbound assignment locked before outbound selection'
+    local target=$1 label index=0
+    shift 2
+    for label in "$@"; do
+      index=$((index + 1))
+      [[ $label == 198.51.100.77 ]] && { printf -v "$target" '%s' "$index"; return 0; }
+    done
+    fail 'detected local IP was not offered for selection'
+  }
+  local_tag=$(_freedom_tag_for_ip 198.51.100.77)
+  ! outbound_exists "$local_tag" || fail 'test local outbound already exists'
+  assign_outbound >/dev/null
+  assert_eq 1 "$lock_requested" 'outbound assignment did not lock before writing'
+  assert_eq 198.51.100.77 "$(jq -r --arg tag "$local_tag" '.outbounds[]|select(.tag==$tag)|.sendThrough' "$CONFIG_FILE")" \
+    'selected local outbound was not created after locking'
+  assert_eq "$local_tag" "$(jq -r '.routing.rules[]|select(.ruleTag=="xrayctl-outbound:vless-20000")|.outboundTag' "$CONFIG_FILE")" \
+    'selected local outbound was not assigned'
+)
+
 printf 'ok - Xray domain routing rules, ordering, lifecycle and outbound safety pass\n'

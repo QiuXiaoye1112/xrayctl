@@ -536,7 +536,7 @@ add_outbound() {
 }
 
 select_outbound() {
-  local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} candidate_tag answer local_tag
+  local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} __ipvar=${4-} candidate_tag answer local_tag
   local tags=() local_ips=() local_ip_tags=() local_raw_ips=() proxy_tags=() local_tags=()
   ((include_direct == 0)) || tags+=("direct")
   while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || proxy_tags+=("$candidate_tag"); done < <(
@@ -583,18 +583,28 @@ select_outbound() {
       done
     fi
     [[ -n $ip ]] || { error "无法解析本地 IP。"; return 1; }
-    chosen=$(_ensure_freedom_outbound "$ip") || { error "无法创建本地出口。"; return 1; }
+    if [[ -n $__ipvar ]]; then
+      printf -v "$__ipvar" '%s' "$ip"
+    else
+      chosen=$(_ensure_freedom_outbound "$ip") || { error "无法创建本地出口。"; return 1; }
+    fi
   fi
   printf -v "$__var" '%s' "$chosen"
 }
 
 assign_outbound() {
-  ensure_runtime_dependencies outbound-assign; ensure_config
-  local inbound=${1-} outbound=${2-} rule_tag tmp
+  ensure_config
+  local inbound=${1-} outbound=${2-} selected_local_ip="" rule_tag tmp
   [[ -n $inbound ]] || select_inbound inbound '^(vless|socks|http)$' || return
   inbound_exists "$inbound" || die "找不到入站：$inbound"
   inbound_require_supported_configuration "$inbound"
-  [[ -n $outbound ]] || select_outbound outbound 1 || return
+  [[ -n $outbound ]] || select_outbound outbound 1 1 selected_local_ip || return
+  ensure_runtime_dependencies outbound-assign; ensure_config
+  inbound_exists "$inbound" || die "找不到入站：$inbound"
+  inbound_require_supported_configuration "$inbound"
+  if [[ -n $selected_local_ip ]]; then
+    outbound=$(_ensure_freedom_outbound "$selected_local_ip") || { error "无法创建本地出口。"; return 1; }
+  fi
   outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
   rule_tag="xrayctl-outbound:${inbound}"
   tmp=$(temp_file)
