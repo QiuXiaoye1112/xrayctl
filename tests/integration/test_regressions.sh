@@ -98,4 +98,33 @@ link_output=$(print_links proxy)
 grep -Fq 'hello%5Cworld' <<<"$link_output" || fail "share export did not URI-encode the original password"
 ! grep -Fq 'hello%5C%5Cworld' <<<"$link_output" || fail "share export doubled a backslash"
 
-pass "transport compatibility, legacy deletion, restore validation, and share escaping regressions pass"
+# Upgrading from a layout that kept a regular xrayctl copy at the symlink path
+# must back that copy up and take over, while foreign files stay protected.
+quick_dir="$TEST_ROOT/quick-command"
+quick_real="$quick_dir/xrayctl"
+quick_link="$quick_dir/bin/xrayctl"
+mkdir -p "$(dirname "$quick_link")"
+printf '%s\n' '# xrayctl - Xray Linux terminal manager' 'current release' >"$quick_real"
+printf '%s\n' '# xrayctl - Xray Linux terminal manager' 'previous release' >"$quick_link"
+chmod 755 "$quick_real" "$quick_link"
+QUICK_COMMAND="$quick_real"
+QUICK_SYMLINK="$quick_link"
+install_quick_command >/dev/null
+[[ -L $quick_link ]] || fail "legacy quick command file was not replaced by a symlink"
+assert_eq "$quick_real" "$(readlink "$quick_link")" "quick command symlink does not point at the installed script"
+backup_files=("$quick_dir"/bin/xrayctl.bak-*)
+[[ -e ${backup_files[0]} ]] || fail "legacy quick command file was not backed up"
+assert_eq 'previous release' "$(sed -n 2p "${backup_files[0]}")" "quick command backup lost the previous release"
+
+foreign_link="$quick_dir/bin/foreign"
+printf '#!/bin/sh\necho foreign\n' >"$foreign_link"
+chmod 755 "$foreign_link"
+QUICK_SYMLINK="$foreign_link"
+set +e
+(install_quick_command) >/dev/null 2>&1
+foreign_status=$?
+set -e
+((foreign_status != 0)) || fail "foreign quick command path was overwritten"
+assert_eq '#!/bin/sh' "$(sed -n 1p "$foreign_link")" "foreign quick command file changed"
+
+pass "transport compatibility, legacy deletion, restore validation, share escaping, and quick command upgrade regressions pass"

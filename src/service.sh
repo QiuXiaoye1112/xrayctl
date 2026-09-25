@@ -209,7 +209,7 @@ install_or_update_xray() {
 }
 
 install_quick_command() {
-  local source=${BASH_SOURCE[0]:-} downloaded=""
+  local source=${BASH_SOURCE[0]:-} downloaded="" backup=""
   mkdir -p "$(dirname "$QUICK_COMMAND")" "$(dirname "$QUICK_SYMLINK")"
 
   if [[ -n $source && -r $source ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$source" 2>/dev/null; then
@@ -239,7 +239,14 @@ install_quick_command() {
   fi
   [[ -z $downloaded ]] || rm -f "$downloaded"
   if [[ -e $QUICK_SYMLINK && ! -L $QUICK_SYMLINK && ! $QUICK_SYMLINK -ef $QUICK_COMMAND ]]; then
-    die "${QUICK_SYMLINK} 已存在且不是本脚本，拒绝覆盖。"
+    if ! grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_SYMLINK" 2>/dev/null; then
+      die "${QUICK_SYMLINK} 已存在且不是本脚本，拒绝覆盖。"
+    fi
+    # Older layouts installed a regular script at the symlink path; keep it as
+    # a fallback copy instead of refusing the upgrade.
+    backup="${QUICK_SYMLINK}.bak-$(timestamp)"
+    cp -p "$QUICK_SYMLINK" "$backup" || die "无法备份旧版快捷命令：${QUICK_SYMLINK}"
+    info "旧版快捷命令已备份：${backup}"
   fi
   ln -sfn "$QUICK_COMMAND" "$QUICK_SYMLINK"
   info "快捷命令已安装：xrayctl"
