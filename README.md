@@ -95,7 +95,12 @@ BBR 是主机全局开关，xrayctl 与 sbctl 都读取内核当前状态，也�
 ### Debian、Ubuntu、CentOS 等 systemd 系统
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh?xrayctl_cache=$(date +%s)" | sudo bash
+commit=$(curl -fsSL "https://api.github.com/repos/QiuXiaoye1112/xrayctl/git/ref/heads/main?xrayctl_cache=$(date +%s)" | sed -nE 's/.*"sha":[[:space:]]*"([0-9a-f]{40})".*/\1/p')
+if [ "${#commit}" -eq 40 ]; then
+  curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/${commit}/install.sh" | sudo bash
+else
+  echo '无法确认 xrayctl main 提交版本，安装已取消。' >&2
+fi
 ```
 
 ### Alpine Linux（OpenRC）
@@ -103,13 +108,23 @@ curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install
 Alpine 默认自带 BusyBox `wget`，可以直接安装：
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
+commit=$(wget -qO- "https://api.github.com/repos/QiuXiaoye1112/xrayctl/git/ref/heads/main?xrayctl_cache=$(date +%s)" | sed -n 's/.*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p')
+if [ "${#commit}" -eq 40 ]; then
+  wget -qO- "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/${commit}/alpine/install.sh" | sh
+else
+  echo '无法确认 xrayctl main 提交版本，安装已取消。' >&2
+fi
 ```
 
 如果 Alpine 已安装 `curl`，也可以使用：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
+commit=$(curl -fsSL "https://api.github.com/repos/QiuXiaoye1112/xrayctl/git/ref/heads/main?xrayctl_cache=$(date +%s)" | sed -n 's/.*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p')
+if [ "${#commit}" -eq 40 ]; then
+  curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/${commit}/alpine/install.sh" | sh
+else
+  echo '无法确认 xrayctl main 提交版本，安装已取消。' >&2
+fi
 ```
 
 > Alpine bootstrap 会先通过 `apk` 准备 Bash、curl、证书和解压工具；业务代码与 systemd 版完全共用。
@@ -119,16 +134,26 @@ curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/i
 指定 Xray 版本：
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh?xrayctl_cache=$(date +%s)" | sudo bash -s -- 26.3.27
+commit=$(curl -fsSL "https://api.github.com/repos/QiuXiaoye1112/xrayctl/git/ref/heads/main?xrayctl_cache=$(date +%s)" | sed -nE 's/.*"sha":[[:space:]]*"([0-9a-f]{40})".*/\1/p')
+if [ "${#commit}" -eq 40 ]; then
+  curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/${commit}/install.sh" | sudo bash -s -- 26.3.27
+else
+  echo '无法确认 xrayctl main 提交版本，安装已取消。' >&2
+fi
 ```
 
 如果希望先检查脚本再执行，可以手动下载：
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/dist/xrayctl?xrayctl_cache=$(date +%s)" -o xrayctl
-chmod +x xrayctl
-sudo ./xrayctl install
-xrayctl
+commit=$(curl -fsSL "https://api.github.com/repos/QiuXiaoye1112/xrayctl/git/ref/heads/main?xrayctl_cache=$(date +%s)" | sed -nE 's/.*"sha":[[:space:]]*"([0-9a-f]{40})".*/\1/p')
+if [ "${#commit}" -eq 40 ]; then
+  curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/${commit}/dist/xrayctl" -o xrayctl
+  chmod +x xrayctl
+  sudo ./xrayctl install
+  xrayctl
+else
+  echo '无法确认 xrayctl main 提交版本，安装已取消。' >&2
+fi
 ```
 
 推荐的新入站组合是 `VLESS → REALITY → RAW`。它不需要域名证书，顺序对应脚本中的“入站协议 → 加密方式 → 传输方式”。

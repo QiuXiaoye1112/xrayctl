@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/dist/xrayctl}"
+readonly SCRIPT_OVERRIDE="${XRAYCTL_SCRIPT_URL:-}"
 readonly TARGET="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"
 
 info() { printf '[xrayctl] %s\n' "$*"; }
@@ -24,7 +24,17 @@ cleanup() { rm -rf "$temp_dir"; }
 trap cleanup EXIT
 
 info "正在下载 xrayctl..."
-download_url=$SCRIPT_URL
+if [[ -n $SCRIPT_OVERRIDE ]]; then
+  download_url=$SCRIPT_OVERRIDE
+else
+  ref_json=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
+    --connect-timeout 15 --max-time 30 \
+    "https://api.github.com/repos/QiuXiaoye1112/xrayctl/git/ref/heads/main?xrayctl_cache=$(date +%s)") \
+    || die "无法查询 xrayctl main 的提交版本。"
+  commit=$(printf '%s\n' "$ref_json" | sed -nE 's/.*"sha":[[:space:]]*"([0-9a-f]{40})".*/\1/p')
+  [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "无法确认 xrayctl main 的提交版本，拒绝安装可能过期的文件。"
+  download_url="https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/${commit}/dist/xrayctl"
+fi
 if [[ $download_url == *\?* ]]; then
   download_url="${download_url}&xrayctl_cache=$(date +%s)"
 else

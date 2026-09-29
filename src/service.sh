@@ -209,7 +209,7 @@ install_or_update_xray() {
 }
 
 install_quick_command() {
-  local source=${BASH_SOURCE[0]:-} downloaded="" backup="" download_url=""
+  local source=${BASH_SOURCE[0]:-} downloaded="" backup="" download_url="" ref_json="" commit=""
   mkdir -p "$(dirname "$QUICK_COMMAND")" "$(dirname "$QUICK_SYMLINK")"
 
   if [[ -n $source && -r $source ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$source" 2>/dev/null; then
@@ -220,6 +220,15 @@ install_quick_command() {
     downloaded=$(temp_file)
     info "正在下载快捷命令脚本。"
     download_url=$SCRIPT_DOWNLOAD_URL
+    if [[ -z ${XRAYCTL_SCRIPT_URL:-} ]]; then
+      ref_json=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
+        --connect-timeout 15 --max-time 30 \
+        "https://api.github.com/repos/QiuXiaoye1112/xrayctl/git/ref/heads/main?xrayctl_cache=$(date +%s)") \
+        || die "无法查询 xrayctl main 的提交版本。"
+      commit=$(printf '%s\n' "$ref_json" | sed -nE 's/.*"sha":[[:space:]]*"([0-9a-f]{40})".*/\1/p')
+      [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "无法确认 xrayctl main 的提交版本，拒绝安装可能过期的文件。"
+      download_url="https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/${commit}/dist/xrayctl"
+    fi
     if [[ $download_url == *\?* ]]; then
       download_url="${download_url}&xrayctl_cache=$(date +%s)"
     else
