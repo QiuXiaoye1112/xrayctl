@@ -108,6 +108,7 @@ traffic_sync_inventory
 [[ $(jq -r .lastCollectedAt "$TRAFFIC_FILE") == "$last" ]]
 
 output=$(traffic_show 2026-08-01 2026-08-24)
+! grep -Fq '统计口径' <<<"$output"
 grep -Fq '统计范围：2026-08-01 ～ 2026-08-24' <<<"$output"
 grep -Fq '2.00 GB' <<<"$output"
 grep -Fq '全部入站：2.00 GB' <<<"$output"
@@ -241,6 +242,9 @@ output=$(traffic_limits_show)
 grep -Fq '已设置：1  ·  已禁用：1' <<<"$output"
 grep -Fq '100.00%' <<<"$output"
 grep -Fq '已禁用' <<<"$output"
+output=$(traffic_show)
+grep -Fq '流量限制：已启用' <<<"$output"
+! grep -Fq '已禁用入站' <<<"$output"
 MOCK_COUNTERS=""
 traffic_limits_disable >/dev/null
 ! traffic_limits_are_enabled
@@ -436,7 +440,8 @@ nft() {
   local IFS=' '; printf '%s\n' "$*" >>"$CASE_DIR/nft-calls"
 }
 traffic_rules_restore
-grep -Fq 'add rule inet xrayctl_traffic input tcp dport 17225 comment "xrayctl-traffic:block:vless" drop' "$CASE_DIR/nft-calls"
+grep -Fq 'add rule inet xrayctl_traffic input tcp dport 17225 drop comment "xrayctl-traffic:block:vless"' "$CASE_DIR/nft-calls"
+grep -Fq 'add rule inet xrayctl_traffic output tcp sport 17225 drop comment "xrayctl-traffic:block:vless"' "$CASE_DIR/nft-calls"
 grep -Fq 'add rule inet xrayctl_traffic input tcp dport 17225 counter comment "xrayctl-traffic:count:vless"' "$CASE_DIR/nft-calls"
 grep -Fq 'add rule inet xrayctl_traffic input tcp dport 5000 counter comment "xrayctl-traffic:count:socks"' "$CASE_DIR/nft-calls"
 grep -Fq 'add rule inet xrayctl_traffic input udp dport 5000 counter comment "xrayctl-traffic:count:socks"' "$CASE_DIR/nft-calls"

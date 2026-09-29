@@ -515,8 +515,8 @@ traffic_restore_nft_rules() {
     blocked=0; traffic_limit_is_blocked "$tag" && blocked=1
     while IFS= read -r transport_protocol; do
       if ((blocked)); then
-        nft add rule inet "$TRAFFIC_NFT_TABLE" input "$transport_protocol" dport "$port" comment "$block_comment" drop || return 1
-        nft add rule inet "$TRAFFIC_NFT_TABLE" output "$transport_protocol" sport "$port" comment "$block_comment" drop || return 1
+        nft add rule inet "$TRAFFIC_NFT_TABLE" input "$transport_protocol" dport "$port" drop comment "$block_comment" || return 1
+        nft add rule inet "$TRAFFIC_NFT_TABLE" output "$transport_protocol" sport "$port" drop comment "$block_comment" || return 1
       fi
       nft add rule inet "$TRAFFIC_NFT_TABLE" input "$transport_protocol" dport "$port" counter comment "$count_comment" || return 1
       nft add rule inet "$TRAFFIC_NFT_TABLE" output "$transport_protocol" sport "$port" counter comment "$count_comment" || return 1
@@ -879,7 +879,7 @@ traffic_period_set() {
 }
 
 traffic_show() {
-  local start=${1-} end=${2-} period=false rows tag protocol port bytes deleted total status last limit_status exhausted display_order
+  local start=${1-} end=${2-} period=false rows tag protocol port bytes deleted total status last limit_status display_order
   if [[ -n $start && -z $end ]]; then end=$(traffic_today); fi
   if [[ -z $start && -z $end ]]; then
     traffic_init_file
@@ -892,7 +892,7 @@ traffic_show() {
   traffic_is_enabled && status="运行中" || status="已停止"
   last=$(jq -r '.lastCollectedAt // empty' "$TRAFFIC_FILE")
   heading "流量信息"
-  printf '统计状态：%s\n统计范围：%s ～ %s\n最后采集：%s\n统计口径：入站收发合计 × 2（代理两段流量估算）\n\n' "$status" "$start" "$end" "${last:-尚未采集}"
+  printf '统计状态：%s\n统计范围：%s ～ %s\n最后采集：%s\n\n' "$status" "$start" "$end" "${last:-尚未采集}"
   print_table_cell_clipped "标签" 20; printf '| '
   print_table_cell_clipped "协议" 10; printf '| '
   print_table_cell "端口" 7; printf '| %14s\n' "总流量"
@@ -921,10 +921,7 @@ traffic_show() {
   fi
   printf '%s\n全部入站：%s\n' '----------------------------------------------------------' "$(traffic_format_bytes "$total")"
   traffic_limits_are_enabled && limit_status="已启用" || limit_status="未启用"
-  printf '流量限制：%s' "$limit_status"
-  exhausted=$(traffic_exhausted_tags)
-  [[ -z $exhausted ]] || printf '  |  已禁用入站：%s' "$exhausted"
-  printf '\n'
+  printf '流量限制：%s\n' "$limit_status"
 }
 
 traffic_prompt_range() {
