@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="f8a0baad330e"
+readonly XRAYCTL_BUILD_COMMIT="f96159ea0c15"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -3449,7 +3449,7 @@ traffic_period_bounds() {
 }
 
 traffic_default_json() {
-  printf '%s\n' '{"schema":1,"enabled":false,"limitsEnabled":false,"backend":"","lastCollectedAt":"","period":{"day":1,"time":"00:00:00"},"periodsSeeded":false,"inbounds":{}}'
+  printf '%s\n' '{"schema":1,"accountingMultiplier":2,"enabled":false,"limitsEnabled":false,"backend":"","lastCollectedAt":"","period":{"day":1,"time":"00:00:00"},"periodsSeeded":false,"inbounds":{}}'
 }
 
 traffic_init_file() {
@@ -3584,6 +3584,16 @@ traffic_update_file() {
     reduce ($limits|to_entries[]) as $item (.;
       if .inbounds[$item.key] then .inbounds[$item.key].limit=$item.value else . end
     ) |
+    # Legacy totals counted only the client-facing connection. Migrate once so
+    # stored history and used quota match the two-leg accounting convention.
+    if .accountingMultiplier == 2 then . else
+      .inbounds |= with_entries(
+        .value.daily=((.value.daily // {}) | with_entries(.value *= 2)) |
+        .value.cycles=((.value.cycles // {}) | with_entries(.value *= 2)) |
+        if .value.limit.usedBytes != null then .value.limit.usedBytes *= 2 else . end
+      ) |
+      .accountingMultiplier=2
+    end |
     .inbounds |= with_entries(
       .value.daily=((.value.daily // {}) | with_entries(select(.key >= $cutoff and .key <= $today))) |
       .value.cycles=((.value.cycles // {}) | with_entries(select(.key == $periodStart))) |
@@ -3591,10 +3601,10 @@ traffic_update_file() {
     ) |
     reduce ($samples|to_entries[]) as $item (.;
       .inbounds[$item.key]=(.inbounds[$item.key] // {protocol:"unknown",port:0,deleted:($inventory[$item.key] == null),daily:{}}) |
-      .inbounds[$item.key].daily[$today]=((.inbounds[$item.key].daily[$today] // 0) + $item.value) |
-      .inbounds[$item.key].cycles[$periodStart]=((.inbounds[$item.key].cycles[$periodStart] // 0) + $item.value) |
+      .inbounds[$item.key].daily[$today]=((.inbounds[$item.key].daily[$today] // 0) + ($item.value * 2)) |
+      .inbounds[$item.key].cycles[$periodStart]=((.inbounds[$item.key].cycles[$periodStart] // 0) + ($item.value * 2)) |
       if .inbounds[$item.key].limit.enabled==true then
-        .inbounds[$item.key].limit.usedBytes=((.inbounds[$item.key].limit.usedBytes // 0) + $item.value)
+        .inbounds[$item.key].limit.usedBytes=((.inbounds[$item.key].limit.usedBytes // 0) + ($item.value * 2))
       else . end
     ) |
     .inbounds |= with_entries(select((.value.deleted != true) or ((.value.daily|length) > 0) or ((.value.cycles|length) > 0) or (.value.limit.enabled==true))) |
@@ -4180,7 +4190,7 @@ traffic_show() {
   traffic_is_enabled && status="运行中" || status="已停止"
   last=$(jq -r '.lastCollectedAt // empty' "$TRAFFIC_FILE")
   heading "流量信息"
-  printf '统计状态：%s\n统计范围：%s ～ %s\n最后采集：%s\n\n' "$status" "$start" "$end" "${last:-尚未采集}"
+  printf '统计状态：%s\n统计范围：%s ～ %s\n最后采集：%s\n统计口径：入站收发合计 × 2（代理两段流量估算）\n\n' "$status" "$start" "$end" "${last:-尚未采集}"
   print_table_cell_clipped "标签" 20; printf '| '
   print_table_cell_clipped "协议" 10; printf '| '
   print_table_cell "端口" 7; printf '| %14s\n' "总流量"

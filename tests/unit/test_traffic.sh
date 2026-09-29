@@ -64,6 +64,16 @@ printf '%s\n' '{"schema":1,"enabled":false,"backend":"","lastCollectedAt":"","in
 traffic_init_file
 jq -e '.limitsEnabled==false' "$TRAFFIC_FILE" >/dev/null
 
+# Existing client-side totals are converted once, including quota usage.
+tmp=$(temp_file)
+jq '.periodsSeeded=true | .inbounds.vless={protocol:"vless",port:17225,daily:{"2026-08-24":100},cycles:{"2026-08-01 00:00:00":100},limit:{quotaBytes:1000,usedBytes:30}}' "$TRAFFIC_FILE" >"$tmp"
+install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+traffic_sync_inventory
+traffic_sync_inventory
+jq -e '.accountingMultiplier==2 and .inbounds.vless.daily["2026-08-24"]==200 and .inbounds.vless.cycles["2026-08-01 00:00:00"]==200 and .inbounds.vless.limit.usedBytes==60 and .inbounds.vless.limit.quotaBytes==1000' "$TRAFFIC_FILE" >/dev/null
+tmp=$(temp_file); traffic_default_json >"$tmp"
+install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+
 # Collection adds one sample to the current daily bucket and resets rules only
 # after the file was committed. Backend functions are mocked at this boundary.
 traffic_set_enabled true
@@ -76,9 +86,10 @@ traffic_collect
 jq -e '
   .enabled==true and
   .limitsEnabled==false and
-  .inbounds.vless.daily["2026-08-24"]==1073741824 and
-  .inbounds.socks.daily["2026-08-24"]==2048 and
-  .inbounds.http.daily["2026-08-24"]==4096
+  .accountingMultiplier==2 and
+  .inbounds.vless.daily["2026-08-24"]==2147483648 and
+  .inbounds.socks.daily["2026-08-24"]==4096 and
+  .inbounds.http.daily["2026-08-24"]==8192
 ' "$TRAFFIC_FILE" >/dev/null
 
 # A failed rule rebuild must not commit counters that will be read again on
@@ -98,8 +109,8 @@ traffic_sync_inventory
 
 output=$(traffic_show 2026-08-01 2026-08-24)
 grep -Fq '统计范围：2026-08-01 ～ 2026-08-24' <<<"$output"
-grep -Fq '1.00 GB' <<<"$output"
-grep -Fq '全部入站：1.00 GB' <<<"$output"
+grep -Fq '2.00 GB' <<<"$output"
+grep -Fq '全部入站：2.00 GB' <<<"$output"
 vless_line=$(grep -n '^vless[[:space:]]' <<<"$output" | cut -d: -f1)
 socks_line=$(grep -n '^socks[[:space:]]' <<<"$output" | cut -d: -f1)
 http_line=$(grep -n '^http[[:space:]]' <<<"$output" | cut -d: -f1)
@@ -126,7 +137,7 @@ traffic_sync_inventory
 traffic_rename_records vless vless-new
 jq -e '
   (.inbounds.vless == null) and
-  .inbounds["vless-new"].daily["2026-08-24"]==1073741824 and
+  .inbounds["vless-new"].daily["2026-08-24"]==2147483648 and
   .inbounds["vless-new"].daily["2026-08-01"]==200
 ' "$TRAFFIC_FILE" >/dev/null
 
@@ -135,7 +146,7 @@ tmp=$(temp_file)
 jq '.inbounds |= map(select(.tag!="socks"))' "$CONFIG_FILE" >"$tmp"
 mv -f "$tmp" "$CONFIG_FILE"
 traffic_sync_inventory
-jq -e '.inbounds.socks.deleted==true and .inbounds.socks.daily["2026-08-24"]==2048' "$TRAFFIC_FILE" >/dev/null
+jq -e '.inbounds.socks.deleted==true and .inbounds.socks.daily["2026-08-24"]==4096' "$TRAFFIC_FILE" >/dev/null
 
 # Clearing a selected inbound also offers retained records for inbounds that
 # have already been removed from the current config.
@@ -172,7 +183,7 @@ validate_candidate() { return 0; }
 setup_certificate_access() { mkdir -p "$CERT_DIR"; }
 setup_runtime_access() { :; }
 restore_backup "$archive" >/dev/null
-jq -e '.inbounds["vless-new"].daily["2026-08-24"]==1073741824' "$TRAFFIC_FILE" >/dev/null
+jq -e '.inbounds["vless-new"].daily["2026-08-24"]==2147483648' "$TRAFFIC_FILE" >/dev/null
 BASH
 
 # Monthly limits start at the exact creation time, retain that anchor when the
@@ -220,10 +231,10 @@ grep -Fq '功能：已启用  ·  已设置：1  ·  已禁用：0' <<<"$output"
 grep -Fq '流量  0 B / 1.00 GB  (0.00%)' <<<"$output"
 grep -Fq '周期  2026-08-07 18:00 → 09-07 18:00' <<<"$output"
 
-MOCK_COUNTERS=$'vless\t536870912\n'
+MOCK_COUNTERS=$'vless\t268435456\n'
 traffic_collect
 ! traffic_limit_is_blocked vless
-MOCK_COUNTERS=$'vless\t536870912\n'
+MOCK_COUNTERS=$'vless\t268435456\n'
 traffic_collect
 traffic_limit_is_blocked vless
 output=$(traffic_limits_show)
@@ -506,7 +517,7 @@ XRAYCTL_TRAFFIC_TODAY=2026-09-22
 traffic_collect
 XRAYCTL_TRAFFIC_NOW='2026-09-22 18:30:00'
 traffic_collect
-jq -e '.inbounds.vless.cycles["2026-08-22 18:30:00"]==null and .inbounds.vless.cycles["2026-09-22 18:30:00"]==50 and .inbounds.vless.daily["2026-09-22"]==50 and (.inbounds.vless.daily|length)==1 and .inbounds.vless.limit.usedBytes==700' "$TRAFFIC_FILE" >/dev/null
+jq -e '.inbounds.vless.cycles["2026-08-22 18:30:00"]==null and .inbounds.vless.cycles["2026-09-22 18:30:00"]==100 and .inbounds.vless.daily["2026-09-22"]==100 and (.inbounds.vless.daily|length)==1 and .inbounds.vless.limit.usedBytes==800' "$TRAFFIC_FILE" >/dev/null
 [[ $(traffic_period_start '2026-02-28 23:59:59') == '2026-02-22 18:30:00' ]]
 traffic_period_set 31 00:00 >/dev/null
 [[ $(traffic_period_bounds '2026-02-28 23:59:59') == $'2026-02-28 00:00:00\t2026-03-31 00:00:00' ]]

@@ -184,6 +184,8 @@ xrayctl diagnose
 xrayctl help
 ```
 
+流量显示和月度限额按代理经过服务器的两段链路估算：入站端口收到及发出的字节之和再乘以 2。`/var/lib/xrayctl/traffic.json` 中的 `daily`、`cycles` 和限额 `usedBytes` 均采用此口径，`accountingMultiplier: 2` 标记已迁移的数据库。升级时旧记录只换算一次，额度 `quotaBytes` 不变。这个数值不是网卡精确账单；协议开销、重传及非代理流量可能造成差异。
+
 ## 默认路径
 
 | 内容 | 路径 |
