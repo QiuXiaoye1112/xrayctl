@@ -209,7 +209,7 @@ install_or_update_xray() {
 }
 
 install_quick_command() {
-  local source=${BASH_SOURCE[0]:-} downloaded="" backup=""
+  local source=${BASH_SOURCE[0]:-} downloaded="" backup="" download_url=""
   mkdir -p "$(dirname "$QUICK_COMMAND")" "$(dirname "$QUICK_SYMLINK")"
 
   if [[ -n $source && -r $source ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$source" 2>/dev/null; then
@@ -219,8 +219,14 @@ install_quick_command() {
   else
     downloaded=$(temp_file)
     info "正在下载快捷命令脚本。"
+    download_url=$SCRIPT_DOWNLOAD_URL
+    if [[ $download_url == *\?* ]]; then
+      download_url="${download_url}&xrayctl_cache=$(date +%s)"
+    else
+      download_url="${download_url}?xrayctl_cache=$(date +%s)"
+    fi
     if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
-      --connect-timeout 15 --max-time 120 "$SCRIPT_DOWNLOAD_URL" -o "$downloaded"; then
+      --connect-timeout 15 --max-time 120 "$download_url" -o "$downloaded"; then
       rm -f "$downloaded"
       die "快捷命令脚本下载失败。"
     fi

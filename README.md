@@ -95,7 +95,7 @@ BBR 是主机全局开关，xrayctl 与 sbctl 都读取内核当前状态，也�
 ### Debian、Ubuntu、CentOS 等 systemd 系统
 
 ```bash
-curl -fsSL https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/install.sh | sudo bash
+curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh?xrayctl_cache=$(date +%s)" | sudo bash
 ```
 
 ### Alpine Linux（OpenRC）
@@ -119,13 +119,13 @@ curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/i
 指定 Xray 版本：
 
 ```bash
-curl -fsSL https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/install.sh | sudo bash -s -- 26.3.27
+curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh?xrayctl_cache=$(date +%s)" | sudo bash -s -- 26.3.27
 ```
 
 如果希望先检查脚本再执行，可以手动下载：
 
 ```bash
-curl -fLO https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/dist/xrayctl
+curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/dist/xrayctl?xrayctl_cache=$(date +%s)" -o xrayctl
 chmod +x xrayctl
 sudo ./xrayctl install
 xrayctl

@@ -27,8 +27,13 @@ cleanup() { rm -rf "$temp_dir"; }
 trap cleanup EXIT HUP INT TERM
 
 info "正在下载统一 xrayctl 发行版。"
+download_url=$SCRIPT_URL
+case $download_url in
+  *\?*) download_url="${download_url}&xrayctl_cache=$(date +%s)" ;;
+  *) download_url="${download_url}?xrayctl_cache=$(date +%s)" ;;
+esac
 curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
-  --connect-timeout 15 --max-time 120 "$SCRIPT_URL" -o "${temp_dir}/xrayctl"
+  --connect-timeout 15 --max-time 120 "$download_url" -o "${temp_dir}/xrayctl"
 grep -q '^# xrayctl - Xray Linux terminal manager' "${temp_dir}/xrayctl" \
   || die "下载内容校验失败。"
 bash -n "${temp_dir}/xrayctl" || die "下载的 xrayctl 未通过 Bash 语法检查。"

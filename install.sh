@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_URL="${XRAYCTL_SCRIPT_URL:-https://github.com/QiuXiaoye1112/xrayctl/raw/refs/heads/main/dist/xrayctl}"
+readonly SCRIPT_URL="${XRAYCTL_SCRIPT_URL:-https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/dist/xrayctl}"
 readonly TARGET="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"
 
 info() { printf '[xrayctl] %s\n' "$*"; }
@@ -24,7 +24,13 @@ cleanup() { rm -rf "$temp_dir"; }
 trap cleanup EXIT
 
 info "正在下载 xrayctl..."
-curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 120 "$SCRIPT_URL" -o "${temp_dir}/xrayctl"
+download_url=$SCRIPT_URL
+if [[ $download_url == *\?* ]]; then
+  download_url="${download_url}&xrayctl_cache=$(date +%s)"
+else
+  download_url="${download_url}?xrayctl_cache=$(date +%s)"
+fi
+curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 120 "$download_url" -o "${temp_dir}/xrayctl"
 grep -q '^# xrayctl - Xray Linux terminal manager' "${temp_dir}/xrayctl" \
   || die "下载内容不是有效的 xrayctl 发行版。"
 bash -n "${temp_dir}/xrayctl" || die "下载的 xrayctl 未通过 Bash 语法检查。"

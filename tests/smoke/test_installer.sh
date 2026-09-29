@@ -28,6 +28,9 @@ cat >"$TEST_ROOT/bin/curl" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 output=""
+for argument in "$@"; do
+  case $argument in https://*) printf '%s\n' "$argument" >"$XRAYCTL_TEST_CURL_URL" ;; esac
+done
 while (($#)); do
   if [[ $1 == -o ]]; then output=$2; shift 2; else shift; fi
 done
@@ -49,8 +52,11 @@ SH
 export XRAYCTL_COMMAND_PATH="$TEST_ROOT/target/xrayctl"
 export XRAYCTL_TEST_INVOCATION="$TEST_ROOT/invocation"
 export XRAYCTL_TEST_DOWNLOAD="$TEST_ROOT/payloads/good"
+export XRAYCTL_TEST_CURL_URL="$TEST_ROOT/curl-url"
 PATH="$TEST_ROOT/bin:$PATH" bash "$REPO_ROOT/install.sh" 26.3.27 >/dev/null
 assert_eq 'install 26.3.27' "$(<"$XRAYCTL_TEST_INVOCATION")" 'bootstrap did not invoke the installed distribution'
+grep -Eq '^https://raw\.githubusercontent\.com/QiuXiaoye1112/xrayctl/main/dist/xrayctl\?xrayctl_cache=[0-9]+$' "$XRAYCTL_TEST_CURL_URL" \
+  || fail 'bootstrap did not bypass the stale main-branch download cache'
 grep -q '^# xrayctl - Xray Linux terminal manager' "$XRAYCTL_COMMAND_PATH" \
   || fail 'bootstrap did not install the verified distribution'
 
@@ -69,6 +75,8 @@ assert_eq '#!/bin/sh' "$(<"$foreign")" 'bootstrap overwrote a foreign target'
 
 grep -Fq "bash -n \"\${temp_dir}/xrayctl\"" "$REPO_ROOT/alpine/install.sh" \
   || fail 'Alpine bootstrap does not syntax-check its download'
+grep -Fq 'xrayctl_cache=' "$REPO_ROOT/alpine/install.sh" \
+  || fail 'Alpine bootstrap does not bypass the stale main-branch download cache'
 grep -Fq "[ ! -L \"\$TARGET\" ]" "$REPO_ROOT/alpine/install.sh" \
   || fail 'Alpine bootstrap does not reject a symlink target'
 
