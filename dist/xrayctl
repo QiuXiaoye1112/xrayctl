@@ -2648,11 +2648,7 @@ build_inbound() {
   fi
 
   prompt_tag tag "${protocol}-$(random_hex 2)" || return 1
-  if [[ $protocol == socks || $protocol == http ]]; then
-    prompt_value listen "监听地址" "127.0.0.1" || return 1
-  else
-    prompt_value listen "监听地址" "0.0.0.0" || return 1
-  fi
+  prompt_value listen "监听地址" "0.0.0.0" || return 1
   suggest_available_port suggested_port || suggested_port=443
   prompt_port port "$suggested_port" || return 1
   if [[ -n $suggested_host ]]; then

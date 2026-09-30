@@ -49,7 +49,7 @@ done
 
 build_stream_settings() { printf -v "$2" '%s' '{"method":"raw","security":"none","rawSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}}}'; printf -v "$3" '%s' ''; }
 prompt_tag() { printf -v "$1" '%s' test-node; }
-prompt_value() { printf -v "$1" '%s' 127.0.0.1; }
+prompt_value() { printf -v "$1" '%s' "${3-}"; }
 prompt_port() { printf -v "$1" '%s' 39081; }
 prompt_public_host() { printf -v "$1" '%s' 203.0.113.10; }
 prompt_client_label() { printf -v "$1" '%s' user; }
@@ -59,6 +59,7 @@ for protocol_choice in 1 2 3; do
   set_choices "$protocol_choice"
   inbound="" host="" public_key=""
   build_inbound inbound host public_key
+  assert_eq "0.0.0.0" "$(jq -r .listen <<<"$inbound")" "default listener must accept external connections for every protocol"
   expected=(unused vless socks http)
   assert_eq "${expected[$protocol_choice]}" "$(jq -r .protocol <<<"$inbound")" "protocol menu choice routed incorrectly"
 done
