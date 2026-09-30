@@ -515,16 +515,16 @@ prompt_outbound_tag() {
 add_outbound() {
   ensure_runtime_dependencies outbound-add; require_xray_installed; ensure_config
   local choice protocol tag address port auth username password settings outbound tmp
-  choose choice "选择出站协议" "SOCKS5" "HTTP"
+  choose choice "选择出站协议" "SOCKS5" "HTTP" || return 1
   if [[ $choice == 1 ]]; then protocol=socks; else protocol=http; fi
-  prompt_outbound_tag tag "${protocol}-out-$(random_hex 2)"
-  prompt_validated_value address "代理服务器地址" "" validate_proxy_address "地址不能为空或包含空格，请重新输入。"
-  prompt_validated_value port "代理服务器端口" "" validate_port "端口必须是 1-65535，请重新输入。"
-  choose auth "认证方式" "无认证" "用户名密码"
+  prompt_outbound_tag tag "${protocol}-out-$(random_hex 2)" || return 1
+  prompt_validated_value address "代理服务器地址" "" validate_proxy_address "地址不能为空或包含空格，请重新输入。" || return 1
+  prompt_validated_value port "代理服务器端口" "" validate_port "端口必须是 1-65535，请重新输入。" || return 1
+  choose auth "认证方式" "无认证" "用户名密码" || return 1
   settings=$(jq -n --arg address "$address" --argjson port "$port" '{address:$address,port:$port}')
   if [[ $auth == 2 ]]; then
-    prompt_value username "用户名"
-    prompt_secret password "密码"
+    prompt_value username "用户名" || return 1
+    prompt_secret password "密码" || return 1
     settings=$(jq --arg user "$username" --arg pass "$password" '.+{user:$user,pass:$pass,level:0}' <<<"$settings")
   fi
   outbound=$(jq -n --arg tag "$tag" --arg protocol "$protocol" --argjson settings "$settings" \
@@ -571,7 +571,7 @@ select_outbound() {
       display_labels+=("$t")
     fi
   done
-  choose answer "选择出站" "${display_labels[@]}"
+  choose answer "选择出站" "${display_labels[@]}" || return 1
   local chosen="${tags[$((answer-1))]}"
   # 如果选的是本地 IP 但 freedom 出站还不存在，自动创建
   if [[ $chosen =~ ^local- ]]; then
@@ -952,7 +952,7 @@ delete_domain_rule() {
       printf '%d) %s\n' "$((idx+1))" "${rule_domains[$idx]}"
     done
     while true; do
-      read -r -p '请选择要删除的规则（支持 1,3,2）: ' selection || return
+      read -r -p '请选择要删除的规则（支持 1,3,2）: ' selection || { cancel_input; return 1; }
       selection=$(printf '%s' "$selection" | tr -d '[:space:]')
       delete_indices=()
       IFS=',' read -r -a tokens <<<"$selection"

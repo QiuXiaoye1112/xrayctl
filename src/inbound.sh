@@ -49,7 +49,7 @@ suggest_available_port() {
 prompt_tag() {
   local __var=$1 default=${2:-node-$(random_hex 2)} value
   while true; do
-    prompt_value value "入站标签" "$default"
+    prompt_value value "入站标签" "$default" || return 1
     validate_tag "$value" || { warn "标签格式不正确。"; continue; }
     inbound_exists "$value" && { warn "标签已存在。"; continue; }
     printf -v "$__var" '%s' "$value"; return
@@ -59,7 +59,7 @@ prompt_tag() {
 prompt_port() {
   local __var=$1 default=${2:-443} except=${3-} value current_port=""
   while true; do
-    prompt_value value "监听端口" "$default"
+    prompt_value value "监听端口" "$default" || return 1
     validate_port "$value" || { warn "端口必须是 1-65535。"; continue; }
     port_in_config "$value" "$except" && { warn "该端口已被另一条 Xray 入站使用。"; continue; }
     [[ -z $except ]] || current_port=$(jq -r --arg tag "$except" '.inbounds[]|select(.tag==$tag)|.port // empty' "$CONFIG_FILE")
@@ -90,7 +90,7 @@ prompt_public_host() {
     if [[ -n $ipv6 && $ipv6 != "$preferred" ]]; then labels+=("IPv6  ${ipv6}"); values+=("$ipv6"); fi
     if ((${#values[@]} > 1)); then
       labels+=("域名/其他地址")
-      choose address_choice "选择客户端连接地址" "${labels[@]}"
+      choose address_choice "选择客户端连接地址" "${labels[@]}" || return 1
       if ((address_choice <= ${#values[@]})); then
         printf -v "$__var" '%s' "${values[$((address_choice-1))]}"
         return 0
@@ -103,7 +103,7 @@ prompt_public_host() {
     fi
   fi
   while true; do
-    prompt_value value "$prompt_label" "$default"
+    prompt_value value "$prompt_label" "$default" || return 1
     if [[ -n $value && $value != *" "* ]]; then
       printf -v "$__var" '%s' "$value"
       return
@@ -115,7 +115,7 @@ prompt_public_host() {
 add_inbound() {
   ensure_runtime_dependencies inbound-add; require_xray_installed; ensure_config
   local inbound="" host="" public_key="" tag tmp
-  build_inbound inbound host public_key
+  build_inbound inbound host public_key || return 1
   : "$public_key"
   tag=$(jq -r '.tag' <<<"$inbound")
   tmp=$(temp_file)
@@ -166,7 +166,7 @@ select_inbound() {
     printf -v "$__var" '%s' "${tags[0]}"
     return 0
   fi
-  choose answer "选择入站" "${tags[@]}"
+  choose answer "选择入站" "${tags[@]}" || return 1
   selected_tag=${tags[$((answer-1))]}
   printf -v "$__var" '%s' "$selected_tag"
 }
@@ -190,7 +190,7 @@ rename_inbound() {
   [[ -n $old_tag ]] || select_inbound old_tag || return
   inbound_exists "$old_tag" || die "找不到入站：$old_tag"
   inbound_require_supported_configuration "$old_tag"
-  [[ -n $new_tag ]] || prompt_renamed_inbound_tag new_tag "$old_tag"
+  [[ -n $new_tag ]] || prompt_renamed_inbound_tag new_tag "$old_tag" || return 1
   validate_tag "$new_tag" || die "入站名称格式无效。"
   if [[ $new_tag == "$old_tag" ]]; then info "入站名称未更改。"; return 0; fi
   if inbound_exists "$new_tag" || outbound_exists "$new_tag"; then
@@ -220,9 +220,9 @@ modify_inbound_basic() {
   inbound_require_supported_configuration "$tag"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
   old_port=$(jq -r '.port' <<<"$current")
-  prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")"
-  prompt_port port "$old_port" "$tag"
-  prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")"
+  prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")" || return 1
+  prompt_port port "$old_port" "$tag" || return 1
+  prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
   tmp=$(temp_file)
   jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
     '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
@@ -241,7 +241,7 @@ modify_inbound_transport() {
   [[ $protocol == vless ]] || die "${protocol} 已停止支持或没有可修改的流式传输。"
   warn "修改传输后，所有客户端都要同步更新配置。"
   confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
-  build_stream_settings "$protocol" stream public_key
+  build_stream_settings "$protocol" stream public_key || return 1
   : "$public_key"
   method=$(jq -r '.network // .method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
   tmp=$(temp_file)
@@ -334,7 +334,7 @@ select_client() {
     )
   fi
   ((${#labels[@]} > 0)) || { warn "该入站没有可选用户。"; return 1; }
-  choose answer "选择用户" "${labels[@]}"
+  choose answer "选择用户" "${labels[@]}" || return 1
   printf -v "$__var" '%s' "${labels[$((answer-1))]}"
 }
 
@@ -371,7 +371,7 @@ add_client() {
   [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
-  prompt_client_label label "$tag" "用户名称/邮箱" "user-$(random_hex 2)"
+  prompt_client_label label "$tag" "用户名称/邮箱" "user-$(random_hex 2)" || return 1
   case $protocol in
     vless)
       id=$(generate_uuid)
@@ -380,7 +380,7 @@ add_client() {
       [[ $method == raw && $security != none ]] && flow=xtls-rprx-vision || flow=""
       user=$(jq -n --arg id "$id" --arg email "$label" --arg flow "$flow" '{id:$id,email:$email,level:0}+(if $flow!="" then {flow:$flow} else {} end)')
       ;;
-    socks|http) prompt_secret password "密码" "$(random_password)"; user=$(jq -n --arg user "$label" --arg pass "$password" '{user:$user,pass:$pass}') ;;
+    socks|http) prompt_secret password "密码" "$(random_password)" || return 1; user=$(jq -n --arg user "$label" --arg pass "$password" '{user:$user,pass:$pass}') ;;
     *) die "${protocol} 不支持多用户。";;
   esac
   tmp=$(temp_file)
@@ -460,7 +460,7 @@ rename_client() {
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
   if [[ -z $new_label ]]; then
-    prompt_client_label new_label "$tag" "新的用户名称/邮箱" "" "$old_label" "$protocol"
+    prompt_client_label new_label "$tag" "新的用户名称/邮箱" "" "$old_label" "$protocol" || return 1
   else
     validate_email_label "$new_label" || die "新用户名称无效。"
     if [[ $new_label != "$old_label" ]]; then
@@ -491,7 +491,7 @@ public_host_for_tag() {
   host=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
   if [[ -z $host ]]; then
     if [[ -n ${XRAYCTL_PUBLIC_HOST:-} ]]; then host=$XRAYCTL_PUBLIC_HOST;
-    elif [[ -t 0 ]]; then prompt_public_host host;
+    elif [[ -t 0 ]]; then prompt_public_host host || return 1;
     else die "缺少公网地址。请先运行 xrayctl inbound modify ${tag}，或设置 XRAYCTL_PUBLIC_HOST。"; fi
   fi
   printf '%s' "$host"

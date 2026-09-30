@@ -71,7 +71,7 @@ Xray Linux 管理脚本
 └─ 卸载
 ```
 
-只有一个入站或一张证书时会自动选中；有多个时才显示选择列表。
+只有一个入站或一张证书时会自动选中；有多个时才显示选择列表。输入时按 `Ctrl+D` 可取消当前操作，不保存未完成的修改，也不会显示内部错误。
 
 ## 支持环境
 
@@ -197,7 +197,7 @@ xrayctl traffic period set 22 18:30 # 每月 22 日 18:30 开始新的统计周�
 xrayctl traffic period show      # 查看当前周期起止时间
 xrayctl traffic enable           # 开启每分钟采集
 xrayctl traffic limit enable     # 启用月度流量限制功能
-xrayctl traffic limit set TAG 100 15 # 为 TAG 设置每月 100 GB，每月 15 日重置
+xrayctl traffic limit set TAG 100 15 18:30 # 每月 100 GB，每月 15 日 18:30 重置
 xrayctl traffic limit remove TAG # 取消该入站额度
 xrayctl cert issue example.com admin@example.com
 xrayctl diagnose
@@ -208,6 +208,8 @@ xrayctl diagnose
 ```bash
 xrayctl help
 ```
+
+新增或修改入站额度时，可输入每月重置日期和时间（`HH:MM`，服务器本地时间），精确到分钟。修改重置时间会更新下次重置时间，保留当前周期起点及已用流量；仅修改额度不会改变周期。CLI 的时间参数可省略：已有额度保留原重置时间，新额度默认使用当前时分。
 
 流量显示和月度限额按代理经过服务器的两段链路估算：入站端口收到及发出的字节之和再乘以 2。`/var/lib/xrayctl/traffic.json` 中的 `daily`、`cycles` 和限额 `usedBytes` 均采用此口径，`accountingMultiplier: 2` 标记已迁移的数据库。升级时旧记录只换算一次，额度 `quotaBytes` 不变。这个数值不是网卡精确账单；协议开销、重传及非代理流量可能造成差异。
 

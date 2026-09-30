@@ -5,7 +5,7 @@ outbound_menu() {
     heading "出站管理"
     list_outbound_overview
     printf '\n1) 设置入站默认出站\n2) 域名分流\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 查看出站详情\n5) 删除出站\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action assign_outbound; pause;; 2) domain_rule_menu;;
       3) run_menu_action add_outbound; pause;; 4) run_menu_action show_outbound_details; pause;;
@@ -31,7 +31,7 @@ domain_rule_detail_menu() {
     printf '\n'
     list_domain_rules "$tag" --menu
     printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) inbound_template_manage_menu "$tag";;
       2) if run_menu_action add_domain_rule "$tag" "" "" "" --prompt; then pause; fi;;
@@ -83,7 +83,7 @@ domain_rule_menu() {
     printf '操作：\n'
     printf '  [%d] 管理模板\n' "$(( ${#tags[@]} + 1 ))"
     printf '  [0] 返回\n'
-    read -r -p '请选择: ' choice || return
+    read -r -p '请选择: ' choice || { cancel_input; return 1; }
     case $choice in
       0) return;;
       ''|*[!0-9]*) warn '无效选项。'; pause;;
@@ -123,7 +123,7 @@ inbound_template_manage_menu() {
       printf '  %s → %s\n' "$name" "$outbound"
     done < <(list_inbound_template_bindings "$inbound")
     printf '\n1) 添加模板\n2) 移除模板\n3) 修改出站\n0) 返回\n'
-    read -r -p '请选择: ' choice || return
+    read -r -p '请选择: ' choice || { cancel_input; return 1; }
     case $choice in
       1) if apply_domain_template_menu "$inbound"; then pause; fi;;
       2)
@@ -168,7 +168,7 @@ delete_domain_template_domains_menu() {
     printf '%d) %s\n' "$((idx+1))" "${domains[$idx]}"
   done
   while true; do
-    read -r -p '请选择要删除的域名（支持 1,3,2）: ' selection || return 1
+    read -r -p '请选择要删除的域名（支持 1,3,2）: ' selection || { cancel_input; return 1; }
     selection=$(printf '%s' "$selection" | tr -d '[:space:]')
     [[ -n $selection ]] || return 1
     selected=()
@@ -218,7 +218,7 @@ template_manage_menu() {
     jq -r --arg name "$name" '.domainTemplates.templates[]? |
       select(.name==$name) | .suffix[]? // empty | "  "+.' "$META_FILE"
     printf '\n1) 添加域名\n2) 删除域名\n0) 返回\n'
-    read -r -p '请选择: ' choice || return
+    read -r -p '请选择: ' choice || { cancel_input; return 1; }
     case $choice in
       1)
         choose type "域名类型" "精确域名" "域名及所有子域名" || continue
@@ -252,7 +252,7 @@ template_library_menu() {
       printf '%s) %-16s 精确 %s 个，子域名 %s 个\n' "$number" "$name" "$exact" "$suffix"
     done < <(list_domain_templates)
     printf '\n%s) 新建模板\n0) 返回\n' "$((number + 1))"
-    read -r -p '请选择: ' choice || return
+    read -r -p '请选择: ' choice || { cancel_input; return 1; }
     case $choice in
       0) return;;
       ''|*[!0-9]*) warn '无效选项。'; pause;;
@@ -285,7 +285,7 @@ client_menu_for_tag() {
     heading "用户管理 · ${tag}"
     list_clients "$tag"
     printf '\n1) 添加用户\n2) 重命名用户\n3) 更换 UUID/密码\n4) 删除用户\n0) 返回入站\n'
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action add_client "$tag"; pause;; 2) run_menu_action rename_client "$tag"; pause;;
       3) run_menu_action rotate_client_credential "$tag"; pause;; 4) run_menu_action delete_client "$tag"; pause;;
@@ -301,7 +301,7 @@ modify_inbound_menu() {
     heading "修改入站信息 · ${tag}"
     if [[ $protocol == vless ]]; then
       printf '1) 修改入站名称\n2) 修改地址/端口\n3) 修改传输/安全\n0) 返回入站\n'
-      read -r -p "请选择: " choice || { echo; return; }
+      read -r -p "请选择: " choice || { cancel_input; return 0; }
       case $choice in
         1) run_menu_action rename_inbound "$tag"; pause; return;;
         2) run_menu_action modify_inbound_basic "$tag"; pause;;
@@ -310,7 +310,7 @@ modify_inbound_menu() {
       esac
     else
       printf '1) 修改入站名称\n2) 修改地址/端口\n0) 返回入站\n'
-      read -r -p "请选择: " choice || { echo; return; }
+      read -r -p "请选择: " choice || { cancel_input; return 0; }
       case $choice in
         1) run_menu_action rename_inbound "$tag"; pause; return;;
         2) run_menu_action modify_inbound_basic "$tag"; pause;;
@@ -332,7 +332,7 @@ manage_inbound_menu() {
         security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
         if [[ $security == tls ]]; then
           printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 证书管理\n5) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; return; }
+          read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
             4) manage_inbound_certificate_menu "$tag";; 5) run_menu_action show_inbound "$tag"; pause;;
@@ -340,7 +340,7 @@ manage_inbound_menu() {
           esac
         else
           printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; return; }
+          read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
             4) run_menu_action show_inbound "$tag"; pause;;
@@ -353,7 +353,7 @@ manage_inbound_menu() {
         printf '认证: %s\n\n' "$auth"
         if [[ $auth == password ]]; then
           printf '1) 客户端配置\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; return; }
+          read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
             4) run_menu_action show_inbound "$tag"; pause;;
@@ -361,7 +361,7 @@ manage_inbound_menu() {
           esac
         else
           printf '1) 客户端配置\n2) 修改入站信息\n3) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; return; }
+          read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol";;
             3) run_menu_action show_inbound "$tag"; pause;;
@@ -374,7 +374,7 @@ manage_inbound_menu() {
         printf '认证: %s\n\n' "$auth"
         if [[ $auth == password ]]; then
           printf '1) 客户端配置\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; return; }
+          read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
             4) run_menu_action show_inbound "$tag"; pause;;
@@ -382,7 +382,7 @@ manage_inbound_menu() {
           esac
         else
           printf '1) 客户端配置\n2) 修改入站信息\n3) 查看 JSON\n0) 返回列表\n'
-          read -r -p "请选择: " choice || { echo; return; }
+          read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol";;
             3) run_menu_action show_inbound "$tag"; pause;;
@@ -403,7 +403,7 @@ inbound_menu() {
     list_inbounds
     printf '\n完整配置: %s\n\n' "$CONFIG_FILE"
     printf '1) 新增入站\n2) 管理已有入站\n3) 全部分享链接\n4) 删除入站\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action add_inbound; pause;;
       2) select_inbound tag && manage_inbound_menu "$tag";;
@@ -423,7 +423,7 @@ certificate_menu() {
     printf '托管证书: %s\n\n' "$(certificate_count)"
     printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 删除托管证书\n5) Cloudflare 凭据\n'
     printf '6) 立即续期所有证书\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action issue_certificate; pause;;
       2) run_menu_action import_certificate; pause;;
@@ -460,7 +460,7 @@ service_menu() {
     printf '状态: %s  |  开机自启: %s  |  Xray: %s\n\n' \
       "$(service_state_summary)" "$(startup_state_summary)" "$(xray_version_summary)"
     printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装/更新/修复 Xray\n6) 系统诊断\n7) 修复快捷命令\n0) 返回\n'
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action toggle_service_running; pause;; 2) run_menu_action service_action restart; pause;;
       3) run_menu_action toggle_service_startup; pause;; 4) run_menu_action show_logs 100; pause;;
@@ -488,7 +488,7 @@ uninstall_menu() {
     printf '2) 完全卸载 — 删除 Xray + xrayctl 管理数据，保留备份\n'
     printf '3) 彻底删除 — 删除 xrayctl 创建的全部内容（含备份、Certbot、凭据）\n'
     printf '0) 返回\n'
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action uninstall_xray 0; pause;;
       2) run_menu_action uninstall_xray 1; pause;;
@@ -508,7 +508,7 @@ traffic_menu() {
     if traffic_is_enabled; then printf '5) 停止流量统计\n'; else printf '5) 开启流量统计\n'; fi
     printf '6) 设置月度统计起点\n'
     printf '0) 返回\n'
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action traffic_collect;;
       2) traffic_limit_menu;;
@@ -536,7 +536,7 @@ traffic_limit_menu() {
     else
       printf '操作\n1) 启用流量限制\n0) 返回\n'
     fi
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     if traffic_limits_are_enabled; then
       case $choice in
         1) continue;;
@@ -564,7 +564,7 @@ main_menu() {
     show_main_summary
     show_main_inbounds
     printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 流量信息\n5) BBR启用/关闭\n6) 服务管理\n7) 卸载\n0) 退出\n'
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_menu;;
       5) run_menu_action manage_bbr; pause;; 6) service_menu;; 7) uninstall_menu;;
@@ -591,7 +591,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl traffic period [show|set <日期> <HH:MM>] 查看/设置统一月度统计起点
   xrayctl traffic enable|disable       开启/停止流量统计
   xrayctl traffic limit show|enable|disable
-  xrayctl traffic limit set <标签> <GB> <重置日>
+  xrayctl traffic limit set <标签> <GB> <重置日> [HH:MM]
   xrayctl traffic limit remove <标签>
   xrayctl inbound list            列出入站
   xrayctl inbound add             交互新增入站
@@ -672,7 +672,7 @@ dispatch() {
             show) traffic_limits_show;;
             enable|start) traffic_limits_enable;;
             disable|stop) traffic_limits_disable;;
-            set) traffic_limit_set "${3-}" "${4-}" "${5-}";;
+            set) traffic_limit_set "${3-}" "${4-}" "${5-}" "${6-}";;
             remove|delete) traffic_limit_remove "${3-}";;
             *) die "未知 traffic limit 子命令：${2}";;
           esac
