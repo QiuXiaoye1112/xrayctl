@@ -90,39 +90,39 @@ protocol_build() {
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
   local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
-  choose choice "选择入站协议" "VLESS" "SOCKS5" "HTTP"
+  choose choice "选择入站协议" "VLESS" "SOCKS5" "HTTP" || return 1
   case $choice in
     1) protocol=vless;; 2) protocol=socks;; 3) protocol=http;;
   esac
 
   if protocol_supports_stream "$protocol"; then
-    build_stream_settings "$protocol" stream generated_public_key
+    build_stream_settings "$protocol" stream generated_public_key || return 1
     suggested_host=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
   fi
 
-  prompt_tag tag "${protocol}-$(random_hex 2)"
+  prompt_tag tag "${protocol}-$(random_hex 2)" || return 1
   if [[ $protocol == socks || $protocol == http ]]; then
-    prompt_value listen "监听地址" "127.0.0.1"
+    prompt_value listen "监听地址" "127.0.0.1" || return 1
   else
-    prompt_value listen "监听地址" "0.0.0.0"
+    prompt_value listen "监听地址" "0.0.0.0" || return 1
   fi
   suggest_available_port suggested_port || suggested_port=443
-  prompt_port port "$suggested_port"
+  prompt_port port "$suggested_port" || return 1
   if [[ -n $suggested_host ]]; then
     public_host=$suggested_host
     info "客户端连接地址：${public_host}"
   else
-    prompt_public_host public_host "" "$suggested_host"
+    prompt_public_host public_host "" "$suggested_host" || return 1
   fi
 
   case $protocol in
     vless)
-      prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol"
+      prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol" || return 1
       protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$email" "$stream"
       ;;
     socks|http)
-      prompt_optional_value username "用户名（留空表示无认证）"
-      if [[ -n $username ]]; then prompt_secret password "密码" "$(random_password)"; fi
+      prompt_optional_value username "用户名（留空表示无认证）" || return 1
+      if [[ -n $username ]]; then prompt_secret password "密码" "$(random_password)" || return 1; fi
       protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$username" "$password"
       ;;
   esac

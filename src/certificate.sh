@@ -17,16 +17,16 @@ prompt_certificate_server_name() {
   local names=()
   while IFS= read -r name; do [[ -n $name ]] && names+=("$name"); done < <(certificate_server_names "$cert")
   if ((${#names[@]} == 0)); then
-    prompt_validated_value selected "TLS serverName/SNI" "" validate_domain_or_ip "SNI 必须是证书包含的有效域名/IP。"
+    prompt_validated_value selected "TLS serverName/SNI" "" validate_domain_or_ip "SNI 必须是证书包含的有效域名/IP。" || return 1
   elif ((${#names[@]} == 1)); then
     selected=${names[0]}
   else
-    choose answer "选择 TLS serverName/SNI" "${names[@]}"
+    choose answer "选择 TLS serverName/SNI" "${names[@]}" || return 1
     selected=${names[$((answer-1))]}
   fi
   if [[ $selected == \*.* ]]; then
     default_name="www.${selected#*.}"
-    prompt_validated_value selected "TLS serverName/SNI" "$default_name" validate_domain "通配符证书需要填写具体子域名。"
+    prompt_validated_value selected "TLS serverName/SNI" "$default_name" validate_domain "通配符证书需要填写具体子域名。" || return 1
   fi
   printf -v "$__var" '%s' "$selected"
 }
@@ -50,8 +50,8 @@ validate_certificate_pair_files() {
 prompt_certificate_files() {
   local __cert=$1 __key=$2 default_cert=${3:-} default_key=${4:-} entered_cert entered_key
   while true; do
-    prompt_value entered_cert "证书文件路径" "$default_cert"
-    prompt_value entered_key "私钥文件路径" "$default_key"
+    prompt_value entered_cert "证书文件路径" "$default_cert" || return 1
+    prompt_value entered_key "私钥文件路径" "$default_key" || return 1
     if validate_certificate_pair_files "$entered_cert" "$entered_key"; then
       printf -v "$__cert" '%s' "$entered_cert"
       printf -v "$__key" '%s' "$entered_key"
@@ -498,13 +498,13 @@ cf_credentials_summary() {
 save_cloudflare_credentials() {
   local email="" api_key=""
   while [[ -z $email ]]; do
-    prompt_value email "Cloudflare 邮箱"
+    prompt_value email "Cloudflare 邮箱" || return 1
     if [[ $email == *@*.* && $email != *" "* ]]; then break; fi
     warn "邮箱格式无效，请重新输入。"
     email=""
   done
   while [[ -z $api_key ]]; do
-    prompt_hidden_secret api_key "Cloudflare Global API Key"
+    prompt_hidden_secret api_key "Cloudflare Global API Key" || return 1
     [[ -n $api_key ]] && break
     warn "API Key 不能为空。"
   done
@@ -532,9 +532,9 @@ cloudflare_credentials_menu() {
       cf_credentials_summary
       printf '\n1) 配置 Cloudflare 凭据\n0) 返回\n'
     fi
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
-      1) save_cloudflare_credentials; pause;;
+      1) run_menu_action save_cloudflare_credentials; pause;;
       2) if load_cloudflare_credentials; then
            deps=$(cloudflare_dependent_certificates)
            if [[ -n $deps ]]; then
@@ -651,7 +651,7 @@ issue_certificate() {
   if [[ -z $domain ]]; then
     local default_domain
     default_domain=$(detect_public_ip || true)
-    prompt_validated_value domain "证书域名/IP" "$default_domain" validate_domain_or_ip "域名/IP 无效，请重新输入。"
+    prompt_validated_value domain "证书域名/IP" "$default_domain" validate_domain_or_ip "域名/IP 无效，请重新输入。" || return 1
   fi
   if validate_ip_literal "$domain"; then mode=ip;
   elif ! validate_domain "$domain"; then die "证书域名/IP 无效。"; fi
@@ -671,9 +671,9 @@ issue_certificate() {
     local dns_label="DNS 手动验证（无法自动续期）"
     local http_label="HTTP 自动验证"
     if load_cloudflare_credentials; then
-      choose verify_method "选择验证方式" "$cf_label" "$http_label" "$dns_label"
+      choose verify_method "选择验证方式" "$cf_label" "$http_label" "$dns_label" || return 1
     else
-      choose verify_method "选择验证方式" "$http_label" "$dns_label"
+      choose verify_method "选择验证方式" "$http_label" "$dns_label" || return 1
       if [[ $verify_method == 1 ]]; then verify_method=http; else verify_method=dns-manual; fi
       # Adjust for CF case
       if load_cloudflare_credentials; then true; fi
@@ -686,7 +686,7 @@ issue_certificate() {
     fi
   fi
 
-  [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。"
+  [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。" || return 1
   validate_email_address "$email" || die "邮箱格式无效。"
 
   # Check if cert already exists
@@ -770,10 +770,10 @@ register_certificate_metadata() {
 import_certificate() {
   ensure_runtime_dependencies cert-import
   local domain=${1-} cert=${2-} key=${3-}
-  [[ -n $domain ]] || prompt_validated_value domain "证书标识/域名" "" validate_certificate_identifier "证书标识只能包含字母、数字、点和横线。"
+  [[ -n $domain ]] || prompt_validated_value domain "证书标识/域名" "" validate_certificate_identifier "证书标识只能包含字母、数字、点和横线。" || return 1
   [[ $domain =~ ^[A-Za-z0-9.-]+$ ]] || die "证书标识无效。"
-  [[ -n $cert ]] || prompt_validated_value cert "证书文件路径" "" validate_readable_file "证书文件不存在或不可读，请重新输入。"
-  [[ -n $key ]] || prompt_validated_value key "私钥文件路径" "" validate_readable_file "私钥文件不存在或不可读，请重新输入。"
+  [[ -n $cert ]] || prompt_validated_value cert "证书文件路径" "" validate_readable_file "证书文件不存在或不可读，请重新输入。" || return 1
+  [[ -n $key ]] || prompt_validated_value key "私钥文件路径" "" validate_readable_file "私钥文件不存在或不可读，请重新输入。" || return 1
   local changed=0 transaction
   local cert_target="${CERT_DIR}/${domain}.crt"
   local key_target="${CERT_DIR}/${domain}.key"
@@ -1042,7 +1042,7 @@ select_managed_certificate() {
     printf -v "$__var" '%s' "${identifiers[0]}"
     return 0
   fi
-  choose answer "选择证书" "${identifiers[@]}"
+  choose answer "选择证书" "${identifiers[@]}" || return 1
   printf -v "$__var" '%s' "${identifiers[$((answer-1))]}"
 }
 
@@ -1099,13 +1099,13 @@ manage_inbound_certificate_menu() {
     heading "证书管理 · ${tag}"
     printf '证书: %s\n私钥: %s\nSNI: %s\n\n' "$current_cert" "$current_key" "$current_sni"
     printf '1) 更换托管证书\n2) 使用证书文件\n0) 返回入站\n'
-    read -r -p "请选择: " choice || { echo; return; }
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1)
         if select_managed_certificate identifier; then
           cert="${CERT_DIR}/${identifier}.crt"; key="${CERT_DIR}/${identifier}.key"
           info "使用托管证书：${identifier}"
-          prompt_certificate_server_name sni "$cert"
+          prompt_certificate_server_name sni "$cert" || continue
           run_menu_action update_tls_inbound_certificate "$tag" "$cert" "$key" "$sni"
           pause
         else
@@ -1113,8 +1113,8 @@ manage_inbound_certificate_menu() {
         fi
         ;;
       2)
-        prompt_certificate_files cert key "$current_cert" "$current_key"
-        prompt_certificate_server_name sni "$cert"
+        prompt_certificate_files cert key "$current_cert" "$current_key" || continue
+        prompt_certificate_server_name sni "$cert" || continue
         run_menu_action update_tls_inbound_certificate "$tag" "$cert" "$key" "$sni"
         pause
         ;;

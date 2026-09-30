@@ -562,7 +562,7 @@ restore_backup() {
   ensure_runtime_dependencies restore
   local archive=${1-} temp extract_config snapshot had_meta=0 had_certs=0 had_traffic=0 restored_traffic=0
   local metadata_source traffic_source
-  [[ -n $archive ]] || prompt_value archive "备份文件路径"
+  [[ -n $archive ]] || prompt_value archive "备份文件路径" || return 1
   [[ -r $archive ]] || die "无法读取备份：$archive"
   tar -tzf "$archive" >/dev/null || die "不是有效的 tar.gz 备份。"
   if tar -tzf "$archive" | awk 'BEGIN{bad=0} /^\// || /(^|\/)\.\.($|\/)/ {bad=1} END{exit !bad}'; then

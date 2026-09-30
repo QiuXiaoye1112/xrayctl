@@ -72,6 +72,7 @@ clear_screen() { clear 2>/dev/null || true; }
 
 on_error() {
   local exit_code=$? line=${BASH_LINENO[0]:-?}
+  [[ ${XRAYCTL_INPUT_CANCELLED:-0} != 1 ]] || exit 0
   error "命令在第 ${line} 行失败（退出码 ${exit_code}）。"
   exit "$exit_code"
 }
@@ -98,19 +99,25 @@ confirm() {
   local prompt=${1:-"确定继续吗？"} default=${2:-N} answer suffix
   if [[ $default == Y ]]; then suffix="[Y/n]"; else suffix="[y/N]"; fi
   if [[ ! -t 0 ]]; then [[ $default == Y ]]; return; fi
-  read -r -p "${prompt} ${suffix} " answer || { echo; answer=${default}; }
+  read -r -p "${prompt} ${suffix} " answer || { cancel_input; return 1; }
   answer=${answer:-$default}
   [[ $answer =~ ^[Yy]$ ]]
+}
+
+cancel_input() {
+  XRAYCTL_INPUT_CANCELLED=1
+  printf '\n'
+  return 0
 }
 
 prompt_value() {
   local __var=$1 prompt=$2 default=${3-} input_value
   while true; do
     if [[ -n $default ]]; then
-      if ! read -r -p "${prompt} [${default}]: " input_value; then warn "输入已中断。"; return 1; fi
+      if ! read -r -p "${prompt} [${default}]: " input_value; then cancel_input; return 1; fi
       input_value=${input_value:-$default}
     else
-      if ! read -r -p "${prompt}: " input_value; then warn "输入已中断。"; return 1; fi
+      if ! read -r -p "${prompt}: " input_value; then cancel_input; return 1; fi
       if [[ -z $input_value ]]; then warn "此项不能为空，请重新输入。"; continue; fi
     fi
     printf -v "$__var" '%s' "$input_value"
@@ -120,18 +127,18 @@ prompt_value() {
 
 prompt_optional_value() {
   local __var=$1 prompt=$2 input_value=""
-  if ! read -r -p "${prompt}: " input_value; then warn "输入已中断。"; return 1; fi
+  if ! read -r -p "${prompt}: " input_value; then cancel_input; return 1; fi
   printf -v "$__var" '%s' "$input_value"
 }
 
 prompt_secret() {
   local __var=$1 prompt=$2 generated=${3-} secret_value=""
   if [[ -n $generated ]]; then
-    if ! read -r -p "${prompt}（留空自动生成）: " secret_value; then warn "输入已中断。"; return 1; fi
+    if ! read -r -p "${prompt}（留空自动生成）: " secret_value; then cancel_input; return 1; fi
     secret_value=${secret_value:-$generated}
   else
     while [[ -z $secret_value ]]; do
-      if ! read -r -p "${prompt}: " secret_value; then warn "输入已中断。"; return 1; fi
+      if ! read -r -p "${prompt}: " secret_value; then cancel_input; return 1; fi
       [[ -n $secret_value ]] || warn "密码不能为空，请重新输入。"
     done
   fi
@@ -142,7 +149,7 @@ prompt_hidden_secret() {
   local __var=$1 prompt=$2 value=""
   while [[ -z $value ]]; do
     printf '%s: ' "$prompt"
-    if ! read -r -s value; then printf '\n'; warn "输入已中断。"; return 1; fi
+    if ! read -r -s value; then cancel_input; return 1; fi
     printf '\n'
     [[ -n $value ]] || warn "不能为空，请重新输入。"
   done
@@ -155,7 +162,7 @@ choose() {
   printf '%s\n' "$prompt"
   for ((i=0; i<${#options[@]}; i++)); do printf '  %d) %s\n' "$((i+1))" "${options[$i]}"; done
   while true; do
-    read -r -p "请选择 [1-${#options[@]}]: " selected_value || { echo; return 1; }
+    read -r -p "请选择 [1-${#options[@]}]: " selected_value || { cancel_input; return 1; }
     if [[ $selected_value =~ ^[0-9]+$ ]] && (( selected_value >= 1 && selected_value <= ${#options[@]} )); then
       printf -v "$__var" '%s' "$selected_value"
       return 0
@@ -238,7 +245,8 @@ run_menu_action() {
   set +e
   (
     set -Eeuo pipefail
-    trap 'exit $?' ERR
+    XRAYCTL_INPUT_CANCELLED=0
+    trap 'action_error=$?; if [[ ${XRAYCTL_INPUT_CANCELLED:-0} == 1 ]]; then exit 0; fi; exit "$action_error"' ERR
     trap cleanup_on_exit EXIT
     "$@"
   )

@@ -278,6 +278,53 @@ jq -e '
   .inbounds.vless.limit.cycleStart=="2026-09-07 18:00:00" and
   .inbounds.vless.limit.cycleEnd=="2026-10-07 18:00:00"
 ' "$TRAFFIC_FILE" >/dev/null
+# Explicit minute precision applies on creation and when changing the schedule.
+XRAYCTL_TRAFFIC_NOW='2026-09-08 12:34:56'
+XRAYCTL_TRAFFIC_TODAY=2026-09-08
+traffic_limit_set vless 2 15 08:21 >/dev/null
+jq -e '.inbounds.vless.limit.anchorTime=="08:21:00" and
+  .inbounds.vless.limit.cycleEnd=="2026-09-15 08:21:00" and
+  .inbounds.vless.limit.cycleStart=="2026-09-07 18:00:00"' "$TRAFFIC_FILE" >/dev/null
+MOCK_COUNTERS=$'vless\t100\n'
+traffic_collect
+MOCK_COUNTERS=""
+traffic_limit_set vless 3 15 09:48 >/dev/null
+jq -e '.inbounds.vless.limit.anchorTime=="09:48:00" and
+  .inbounds.vless.limit.cycleEnd=="2026-09-15 09:48:00" and
+  .inbounds.vless.limit.usedBytes==200' "$TRAFFIC_FILE" >/dev/null
+before=$(cat "$TRAFFIC_FILE")
+for invalid in 24:00 12:60 8:21 08:21:30 nope; do
+  ! traffic_limit_set vless 3 15 "$invalid" >/dev/null 2>&1
+  [[ $(cat "$TRAFFIC_FILE") == "$before" ]]
+done
+# The creation path exposes both prompts, retries invalid times, and accepts
+# zero-padded days without emitting invalid JSON numbers.
+traffic_remove_limit_data vless
+traffic_limit_set vless <<<'4
+08
+25:00
+08:48' >/dev/null 2>&1
+jq -e '.inbounds.vless.limit.resetDay==8 and
+  .inbounds.vless.limit.anchorTime=="08:48:00" and
+  .inbounds.vless.limit.cycleEnd=="2026-10-08 08:48:00"' "$TRAFFIC_FILE" >/dev/null
+# Modifying through the interactive path must also read the time.
+traffic_limit_set vless <<<'5
+15
+18:30' >/dev/null
+jq -e '.inbounds.vless.limit.anchorTime=="18:30:00" and
+  .inbounds.vless.limit.cycleEnd=="2026-09-15 18:30:00"' "$TRAFFIC_FILE" >/dev/null
+# Exact minute boundary restores exhausted quotas, not a second earlier.
+tmp=$(temp_file)
+jq '.inbounds.vless.limit.usedBytes=.inbounds.vless.limit.quotaBytes' "$TRAFFIC_FILE" >"$tmp"
+mv -f "$tmp" "$TRAFFIC_FILE"
+XRAYCTL_TRAFFIC_NOW='2026-09-15 18:29:59'
+traffic_sync_inventory
+traffic_limit_is_blocked vless
+XRAYCTL_TRAFFIC_NOW='2026-09-15 18:30:00'
+traffic_sync_inventory
+! traffic_limit_is_blocked vless
+jq -e '.inbounds.vless.limit.usedBytes==0 and
+  .inbounds.vless.limit.cycleEnd=="2026-10-15 18:30:00"' "$TRAFFIC_FILE" >/dev/null
 BASH_LIMITS
 
 # nft JSON snapshots are grouped by inbound tag across upload/download rules.

@@ -406,7 +406,7 @@ _xrayctl_purge_level_2() {
 EOF
   printf '输入 DELETE 确认：'
   local answer
-  read -r answer || { echo; return; }
+  read -r answer || { cancel_input; return 0; }
   if [[ $answer != "DELETE" ]]; then
     info "已取消彻底删除。"
     return 0

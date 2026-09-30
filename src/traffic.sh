@@ -777,38 +777,68 @@ traffic_limits_disable() {
 }
 
 traffic_limit_set() {
-  local tag=${1-} quota_gb=${2-} reset_day=${3-} quota now anchor_day anchor_time cycle_end tmp rc=0 existing
+  local tag=${1-} quota_gb=${2-} reset_day=${3-} reset_time=${4-} quota now anchor_day anchor_time cycle_end tmp rc=0 existing
+  local interactive=0 default_day default_time old_day old_time schedule_changed=0
+  if [[ -z $quota_gb ]] || { [[ -z $reset_day ]] && [[ -t 0 ]]; }; then interactive=1; fi
   traffic_require_root traffic-limit-set; ensure_config
   traffic_is_enabled || { warn "请先开启流量统计。"; return 1; }
   traffic_limits_are_enabled || { warn "请先启用流量限制功能。"; return 1; }
   [[ -n $tag ]] || select_inbound tag || return 0
   inbound_exists "$tag" || { warn "找不到入站：${tag}"; return 1; }
   while [[ -z $quota_gb ]]; do
-    read -r -p "每月流量额度（GB）: " quota_gb || { echo; return 0; }
+    read -r -p "每月流量额度（GB）: " quota_gb || { cancel_input; return 0; }
     quota=$(traffic_limit_quota_bytes "$quota_gb") || { warn "请输入大于 0 的数字，例如 100 或 100.5。"; quota_gb=""; }
   done
   quota=${quota:-$(traffic_limit_quota_bytes "$quota_gb")} || { warn "流量额度无效。"; return 1; }
   traffic_collect || return 1
-  now=$(traffic_now); anchor_time=${now:11:8}
-  if [[ -z $reset_day && -t 0 ]]; then
-    read -r -p "每月重置日期（1-31）: " reset_day || { echo; return 0; }
+  now=$(traffic_now)
+  existing=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.enabled==true' "$TRAFFIC_FILE")
+  default_day=$((10#${now:8:2})); default_time=${now:11:5}
+  if [[ $existing == true ]]; then
+    old_day=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.resetDay // .inbounds[$tag].limit.anchorDay' "$TRAFFIC_FILE")
+    old_time=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.anchorTime' "$TRAFFIC_FILE")
+    default_day=$old_day; default_time=${old_time:0:5}
   fi
-  reset_day=${reset_day:-$((10#${now:8:2}))}
+  while [[ -z $reset_day && $interactive == 1 ]]; do
+    prompt_value reset_day "每月重置日期（1-31）" "$default_day" || return 0
+    if [[ ! $reset_day =~ ^[0-9]+$ ]] || ((10#$reset_day < 1 || 10#$reset_day > 31)); then
+      warn "重置日期无效，请输入 1 到 31。"; reset_day=""
+    fi
+  done
+  reset_day=${reset_day:-$default_day}
   if ! [[ $reset_day =~ ^[0-9]+$ ]] || ((10#$reset_day < 1 || 10#$reset_day > 31)); then
     warn "重置日期无效，请输入 1 到 31。"; return 1
   fi
-  existing=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.enabled==true' "$TRAFFIC_FILE")
-  if [[ $existing == true ]]; then
-    anchor_time=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.anchorTime // empty' "$TRAFFIC_FILE")
+  reset_day=$((10#$reset_day))
+  while [[ -z $reset_time && $interactive == 1 ]]; do
+    prompt_value reset_time "每月重置时间（HH:MM，服务器本地时间）" "$default_time" || return 0
+    if [[ ! $reset_time =~ ^[0-9]{2}:[0-9]{2}$ ]] || ! traffic_validate_timestamp "2026-01-01 ${reset_time}:00"; then
+      warn "重置时间无效，请输入 HH:MM，例如 18:30。"; reset_time=""
+    fi
+  done
+  if [[ -n $reset_time ]]; then
+    [[ $reset_time =~ ^[0-9]{2}:[0-9]{2}$ ]] && traffic_validate_timestamp "2026-01-01 ${reset_time}:00" || {
+      warn "重置时间无效，请输入 HH:MM，例如 18:30。"; return 1
+    }
+    anchor_time=${reset_time}:00
+  elif [[ $existing == true ]]; then
+    anchor_time=$old_time
+  else
+    anchor_time=${default_time}:00
   fi
   anchor_day=$reset_day
-  cycle_end=$(traffic_limit_first_cycle_end "$now" "$reset_day" "$anchor_time") || return 1
+  if [[ $existing == true && $reset_day == "$old_day" && $anchor_time == "$old_time" ]]; then
+    cycle_end=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.cycleEnd' "$TRAFFIC_FILE")
+  else
+    cycle_end=$(traffic_limit_first_cycle_end "$now" "$reset_day" "$anchor_time") || return 1
+    [[ $existing != true ]] || schedule_changed=1
+  fi
   traffic_lock_acquire || return 1
   tmp=$(temp_file)
   jq --arg tag "$tag" --argjson quota "$quota" --arg now "$now" --argjson resetDay "$reset_day" --argjson anchorDay "$anchor_day" \
     --arg anchorTime "$anchor_time" --arg cycleEnd "$cycle_end" '
       if .inbounds[$tag].limit.enabled==true then
-        .inbounds[$tag].limit.quotaBytes=$quota | .inbounds[$tag].limit.resetDay=$resetDay | .inbounds[$tag].limit.anchorDay=$anchorDay | .inbounds[$tag].limit.cycleEnd=$cycleEnd
+        .inbounds[$tag].limit.quotaBytes=$quota | .inbounds[$tag].limit.resetDay=$resetDay | .inbounds[$tag].limit.anchorDay=$anchorDay | .inbounds[$tag].limit.anchorTime=$anchorTime | .inbounds[$tag].limit.cycleEnd=$cycleEnd
       else
         .inbounds[$tag].limit={enabled:true,quotaBytes:$quota,resetDay:$resetDay,anchorDay:$anchorDay,anchorTime:$anchorTime,
           cycleStart:$now,cycleEnd:$cycleEnd,usedBytes:0}
@@ -818,7 +848,9 @@ traffic_limit_set() {
   rm -f "$tmp"; traffic_lock_release
   ((rc == 0)) || return 1
   traffic_rules_restore_serialized || { warn "额度已保存，但防火墙规则暂未同步，采集任务会自动重试。"; return 1; }
-  if [[ $existing == true ]]; then
+  if ((schedule_changed)); then
+    info "已修改入站 ${tag} 的月度额度和重置时间：每月 ${reset_day} 日 ${anchor_time:0:5}；已用流量保持不变，下次重置：${cycle_end}。"
+  elif [[ $existing == true ]]; then
     info "已修改入站 ${tag} 的月度额度；原周期起止时间和已用流量保持不变。"
   else
     info "已设置入站 ${tag} 的月度额度，当前周期：${now} ～ ${cycle_end}。"
@@ -849,8 +881,8 @@ traffic_period_show() {
 traffic_period_set() {
   local day=${1-} clock=${2-} tmp rc=0
   traffic_require_root traffic-period-set
-  if [[ -z $day ]]; then read -r -p '每月起始日期（1-31）: ' day || return 1; fi
-  if [[ -z $clock ]]; then read -r -p '起始时间（HH:MM）: ' clock || return 1; fi
+  if [[ -z $day ]]; then read -r -p '每月起始日期（1-31）: ' day || { cancel_input; return 0; }; fi
+  if [[ -z $clock ]]; then read -r -p '起始时间（HH:MM）: ' clock || { cancel_input; return 0; }; fi
   if [[ ! $day =~ ^[0-9]+$ ]] || ((10#$day < 1 || 10#$day > 31)); then
     warn '日期必须是 1 到 31。'
     return 1
@@ -997,7 +1029,7 @@ traffic_clear_all_records() {
   local answer tmp rc=0
   traffic_collect || true; traffic_init_file
   printf '输入 RESET 确认清空全部流量记录和所有当前周期已用流量：'
-  read -r answer || { echo; return 0; }
+  read -r answer || { cancel_input; return 0; }
   [[ $answer == RESET ]] || { info "已取消。"; return 0; }
   traffic_lock_acquire || return 1
   tmp=$(temp_file); jq '
