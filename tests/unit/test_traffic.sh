@@ -294,7 +294,7 @@ jq -e '.inbounds.vless.limit.anchorTime=="09:48:00" and
   .inbounds.vless.limit.usedBytes==200' "$TRAFFIC_FILE" >/dev/null
 before=$(cat "$TRAFFIC_FILE")
 for invalid in 24:00 12:60 8:21 08:21:30 nope; do
-  ! traffic_limit_set vless 3 15 "$invalid" >/dev/null 2>&1
+  if traffic_limit_set vless 3 15 "$invalid" >/dev/null 2>&1; then exit 1; fi
   [[ $(cat "$TRAFFIC_FILE") == "$before" ]]
 done
 # The creation path exposes both prompts, retries invalid times, and accepts
@@ -322,7 +322,7 @@ traffic_sync_inventory
 traffic_limit_is_blocked vless
 XRAYCTL_TRAFFIC_NOW='2026-09-15 18:30:00'
 traffic_sync_inventory
-! traffic_limit_is_blocked vless
+if traffic_limit_is_blocked vless; then exit 1; fi
 jq -e '.inbounds.vless.limit.usedBytes==0 and
   .inbounds.vless.limit.cycleEnd=="2026-10-15 18:30:00"' "$TRAFFIC_FILE" >/dev/null
 BASH_LIMITS

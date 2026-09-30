@@ -29,7 +29,7 @@ check_cancel() {
     printf 'expected cancellation: %s\n' "$*" >&2; exit 1
   fi
   [[ $XRAYCTL_INPUT_CANCELLED == 1 && $value == unchanged ]]
-  ! rg -q 'unbound variable|命令在第|输入已中断|操作未完成' "$TMP/output"
+  if rg -q 'unbound variable|命令在第|输入已中断|操作未完成' "$TMP/output"; then cat "$TMP/output" >&2; exit 1; fi
   [[ $(cat "$CONFIG_FILE") == "$before" ]]
 }
 check_cancel choose value test one two
@@ -66,7 +66,7 @@ done
 # The menu action wrapper must stay alive after cancellation and continue to
 # report actual errors that are unrelated to EOF.
 run_menu_action select_inbound value </dev/null >"$TMP/output" 2>&1
-! rg -q 'unbound variable|命令在第|操作未完成' "$TMP/output"
+if rg -q 'unbound variable|命令在第|操作未完成' "$TMP/output"; then cat "$TMP/output" >&2; exit 1; fi
 run_menu_action false >"$TMP/output" 2>&1
 rg -q '操作未完成' "$TMP/output"
 
@@ -75,6 +75,6 @@ traffic_set_enabled true
 traffic_set_limits_enabled true
 traffic_collect() { :; }
 run_menu_action traffic_limit_set </dev/null >"$TMP/output" 2>&1
-! rg -q 'unbound variable|命令在第|操作未完成' "$TMP/output"
+if rg -q 'unbound variable|命令在第|操作未完成' "$TMP/output"; then cat "$TMP/output" >&2; exit 1; fi
 [[ $(cat "$CONFIG_FILE") == "$before" ]]
 printf 'input cancellation checks passed\n'
