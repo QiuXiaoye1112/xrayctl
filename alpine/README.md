@@ -4,25 +4,19 @@ Alpine Linux 不再维护独立业务脚本。`alpine/install.sh` 只负责通�
 
 ## 一键安装
 
+以 root 身份执行：
+
 ```sh
-commit=$(wget -qO- "https://api.github.com/repos/QiuXiaoye1112/xrayctl/git/ref/heads/main?xrayctl_cache=$(date +%s)" | sed -n 's/.*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p')
-if [ "${#commit}" -eq 40 ]; then
-  wget -qO- "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/${commit}/alpine/install.sh" | sh
-else
-  echo '无法确认 xrayctl main 提交版本，安装已取消。' >&2
-fi
+wget -qO- https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
 ```
 
 已经安装 curl 时也可以运行：
 
 ```sh
-commit=$(curl -fsSL "https://api.github.com/repos/QiuXiaoye1112/xrayctl/git/ref/heads/main?xrayctl_cache=$(date +%s)" | sed -n 's/.*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p')
-if [ "${#commit}" -eq 40 ]; then
-  curl -fsSL "https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/${commit}/alpine/install.sh" | sh
-else
-  echo '无法确认 xrayctl main 提交版本，安装已取消。' >&2
-fi
+curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
 ```
+
+安装脚本会在内部确认 `main` 的最新提交版本，并下载统一发行文件。
 
 安装后运行：
 
