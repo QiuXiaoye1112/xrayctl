@@ -817,9 +817,9 @@ traffic_limit_set() {
     fi
   done
   if [[ -n $reset_time ]]; then
-    [[ $reset_time =~ ^[0-9]{2}:[0-9]{2}$ ]] && traffic_validate_timestamp "2026-01-01 ${reset_time}:00" || {
+    if [[ ! $reset_time =~ ^[0-9]{2}:[0-9]{2}$ ]] || ! traffic_validate_timestamp "2026-01-01 ${reset_time}:00"; then
       warn "重置时间无效，请输入 HH:MM，例如 18:30。"; return 1
-    }
+    fi
     anchor_time=${reset_time}:00
   elif [[ $existing == true ]]; then
     anchor_time=$old_time

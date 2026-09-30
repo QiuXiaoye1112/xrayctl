@@ -239,7 +239,7 @@ print_table_cell_clipped() {
 }
 
 run_menu_action() {
-  local action_status previous_err_trap
+  local action_status previous_err_trap action_error=0
   previous_err_trap=$(trap -p ERR || true)
   trap - ERR
   set +e
