@@ -4106,7 +4106,7 @@ traffic_limit_set() {
     default_day=$old_day; default_time=${old_time:0:5}
   fi
   while [[ -z $reset_day && $interactive == 1 ]]; do
-    prompt_value reset_day "每月重置日期（1-31）" "$default_day" || return 0
+    prompt_value reset_day "每月重置日期（1-31）" || return 0
     if [[ ! $reset_day =~ ^[0-9]+$ ]] || ((10#$reset_day < 1 || 10#$reset_day > 31)); then
       warn "重置日期无效，请输入 1 到 31。"; reset_day=""
     fi
