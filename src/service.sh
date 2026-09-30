@@ -97,6 +97,7 @@ description="Xray Service managed by xrayctl"
 command="${XRAY_BIN}"
 command_args="run -config ${CONFIG_FILE}"
 command_user="${RUNTIME_USER}:${RUNTIME_GROUP}"
+capabilities="^cap_net_bind_service"
 command_background=true
 pidfile="/run/${SERVICE_NAME}.pid"
 output_log="${LOG_DIR}/openrc.log"
