@@ -577,4 +577,79 @@ traffic_period_set 31 00:00 >/dev/null
 [[ $(traffic_period_bounds '2026-04-30 12:00:00') == $'2026-04-30 00:00:00\t2026-05-31 00:00:00' ]]
 BASH_PERIOD
 
+# The aggregate survives single-inbound resets, including stopped legacy
+# installations, then resets only with all records or the monthly boundary.
+XRAYCTL_TESTING=1 \
+XRAYCTL_TRAFFIC_NOW='2026-08-24 12:00:00' \
+XRAYCTL_TRAFFIC_TODAY=2026-08-24 \
+XRAYCTL_CONFIG_DIR="$TMP/aggregate/cfg" \
+XRAYCTL_CONFIG_FILE="$TMP/aggregate/cfg/config.json" \
+XRAYCTL_META_FILE="$TMP/aggregate/meta.json" \
+XRAYCTL_TRAFFIC_FILE="$TMP/aggregate/traffic.json" \
+XRAYCTL_CERT_DIR="$TMP/aggregate/cfg/certs" \
+XRAYCTL_LOG_DIR="$TMP/aggregate/log" \
+XRAYCTL_LOCK_FILE="$TMP/aggregate/lock" \
+bash <<'BASH_AGGREGATE'
+set -Eeuo pipefail
+source ./xrayctl.sh
+write_default_config
+tmp=$(temp_file)
+jq '.inbounds=[{protocol:"vless",tag:"a",port:17225,settings:{clients:[]}},
+               {protocol:"vless",tag:"b",port:17226,settings:{clients:[]}}]' "$CONFIG_FILE" >"$tmp"
+mv -f "$tmp" "$CONFIG_FILE"
+traffic_init_file
+tmp=$(temp_file)
+jq 'del(.accountingMultiplier) | .periodsSeeded=true |
+  .inbounds={a:{daily:{"2026-08-24":100},cycles:{"2026-08-01 00:00:00":100}},
+             b:{daily:{"2026-08-24":200},cycles:{"2026-08-01 00:00:00":200}}}' "$TRAFFIC_FILE" >"$tmp"
+mv -f "$tmp" "$TRAFFIC_FILE"
+confirm() { return 0; }
+# Collection is disabled: clearing must still migrate the aggregate first.
+traffic_clear_tag_records a >/dev/null
+traffic_sync_inventory
+jq -e '.totals.daily["2026-08-24"]==600 and .totals.cycles["2026-08-01 00:00:00"]==600 and
+       .inbounds.a.daily=={} and .inbounds.b.daily["2026-08-24"]==400' "$TRAFFIC_FILE" >/dev/null
+output=$(traffic_show)
+grep -Fq '全部入站：600 B' <<<"$output"
+[[ $(traffic_range_total 2026-08-01 2026-08-24) == 600 ]]
+traffic_read_counters() { printf '%s' "$MOCK_COUNTERS"; }
+traffic_rules_restore() { :; }
+traffic_set_enabled true
+MOCK_COUNTERS=$'a\t50\nb\t25'
+traffic_collect
+jq -e '.totals.cycles["2026-08-01 00:00:00"]==750 and .inbounds.a.daily["2026-08-24"]==100' "$TRAFFIC_FILE" >/dev/null
+MOCK_COUNTERS=""
+traffic_clear_tag_records b >/dev/null
+traffic_clear_tag_records a >/dev/null
+output=$(traffic_show 2026-08-01 2026-08-24)
+grep -Fq '全部入站：750 B' <<<"$output"
+# Rebucket using independent daily history, even though every row is empty.
+traffic_period_set 22 18:30 >/dev/null
+output=$(traffic_show)
+grep -Fq '全部入站：750 B' <<<"$output"
+jq -e '.totals.cycles["2026-08-22 18:30:00"]==750' "$TRAFFIC_FILE" >/dev/null
+# A successful aggregate migration is never seeded again on later updates.
+traffic_sync_inventory
+[[ $(traffic_range_total 2026-08-22 2026-08-24) == 750 ]]
+# Failed rule replacement must roll the independent aggregate back too.
+MOCK_COUNTERS=$'a\t50'
+before=$(jq -S . "$TRAFFIC_FILE")
+traffic_rules_restore() { return 1; }
+if traffic_collect >/dev/null 2>&1; then exit 1; fi
+[[ $(jq -S . "$TRAFFIC_FILE") == "$before" ]]
+traffic_rules_restore() { :; }
+traffic_collect
+MOCK_COUNTERS=""
+traffic_clear_all_records <<<RESET >/dev/null
+jq -e '.totals=={daily:{},cycles:{}} and ([.inbounds[]?.cycles | length] | add)==0' "$TRAFFIC_FILE" >/dev/null
+output=$(traffic_show)
+grep -Fq '全部入站：0 B' <<<"$output"
+MOCK_COUNTERS=$'a\t50'
+traffic_collect
+XRAYCTL_TRAFFIC_NOW='2026-09-22 18:30:00'
+XRAYCTL_TRAFFIC_TODAY=2026-09-22
+traffic_collect
+jq -e '.totals.cycles=={"2026-09-22 18:30:00":100} and .totals.daily=={"2026-09-22":100}' "$TRAFFIC_FILE" >/dev/null
+BASH_AGGREGATE
+
 printf 'traffic accounting unit checks passed.\n'

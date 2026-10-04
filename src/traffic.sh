@@ -254,7 +254,7 @@ traffic_seed_periods() {
     traffic_validate_date "$day" || continue
     start=$(traffic_period_start "$day 23:59:59") || return 1
     mapping=$(jq -nc --argjson mapping "$mapping" --arg day "$day" --arg start "$start" '$mapping + {($day):$start}') || return 1
-  done < <(jq -r '[.inbounds[]?.daily | keys[]?] | unique[]' "$TRAFFIC_FILE")
+  done < <(jq -r '([.inbounds[]?.daily | keys[]?] + [(.totals.daily // {}) | keys[]]) | unique[]' "$TRAFFIC_FILE")
   tmp=$(temp_file)
   jq --argjson mapping "$mapping" '
     .inbounds |= with_entries(
@@ -262,7 +262,13 @@ traffic_seed_periods() {
         ($mapping[$day.key] // null) as $start |
         if $start == null or $start == "" then . else .[$start]=((.[$start] // 0) + $day.value) end
       ))
-    ) | .periodsSeeded=true
+    ) |
+    if .totals != null then
+      .totals.cycles=(reduce ((.totals.daily // {}) | to_entries[]) as $day ({};
+        ($mapping[$day.key] // null) as $start |
+        if $start == null or $start == "" then . else .[$start]=((.[$start] // 0) + $day.value) end
+      ))
+    else . end | .periodsSeeded=true
   ' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
   install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
 }
@@ -301,7 +307,20 @@ traffic_update_file() {
       .value.cycles=((.value.cycles // {}) | with_entries(select(.key == $periodStart))) |
       if .value.cycles[$periodStart] == null then .value.daily |= del(.[$today]) else . end
     ) |
+    # Seed the independent aggregate once from retained legacy records, after
+    # their accounting conversion. Clearing one inbound must never reseed it.
+    .totals=(.totals // {
+      daily:(reduce (.inbounds[]?.daily | to_entries[]?) as $entry ({};
+        .[$entry.key]=((.[$entry.key] // 0) + $entry.value))),
+      cycles:(reduce (.inbounds[]?.cycles | to_entries[]?) as $entry ({};
+        .[$entry.key]=((.[$entry.key] // 0) + $entry.value)))
+    }) |
+    .totals.daily |= with_entries(select(.key >= $cutoff and .key <= $today)) |
+    .totals.cycles |= with_entries(select(.key == $periodStart)) |
+    if .totals.cycles[$periodStart] == null then .totals.daily |= del(.[$today]) else . end |
     reduce ($samples|to_entries[]) as $item (.;
+      .totals.daily[$today]=((.totals.daily[$today] // 0) + ($item.value * 2)) |
+      .totals.cycles[$periodStart]=((.totals.cycles[$periodStart] // 0) + ($item.value * 2)) |
       .inbounds[$item.key]=(.inbounds[$item.key] // {protocol:"unknown",port:0,deleted:($inventory[$item.key] == null),daily:{}}) |
       .inbounds[$item.key].daily[$today]=((.inbounds[$item.key].daily[$today] // 0) + ($item.value * 2)) |
       .inbounds[$item.key].cycles[$periodStart]=((.inbounds[$item.key].cycles[$periodStart] // 0) + ($item.value * 2)) |
@@ -656,7 +675,7 @@ traffic_format_bytes() {
 
 traffic_range_total() {
   local start=$1 finish=$2
-  jq --arg start "$start" --arg finish "$finish" '[.inbounds[]?.daily | to_entries[]? | select(.key >= $start and .key <= $finish) | .value] | add // 0' "$TRAFFIC_FILE"
+  jq --arg start "$start" --arg finish "$finish" '[(.totals.daily // {}) | to_entries[] | select(.key >= $start and .key <= $finish) | .value] | add // 0' "$TRAFFIC_FILE"
 }
 
 traffic_limit_count() {
@@ -899,6 +918,8 @@ traffic_period_set() {
   fi
   if traffic_is_enabled; then traffic_collect || return 1; fi
   traffic_lock_acquire || return 1
+  # Preserve the independent aggregate before rebucketing a legacy file.
+  traffic_update_file '{}' false || { traffic_lock_release; return 1; }
   tmp=$(temp_file)
   jq --argjson day "$day" --arg clock "$clock" '.period={day:$day,time:$clock} | .periodsSeeded=false' "$TRAFFIC_FILE" >"$tmp" || rc=1
   if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
@@ -947,7 +968,7 @@ traffic_show() {
     done <<<"$rows"
   fi
   if [[ $period == true ]]; then
-    total=$(jq --arg start "$start" '[.inbounds[]?.cycles[$start] // 0] | add // 0' "$TRAFFIC_FILE")
+    total=$(jq --arg start "$start" '.totals.cycles[$start] // 0' "$TRAFFIC_FILE")
   else
     total=$(traffic_range_total "$start" "$end")
   fi
@@ -1012,8 +1033,10 @@ traffic_clear_tag_records() {
   [[ -n $tag ]] || traffic_select_record_tag tag || return 0
   traffic_collect || true; traffic_init_file
   jq -e --arg tag "$tag" '.inbounds[$tag] != null' "$TRAFFIC_FILE" >/dev/null || { warn "没有入站 ${tag} 的流量记录。"; return 1; }
-  confirm "清空入站 ${tag} 当前周期的流量记录和额度已用量？" N || return 0
+  confirm "清空入站 ${tag} 当前周期的流量记录和额度已用量（保留全部入站总流量）？" N || return 0
   traffic_lock_acquire || return 1
+  # Statistics may be stopped: seed legacy totals before deleting any record.
+  traffic_update_file '{}' false || { traffic_lock_release; return 1; }
   tmp=$(temp_file); jq --arg tag "$tag" '
     .inbounds[$tag].daily={} | .inbounds[$tag].cycles={} |
     if .inbounds[$tag].limit.enabled==true then .inbounds[$tag].limit.usedBytes=0 else . end
@@ -1033,6 +1056,7 @@ traffic_clear_all_records() {
   [[ $answer == RESET ]] || { info "已取消。"; return 0; }
   traffic_lock_acquire || return 1
   tmp=$(temp_file); jq '
+    .totals={daily:{},cycles:{}} |
     .inbounds |= with_entries(
       .value.daily={} | .value.cycles={} |
       if .value.limit.enabled==true then .value.limit.usedBytes=0 else . end
