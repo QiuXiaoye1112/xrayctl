@@ -1033,13 +1033,17 @@ traffic_clear_tag_records() {
   [[ -n $tag ]] || traffic_select_record_tag tag || return 0
   traffic_collect || true; traffic_init_file
   jq -e --arg tag "$tag" '.inbounds[$tag] != null' "$TRAFFIC_FILE" >/dev/null || { warn "没有入站 ${tag} 的流量记录。"; return 1; }
-  confirm "清空入站 ${tag} 当前周期的流量记录和额度已用量（保留全部入站总流量）？" N || return 0
+  confirm "清空入站 ${tag} 当前周期的流量记录和额度已用量；已删除的入站将移除整条记录（保留全部入站总流量）？" N || return 0
   traffic_lock_acquire || return 1
   # Statistics may be stopped: seed legacy totals before deleting any record.
   traffic_update_file '{}' false || { traffic_lock_release; return 1; }
   tmp=$(temp_file); jq --arg tag "$tag" '
-    .inbounds[$tag].daily={} | .inbounds[$tag].cycles={} |
-    if .inbounds[$tag].limit.enabled==true then .inbounds[$tag].limit.usedBytes=0 else . end
+    if .inbounds[$tag] == null then .
+    elif .inbounds[$tag].deleted==true then del(.inbounds[$tag])
+    else
+      .inbounds[$tag].daily={} | .inbounds[$tag].cycles={} |
+      if .inbounds[$tag].limit.enabled==true then .inbounds[$tag].limit.usedBytes=0 else . end
+    end
   ' "$TRAFFIC_FILE" >"$tmp" || rc=1
   if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release

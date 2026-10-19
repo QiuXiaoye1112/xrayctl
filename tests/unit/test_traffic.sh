@@ -159,7 +159,7 @@ grep -Fq '3) socks(已删除)' "$selection_output"
 rm -f "$selection_output"
 confirm() { return 0; }
 traffic_clear_tag_records "$selected" >/dev/null
-jq -e '.inbounds.socks.daily|length==0' "$TRAFFIC_FILE" >/dev/null
+jq -e '.inbounds.socks==null' "$TRAFFIC_FILE" >/dev/null
 
 [[ $(traffic_format_bytes 0) == '0 B' ]]
 [[ $(traffic_format_bytes 1024) == '1.00 KB' ]]
@@ -651,5 +651,72 @@ XRAYCTL_TRAFFIC_TODAY=2026-09-22
 traffic_collect
 jq -e '.totals.cycles=={"2026-09-22 18:30:00":100} and .totals.daily=={"2026-09-22":100}' "$TRAFFIC_FILE" >/dev/null
 BASH_AGGREGATE
+
+# Clearing a deleted inbound removes its entire retained record, even when
+# its old quota is enabled. Live SOCKS inbounds keep their quota settings.
+XRAYCTL_TESTING=1 \
+XRAYCTL_TRAFFIC_NOW='2026-08-24 12:00:00' \
+XRAYCTL_CONFIG_DIR="$TMP/clear-deleted/cfg" \
+XRAYCTL_CONFIG_FILE="$TMP/clear-deleted/cfg/config.json" \
+XRAYCTL_META_FILE="$TMP/clear-deleted/meta.json" \
+XRAYCTL_TRAFFIC_FILE="$TMP/clear-deleted/traffic.json" \
+XRAYCTL_CERT_DIR="$TMP/clear-deleted/cfg/certs" \
+XRAYCTL_LOG_DIR="$TMP/clear-deleted/log" \
+XRAYCTL_LOCK_FILE="$TMP/clear-deleted/lock" \
+bash <<'BASH_CLEAR_DELETED'
+set -Eeuo pipefail
+source ./xrayctl.sh
+write_default_config
+tmp=$(temp_file)
+jq '.inbounds=[{protocol:"socks",tag:"socks",port:26399,settings:{accounts:[]}}]' "$CONFIG_FILE" >"$tmp"
+mv -f "$tmp" "$CONFIG_FILE"
+confirm() { return 0; }
+traffic_read_counters() { :; }
+traffic_rules_restore() { :; }
+for collecting in false true; do
+  for limited in false true; do
+    traffic_default_json >"$TRAFFIC_FILE"
+    tmp=$(temp_file)
+    jq --argjson collecting "$collecting" --argjson limited "$limited" '
+      .enabled=$collecting | .accountingMultiplier=2 | .periodsSeeded=true |
+      del(.totals) |
+      .inbounds={
+        removed:{protocol:"vless",port:15078,deleted:true,
+          daily:{"2026-08-24":100},cycles:{"2026-08-01 00:00:00":100},
+          limit:{enabled:$limited,quotaBytes:1000,usedBytes:100}},
+        empty:{protocol:"vless",port:15079,deleted:true,daily:{},cycles:{},
+          limit:{enabled:true,quotaBytes:1000,usedBytes:0}},
+        socks:{protocol:"socks",port:26399,deleted:false,
+          daily:{"2026-08-24":200},cycles:{"2026-08-01 00:00:00":200},
+          limit:{enabled:true,quotaBytes:1000,usedBytes:200,resetDay:24,
+            anchorDay:24,anchorTime:"12:00:00",cycleStart:"2026-08-24 12:00:00",
+            cycleEnd:"2026-09-24 12:00:00"}}
+      }
+    ' "$TRAFFIC_FILE" >"$tmp"
+    mv -f "$tmp" "$TRAFFIC_FILE"
+    traffic_sync_inventory
+    live_before=$(jq -S .inbounds.socks "$TRAFFIC_FILE")
+    totals_before=$(jq -S .totals "$TRAFFIC_FILE")
+    traffic_clear_tag_records removed >/dev/null
+    traffic_sync_inventory
+    jq -e '.inbounds.removed==null and .totals.cycles["2026-08-01 00:00:00"]==300' "$TRAFFIC_FILE" >/dev/null
+    [[ $(jq -S .inbounds.socks "$TRAFFIC_FILE") == "$live_before" ]]
+    [[ $(jq -S .totals "$TRAFFIC_FILE") == "$totals_before" ]]
+    traffic_clear_tag_records empty >/dev/null
+    traffic_sync_inventory
+    jq -e '.inbounds.empty==null' "$TRAFFIC_FILE" >/dev/null
+    output=$(traffic_show)
+    ! grep -Fq removed <<<"$output"
+    ! grep -Fq 'empty(已删除)' <<<"$output"
+    traffic_clear_tag_records socks >/dev/null
+    traffic_sync_inventory
+    jq -e '.inbounds.socks.deleted==false and .inbounds.socks.daily=={} and
+      .inbounds.socks.cycles=={} and .inbounds.socks.limit.usedBytes==0' "$TRAFFIC_FILE" >/dev/null
+    [[ $(jq -S '.inbounds.socks.limit | del(.usedBytes)' "$TRAFFIC_FILE") == \
+       "$(jq -S '.limit | del(.usedBytes)' <<<"$live_before")" ]]
+    [[ $(jq -S .totals "$TRAFFIC_FILE") == "$totals_before" ]]
+  done
+done
+BASH_CLEAR_DELETED
 
 printf 'traffic accounting unit checks passed.\n'
