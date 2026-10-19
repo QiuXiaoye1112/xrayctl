@@ -40,10 +40,16 @@ platform_service_exists() {
   esac
 }
 
+platform_openrc_service() {
+  # OpenRC supervisors must not inherit the management flock. Closing the
+  # descriptor for this command leaves the caller's lock held until it exits.
+  rc-service "$@" 9>&-
+}
+
 platform_service_is_active() {
   case $(platform_init_system) in
     systemd) systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null ;;
-    openrc) platform_service_exists && rc-service "$SERVICE_NAME" status >/dev/null 2>&1 ;;
+    openrc) platform_service_exists && platform_openrc_service "$SERVICE_NAME" status >/dev/null 2>&1 ;;
   esac
 }
 
@@ -57,14 +63,14 @@ platform_service_is_enabled() {
 platform_service_start() {
   case $(platform_init_system) in
     systemd) systemctl start "$SERVICE_NAME" ;;
-    openrc) rc-service "$SERVICE_NAME" start ;;
+    openrc) platform_openrc_service "$SERVICE_NAME" start ;;
   esac
 }
 
 platform_service_stop() {
   case $(platform_init_system) in
     systemd) systemctl stop "$SERVICE_NAME" ;;
-    openrc) rc-service "$SERVICE_NAME" stop ;;
+    openrc) platform_openrc_service "$SERVICE_NAME" stop ;;
   esac
 }
 
@@ -73,11 +79,11 @@ platform_service_restart() {
     systemd) systemctl daemon-reload; systemctl restart "$SERVICE_NAME" ;;
     openrc)
       if platform_service_is_active; then
-        rc-service "$SERVICE_NAME" restart
+        platform_openrc_service "$SERVICE_NAME" restart
       else
-        rc-service "$SERVICE_NAME" zap >/dev/null 2>&1 || true
+        platform_openrc_service "$SERVICE_NAME" zap >/dev/null 2>&1 || true
         rm -f "/run/${SERVICE_NAME}.pid"
-        rc-service "$SERVICE_NAME" start
+        platform_openrc_service "$SERVICE_NAME" start
       fi
       ;;
   esac
@@ -100,7 +106,7 @@ platform_service_disable() {
 platform_service_status() {
   case $(platform_init_system) in
     systemd) systemctl --no-pager --full status "$SERVICE_NAME" ;;
-    openrc) rc-service "$SERVICE_NAME" status ;;
+    openrc) platform_openrc_service "$SERVICE_NAME" status ;;
   esac
 }
 
@@ -116,7 +122,7 @@ platform_service_hook_command() {
   local action=$1
   case $(platform_init_system) in
     systemd) printf 'systemctl %s %s\n' "$action" "$SERVICE_NAME" ;;
-    openrc) printf 'rc-service %s %s\n' "$SERVICE_NAME" "$action" ;;
+    openrc) printf 'rc-service %s %s 9>&-\n' "$SERVICE_NAME" "$action" ;;
   esac
 }
 
