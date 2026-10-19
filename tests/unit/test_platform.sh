@@ -55,6 +55,41 @@ assert_eq "rc-update add ${SERVICE_NAME} default" "$PLATFORM_CALL" "OpenRC enabl
 
 pass "platform service API routes systemd and OpenRC operations"
 
+# OpenRC can keep rc-service descriptors in supervise-daemon after the manager
+# exits. Every service invocation must drop fd 9 without releasing the caller's
+# lock. Include collector setup and certificate hook commands in that boundary.
+rc-service() {
+  if { : >&9; } 2>/dev/null; then fail "OpenRC inherited the management lock descriptor"; fi
+  PLATFORM_CALL="rc-service ${1-} ${2-}"
+  [[ ${2-} != status || ${MOCK_OPENRC_ACTIVE:-1} == 1 ]]
+}
+exec 9>"${TEST_ROOT}/manager.lock"
+platform_service_start
+platform_service_stop
+platform_service_restart
+MOCK_OPENRC_ACTIVE=0
+platform_service_restart
+MOCK_OPENRC_ACTIVE=1
+platform_service_status
+assert_success platform_service_is_active
+hook=$(platform_service_hook_command start)
+eval "$hook"
+original_quick_command=$QUICK_COMMAND
+original_traffic_openrc_service=$TRAFFIC_OPENRC_SERVICE
+original_meta_resource_register=$(declare -f meta_resource_register)
+QUICK_COMMAND=$BASH
+TRAFFIC_OPENRC_SERVICE="${TEST_ROOT}/collector.init"
+meta_resource_register() { :; }
+traffic_timer_install
+traffic_timer_remove
+QUICK_COMMAND=$original_quick_command
+TRAFFIC_OPENRC_SERVICE=$original_traffic_openrc_service
+eval "$original_meta_resource_register"
+{ : >&9; } 2>/dev/null || fail "OpenRC service call closed the caller's lock descriptor"
+exec 9>&-
+platform_service_start
+pass "OpenRC services and certificate hooks do not inherit the management lock"
+
 original_command_exists=$(declare -f command_exists)
 command_exists() { [[ $1 == ifconfig ]]; }
 ifconfig() {

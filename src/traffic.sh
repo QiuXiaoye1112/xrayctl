@@ -1125,7 +1125,7 @@ $(printf '%s' 'depend() { need net; after xray; }')
 EOF_RC
       chmod 755 "$TRAFFIC_OPENRC_SERVICE"
       rc-update add xrayctl-traffic-collect default >/dev/null 2>&1 || true
-      rc-service xrayctl-traffic-collect restart >/dev/null 2>&1 || return 1
+      platform_openrc_service xrayctl-traffic-collect restart >/dev/null 2>&1 || return 1
       meta_resource_register trafficService "$TRAFFIC_OPENRC_SERVICE"
       ;;
     *) warn "未检测到 systemd 或 OpenRC，无法安装流量采集任务。"; return 1;;
@@ -1141,7 +1141,7 @@ traffic_timer_remove() {
       systemctl daemon-reload >/dev/null 2>&1 || true
       ;;
     openrc)
-      rc-service xrayctl-traffic-collect stop >/dev/null 2>&1 || true
+      platform_openrc_service xrayctl-traffic-collect stop >/dev/null 2>&1 || true
       rc-update del xrayctl-traffic-collect default >/dev/null 2>&1 || true
       rm -f "$TRAFFIC_OPENRC_SERVICE"
       ;;
