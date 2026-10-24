@@ -42,7 +42,7 @@ case $download_url in
   *\?*) download_url="${download_url}&xrayctl_cache=$(date +%s)" ;;
   *) download_url="${download_url}?xrayctl_cache=$(date +%s)" ;;
 esac
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
+curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
   --connect-timeout 15 --max-time 120 "$download_url" -o "${temp_dir}/xrayctl"
 grep -q '^# xrayctl - Xray Linux terminal manager' "${temp_dir}/xrayctl" \
   || die "下载内容校验失败。"

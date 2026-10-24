@@ -40,7 +40,7 @@ if [[ $download_url == *\?* ]]; then
 else
   download_url="${download_url}?xrayctl_cache=$(date +%s)"
 fi
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 120 "$download_url" -o "${temp_dir}/xrayctl"
+curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 120 "$download_url" -o "${temp_dir}/xrayctl"
 grep -q '^# xrayctl - Xray Linux terminal manager' "${temp_dir}/xrayctl" \
   || die "下载内容不是有效的 xrayctl 发行版。"
 bash -n "${temp_dir}/xrayctl" || die "下载的 xrayctl 未通过 Bash 语法检查。"
@@ -53,6 +53,7 @@ fi
 install -d -m 755 "$(dirname "$TARGET")"
 install -m 755 "${temp_dir}/xrayctl" "$TARGET"
 
+info "正在安装/修复 Xray 核心和快捷命令..."
 "$TARGET" install "${1-}"
 
 info "安装完成。运行 xrayctl 打开管理菜单。"

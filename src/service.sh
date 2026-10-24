@@ -161,7 +161,7 @@ install_xray_core_openrc() {
   archive="${work}/${asset}"
   digest="${archive}.dgst"
   info "正在下载 Xray ${version}。"
-  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
     "${base}/${asset}" -o "$archive" || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray 下载失败。"; }
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 60 \
     "${base}/${asset}.dgst" -o "$digest" || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray 校验文件下载失败。"; }
@@ -205,10 +205,12 @@ _service_restore_or_initialize_config() {
 _service_install_output() {
   awk '
     {
+      original = $0
       gsub(/\033\[[0-9;]*m/, "")
+      if ($0 ~ /^Downloading verification file/) details = 1
+      if (!details) { print original; fflush(); next }
       message = ""
-      if ($0 ~ /^Downloading Xray archive:/) message = "信息 · 正在下载核心安装包..."
-      else if ($0 ~ /^Downloading verification file/) message = "信息 · 正在下载校验文件..."
+      if ($0 ~ /^Downloading verification file/) message = "信息 · 正在下载校验文件..."
       else if ($0 ~ /^info: Extract the Xray package/) message = "信息 · 正在解压并安装核心..."
       else if ($0 ~ /^info: Stop the Xray service/) message = "信息 · 正在停止 Xray 服务..."
       else if ($0 ~ /^WARNING: The .* user already exists/) message = "警告 · 复用已有的 Xray 用户，请确保该账户仅供 Xray 使用。"
@@ -216,7 +218,7 @@ _service_install_output() {
       else if ($0 ~ /^info: Systemd service files have been installed/) message = "信息 · 服务配置已安装。"
       else if ($0 ~ /^warning: The following are the actual parameters/ || $0 ~ /^warning: Please make sure the configuration file path/) next
       else if ($0 ~ /^info: Xray .* is installed\./) message = "信息 · 核心安装完成。"
-      else if ($0 ~ /^info: Start the Xray service/) message = "信息 · 正在启动 Xray 服务..."
+      else if ($0 ~ /^info: Start the Xray service/) { message = "信息 · 正在启动 Xray 服务..."; details = 0 }
       else if (tolower($0) ~ /^(warning|error):/) message = $0
       if (message != "") { print message; fflush() }
     }
@@ -231,8 +233,8 @@ install_or_update_xray() {
     install_xray_core_openrc "$version"
   else
     installer=$(temp_file)
-    info "正在安装 Xray ${version#v}..."
-    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
+    info "从 XTLS 官方仓库下载安装脚本。"
+    curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
     chmod 700 "$installer"
     install_log=$(temp_file)
     local -a installer_args=(install)
@@ -252,15 +254,14 @@ install_or_update_xray() {
   setup_runtime_access
   [[ $(platform_init_system) != openrc ]] || write_openrc_service
   install_quick_command
-  info "正在检查配置并启动服务..."
   validate_candidate "$CONFIG_FILE"
   platform_service_enable >/dev/null
   restart_service
   traffic_runtime_ensure || warn "Xray 已启动，但流量统计运行时暂未恢复，请运行 xrayctl traffic enable 重试。"
   if [[ $mode == upgrade ]]; then
-    info "Xray $($XRAY_BIN version | awk 'NR==1 {print $2}') 已升级。"
+    info "Xray 已升级：$($XRAY_BIN version | sed -n '1p')"
   else
-    info "Xray $($XRAY_BIN version | awk 'NR==1 {print $2}') 已安装/修复。"
+    info "Xray 已安装/修复：$($XRAY_BIN version | sed -n '1p')"
   fi
 }
 
@@ -290,7 +291,7 @@ install_quick_command() {
     else
       download_url="${download_url}?xrayctl_cache=$(date +%s)"
     fi
-    if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
+    if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
       --connect-timeout 15 --max-time 120 "$download_url" -o "$downloaded"; then
       rm -f "$downloaded"
       die "快捷命令脚本下载失败。"
