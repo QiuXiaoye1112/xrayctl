@@ -466,13 +466,12 @@ service_menu() {
     heading "服务管理"
     printf '状态: %s  |  开机自启: %s  |  Xray: %s\n\n' \
       "$(service_state_summary)" "$(startup_state_summary)" "$(xray_version_summary)"
-    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装/更新/修复 Xray\n6) 系统诊断\n7) 修复快捷命令\n0) 返回\n'
+    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n0) 返回\n'
     read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action toggle_service_running; pause;; 2) run_menu_action service_action restart; pause;;
       3) run_menu_action toggle_service_startup; pause;; 4) run_menu_action show_logs 100; pause;;
-      5) run_menu_action install_or_update_xray install; pause;; 6) run_menu_action system_diagnostics; pause;;
-      7) run_menu_action repair_quick_command; pause;; 0) return;; *) warn "无效选项。"; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
     esac
   done
 }
@@ -484,25 +483,6 @@ bbr_state_summary() {
   else
     printf '不可用'
   fi
-}
-
-uninstall_menu() {
-  local choice
-  while true; do
-    clear_screen
-    heading "卸载"
-    printf '1) 卸载程序 — 删除 Xray 核心，保留配置、证书、备份、xrayctl、续期\n'
-    printf '2) 完全卸载 — 删除 Xray + xrayctl 管理数据，保留备份\n'
-    printf '3) 彻底删除 — 删除 xrayctl 创建的全部内容（含备份、Certbot、凭据）\n'
-    printf '0) 返回\n'
-    read -r -p "请选择: " choice || { cancel_input; return 0; }
-    case $choice in
-      1) run_menu_action uninstall_xray 0; pause;;
-      2) run_menu_action uninstall_xray 1; pause;;
-      3) run_menu_action uninstall_xray 2; pause;;
-      0) return;; *) warn "无效选项。"; pause;;
-    esac
-  done
 }
 
 traffic_menu() {
@@ -574,7 +554,8 @@ main_menu() {
     read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_menu;;
-      5) run_menu_action manage_bbr; pause;; 6) service_menu;; 7) uninstall_menu;;
+      5) run_menu_action manage_bbr; pause;; 6) service_menu;;
+      7) run_menu_action uninstall_xray 2; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -586,8 +567,8 @@ xrayctl - Xray Linux 管理脚本
 
 用法:
   xrayctl                         打开交互菜单
-  xrayctl install [版本]          安装/修复（版本示例: 25.6.8）
-  xrayctl update [版本]           升级 Xray
+  xrayctl install [版本]          安装/修复（默认固定: 26.3.27）
+  xrayctl update [版本]           升级 Xray（默认固定: 26.3.27）
   xrayctl uninstall                 卸载 Xray 核心（保留配置）
   xrayctl uninstall --purge          完全卸载（保留备份）
   xrayctl uninstall --erase          彻底删除（清除全部 xrayctl 数据）

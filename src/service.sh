@@ -204,7 +204,7 @@ _service_restore_or_initialize_config() {
 
 install_or_update_xray() {
   ensure_runtime_dependencies install
-  local mode=${1:-install} version=${2:-} installer preserved_config=""
+  local mode=${1:-install} version=${2:-$XRAY_CORE_PINNED_VERSION} installer preserved_config=""
   _service_snapshot_existing_config preserved_config
   if [[ $(platform_init_system) == openrc ]]; then
     install_xray_core_openrc "$version"

@@ -28,7 +28,7 @@ xrayctl
 
 - 依赖安装：`apk`
 - 服务管理：OpenRC (`rc-service` / `rc-update`)
-- Xray core：下载官方 release asset 并校验 SHA-256
+- Xray core：默认固定下载官方 `26.3.27` release asset 并校验 SHA-256
 - 支持架构：x86_64、aarch64、armv7
 - 配置、协议、用户、出站、分享、证书、事务和卸载逻辑：与 systemd 平台共用同一份源码和发行文件
 
