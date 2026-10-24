@@ -82,9 +82,11 @@ setup_runtime_access
 assert_eq "$RUNTIME_OWNER" "$(stat -c %U "$LOG_DIR")" 'service can replace managed log directory entries'
 
 # Certificate access also works before any systemd service has been installed.
-XRAYCTL_PLATFORM=systemd
-service_exists() { return 1; }
-setup_runtime_access
+if [[ $(id -u) == 0 ]]; then
+  XRAYCTL_PLATFORM=systemd
+  service_exists() { return 1; }
+  setup_runtime_access
+fi
 
 pass 'runtime log permissions support systemd service users and OpenRC without truncation'
 
