@@ -555,7 +555,7 @@ main_menu() {
     case $choice in
       1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_menu;;
       5) run_menu_action manage_bbr; pause;; 6) service_menu;;
-      7) run_menu_action uninstall_xray 2; pause;;
+      7) clear_screen; run_menu_action uninstall_xray 2; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
