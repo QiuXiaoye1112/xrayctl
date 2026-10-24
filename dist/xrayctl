@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="978cd7a1dd79"
+readonly XRAYCTL_BUILD_COMMIT="daa7054daa96"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -63,9 +63,28 @@ else
   C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_CYAN=""; C_BOLD=""; C_RESET=""
 fi
 
-info()    { printf '%s[信息]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
-warn()    { printf '%s[警告]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
-error()   { printf '%s[错误]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+print_notice() {
+  local label=$1 color=$2 title=${3-} detail line rendered
+  shift 3
+  if [[ $title == *$'\n'* ]]; then
+    set -- "${title#*$'\n'}" "$@"
+    title=${title%%$'\n'*}
+  fi
+  printf -v rendered '\n%s%s%s · %s\n' "$color" "$label" "$C_RESET" "$title"
+  for detail in "$@"; do
+    [[ -n $detail ]] || continue
+    while IFS= read -r line; do
+      if [[ -n $line ]]; then printf -v rendered '%s  %s\n' "$rendered" "$line"
+      else printf -v rendered '%s\n' "$rendered"; fi
+    done <<<"$detail"
+  done
+  # Emit one block on one stream so details cannot overtake their warning.
+  printf '%s' "$rendered"
+}
+
+info()    { print_notice "信息" "$C_GREEN" "${1-}" "${@:2}"; }
+warn()    { print_notice "警告" "$C_YELLOW" "${1-}" "${@:2}" >&2; }
+error()   { print_notice "错误" "$C_RED" "${1-}" "${@:2}" >&2; }
 die()     { error "$*"; exit 1; }
 heading() { printf '\n%s%s%s\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"; }
 clear_screen() { clear 2>/dev/null || true; }
@@ -96,10 +115,10 @@ pause() {
 }
 
 confirm() {
-  local prompt=${1:-"确定继续吗？"} default=${2:-N} answer suffix
-  if [[ $default == Y ]]; then suffix="[Y/n]"; else suffix="[y/N]"; fi
+  local prompt=${1:-"确定继续吗？"} default=${2:-N} answer
   if [[ ! -t 0 ]]; then [[ $default == Y ]]; return; fi
-  read -r -p "${prompt} ${suffix} " answer || { cancel_input; return 1; }
+  printf '\n' >&2
+  read -r -p "${prompt} [Y/N]: " answer || { cancel_input; return 1; }
   answer=${answer:-$default}
   [[ $answer =~ ^[Yy]$ ]]
 }
@@ -956,8 +975,7 @@ validate_supported_capabilities() {
 validate_candidate() {
   local candidate=$1 validation_output
   if ! validation_output=$(jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' "$candidate" 2>&1); then
-    error "JSON 结构检查失败。"
-    [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+    error "JSON 结构检查失败。" "$validation_output"
     return 1
   fi
   if ! validate_supported_capabilities "$candidate"; then
@@ -966,8 +984,7 @@ validate_candidate() {
   fi
   if xray_installed; then
     if ! validation_output=$("$XRAY_BIN" run -test -format json -config "$candidate" 2>&1); then
-      error "Xray 核心拒绝了新配置，原始错误如下："
-      [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+      error "Xray 核心拒绝了新配置，原始错误如下：" "$validation_output"
       return 1
     fi
   fi
@@ -979,8 +996,7 @@ validate_restore_config() {
     "$candidate" >/dev/null || return 1
   if xray_installed; then
     validation_output=$("$XRAY_BIN" run -test -format json -config "$candidate" 2>&1) || {
-      error "恢复配置未通过 Xray 核心检查。"
-      [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+      error "恢复配置未通过 Xray 核心检查。" "$validation_output"
       return 1
     }
   fi
@@ -1033,8 +1049,7 @@ state_validate_metadata_candidate() {
     ((.domainTemplates.templates // []) | type=="array") and
     ((.domainTemplates.bindings // []) | type=="array")
   ' "$candidate" 2>&1); then
-    error "metadata JSON 结构检查失败。"
-    [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+    error "metadata JSON 结构检查失败。" "$validation_output"
     return 1
   fi
 }
@@ -1240,7 +1255,7 @@ backup_all() {
   tar -czf "$target" -C / "${paths[@]}" 2>/dev/null || { rm -f "$target"; die "备份失败。"; }
   chmod 600 "$target"
   info "备份已创建：$target"
-  info "提示：备份包含 Xray 配置、metadata、流量记录和证书副本，不含 Certbot 账户/lineage 数据。"
+  info "备份包含 Xray 配置、metadata、流量记录和证书副本，不含 Certbot 账户/lineage 数据。"
 }
 
 restore_backup() {
@@ -1974,9 +1989,7 @@ cloudflare_credentials_menu() {
       2) if load_cloudflare_credentials; then
            deps=$(cloudflare_dependent_certificates)
            if [[ -n $deps ]]; then
-             printf '\n依赖证书（%s 张）：\n\n' "$(printf '%s\n' "$deps" | grep -c .)"
-             printf '%s\n' "$deps" | sed 's/^/  - /'
-             printf '\n删除凭据后这些证书将无法自动续期。\n'
+             warn "当前 Cloudflare 凭据仍被证书使用" "$deps" "删除后，这些证书将无法自动续期。"
            fi
            confirm "仍然删除 Cloudflare 凭据？" N || { info "已取消。"; pause; continue; }
            rm -f "$CLOUDFLARE_INI"
@@ -2497,7 +2510,7 @@ certificate_inbound_users() {
 
 delete_managed_certificate() {
   ensure_runtime_dependencies cert-delete
-  local identifier=${1-} assume_yes=${2:-0} cert_path key_path renewal users tag
+  local identifier=${1-} assume_yes=${2:-0} cert_path key_path renewal users
   [[ -n $identifier ]] || select_managed_certificate identifier 1 || return 0
   validate_certificate_identifier "$identifier" || die "证书标识无效。"
   meta_cert_exists "$identifier" || { warn "该证书不在 xrayctl 托管列表中，不予删除。"; return 0; }
@@ -2506,8 +2519,7 @@ delete_managed_certificate() {
   [[ -e $cert_path || -e $key_path ]] || warn "证书副本已缺失，将清理 metadata 及 Certbot 记录。"
   users=$(certificate_inbound_users "$identifier")
   if [[ -n $users ]]; then
-    warn "证书正在被以下 TLS 入站使用，不能删除："
-    while IFS= read -r tag; do [[ -n $tag ]] && printf '  - %s\n' "$tag" >&2; done <<<"$users"
+    warn "证书 ${identifier} 仍被 TLS 入站使用，不能删除" "$users" "请先为这些入站更换证书。"
     return 0
   fi
   [[ $assume_yes == 1 ]] || confirm "删除托管证书 ${identifier}？" N || return 0
@@ -5576,12 +5588,7 @@ delete_outbound() {
     die "该出站仍被自定义路由规则引用，请先在完整配置中处理。"
   fi
   if ((default_refs > 0 || domain_refs > 0 || binding_refs > 0)); then
-    warn "出站 ${tag} 当前被 xrayctl 管理规则引用："
-    ((default_refs > 0)) && printf '%s 个入站默认出站使用\n' "$default_refs"
-    ((domain_refs > 0)) && printf '%s 条域名规则使用\n' "$domain_refs"
-    ((binding_refs > 0)) && printf '%s 个模板绑定使用\n' "$binding_refs"
-    warn "删除后这些管理规则会一并删除。"
-    ((binding_refs > 0)) && warn "相关的模板绑定也会一并移除。"
+    warn "出站 ${tag} 仍被使用"
     confirm "继续删除出站 ${tag}？" N || return 0
   else
     confirm "删除出站 ${tag}？" N || return 0

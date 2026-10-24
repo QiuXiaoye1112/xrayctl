@@ -538,9 +538,7 @@ cloudflare_credentials_menu() {
       2) if load_cloudflare_credentials; then
            deps=$(cloudflare_dependent_certificates)
            if [[ -n $deps ]]; then
-             printf '\n依赖证书（%s 张）：\n\n' "$(printf '%s\n' "$deps" | grep -c .)"
-             printf '%s\n' "$deps" | sed 's/^/  - /'
-             printf '\n删除凭据后这些证书将无法自动续期。\n'
+             warn "当前 Cloudflare 凭据仍被证书使用" "$deps" "删除后，这些证书将无法自动续期。"
            fi
            confirm "仍然删除 Cloudflare 凭据？" N || { info "已取消。"; pause; continue; }
            rm -f "$CLOUDFLARE_INI"
@@ -1061,7 +1059,7 @@ certificate_inbound_users() {
 
 delete_managed_certificate() {
   ensure_runtime_dependencies cert-delete
-  local identifier=${1-} assume_yes=${2:-0} cert_path key_path renewal users tag
+  local identifier=${1-} assume_yes=${2:-0} cert_path key_path renewal users
   [[ -n $identifier ]] || select_managed_certificate identifier 1 || return 0
   validate_certificate_identifier "$identifier" || die "证书标识无效。"
   meta_cert_exists "$identifier" || { warn "该证书不在 xrayctl 托管列表中，不予删除。"; return 0; }
@@ -1070,8 +1068,7 @@ delete_managed_certificate() {
   [[ -e $cert_path || -e $key_path ]] || warn "证书副本已缺失，将清理 metadata 及 Certbot 记录。"
   users=$(certificate_inbound_users "$identifier")
   if [[ -n $users ]]; then
-    warn "证书正在被以下 TLS 入站使用，不能删除："
-    while IFS= read -r tag; do [[ -n $tag ]] && printf '  - %s\n' "$tag" >&2; done <<<"$users"
+    warn "证书 ${identifier} 仍被 TLS 入站使用，不能删除" "$users" "请先为这些入站更换证书。"
     return 0
   fi
   [[ $assume_yes == 1 ]] || confirm "删除托管证书 ${identifier}？" N || return 0
