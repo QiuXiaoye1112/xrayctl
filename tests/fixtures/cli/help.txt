@@ -2,8 +2,8 @@ xrayctl - Xray Linux 管理脚本
 
 用法:
   xrayctl                         打开交互菜单
-  xrayctl install [版本]          安装/修复（版本示例: 25.6.8）
-  xrayctl update [版本]           升级 Xray
+  xrayctl install [版本]          安装/修复（默认固定: 26.3.27）
+  xrayctl update [版本]           升级 Xray（默认固定: 26.3.27）
   xrayctl uninstall                 卸载 Xray 核心（保留配置）
   xrayctl uninstall --purge          完全卸载（保留备份）
   xrayctl uninstall --erase          彻底删除（清除全部 xrayctl 数据）

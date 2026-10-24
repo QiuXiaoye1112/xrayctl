@@ -66,7 +66,7 @@ Xray Linux 管理脚本
 │  ├─ 设置统一月度统计起点
 │  ├─ 设置/取消单入站月度额度
 │  └─ 开启或停止流量统计（流量限制默认关闭）
-├─ 服务管理（启停、重启、自启、日志、更新修复、系统诊断、快捷命令修复）
+├─ 服务管理（启停、重启、自启、查看日志）
 ├─ BBR启用/关闭
 └─ 卸载
 ```
@@ -118,7 +118,7 @@ curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/i
 
 ### systemd 版的其他安装方式
 
-指定 Xray 版本：
+默认安装和升级的 Xray 核心版本固定为 `26.3.27`。如需手动指定其他版本，可在命令末尾传入版本号：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh | sudo bash -s -- 26.3.27
@@ -148,7 +148,7 @@ xrayctl
 ```bash
 xrayctl                          # 交互菜单
 xrayctl status                   # 状态
-xrayctl update                   # 升级核心
+xrayctl update                   # 按固定版本安装/修复核心（26.3.27）
 xrayctl inbound list             # 入站列表
 xrayctl inbound add              # 新建入站
 xrayctl inbound rename OLD NEW   # 修改入站名称
