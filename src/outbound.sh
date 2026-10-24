@@ -1045,12 +1045,7 @@ delete_outbound() {
     die "该出站仍被自定义路由规则引用，请先在完整配置中处理。"
   fi
   if ((default_refs > 0 || domain_refs > 0 || binding_refs > 0)); then
-    warn "出站 ${tag} 当前被 xrayctl 管理规则引用："
-    ((default_refs > 0)) && printf '%s 个入站默认出站使用\n' "$default_refs"
-    ((domain_refs > 0)) && printf '%s 条域名规则使用\n' "$domain_refs"
-    ((binding_refs > 0)) && printf '%s 个模板绑定使用\n' "$binding_refs"
-    warn "删除后这些管理规则会一并删除。"
-    ((binding_refs > 0)) && warn "相关的模板绑定也会一并移除。"
+    warn "出站 ${tag} 仍被使用"
     confirm "继续删除出站 ${tag}？" N || return 0
   else
     confirm "删除出站 ${tag}？" N || return 0

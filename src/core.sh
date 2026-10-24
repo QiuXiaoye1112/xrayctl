@@ -63,9 +63,28 @@ else
   C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_CYAN=""; C_BOLD=""; C_RESET=""
 fi
 
-info()    { printf '%s[信息]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
-warn()    { printf '%s[警告]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
-error()   { printf '%s[错误]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+print_notice() {
+  local label=$1 color=$2 title=${3-} detail line rendered
+  shift 3
+  if [[ $title == *$'\n'* ]]; then
+    set -- "${title#*$'\n'}" "$@"
+    title=${title%%$'\n'*}
+  fi
+  printf -v rendered '\n%s%s%s · %s\n' "$color" "$label" "$C_RESET" "$title"
+  for detail in "$@"; do
+    [[ -n $detail ]] || continue
+    while IFS= read -r line; do
+      if [[ -n $line ]]; then printf -v rendered '%s  %s\n' "$rendered" "$line"
+      else printf -v rendered '%s\n' "$rendered"; fi
+    done <<<"$detail"
+  done
+  # Emit one block on one stream so details cannot overtake their warning.
+  printf '%s' "$rendered"
+}
+
+info()    { print_notice "信息" "$C_GREEN" "${1-}" "${@:2}"; }
+warn()    { print_notice "警告" "$C_YELLOW" "${1-}" "${@:2}" >&2; }
+error()   { print_notice "错误" "$C_RED" "${1-}" "${@:2}" >&2; }
 die()     { error "$*"; exit 1; }
 heading() { printf '\n%s%s%s\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"; }
 clear_screen() { clear 2>/dev/null || true; }
@@ -96,10 +115,10 @@ pause() {
 }
 
 confirm() {
-  local prompt=${1:-"确定继续吗？"} default=${2:-N} answer suffix
-  if [[ $default == Y ]]; then suffix="[Y/n]"; else suffix="[y/N]"; fi
+  local prompt=${1:-"确定继续吗？"} default=${2:-N} answer
   if [[ ! -t 0 ]]; then [[ $default == Y ]]; return; fi
-  read -r -p "${prompt} ${suffix} " answer || { cancel_input; return 1; }
+  printf '\n' >&2
+  read -r -p "${prompt} [Y/N]: " answer || { cancel_input; return 1; }
   answer=${answer:-$default}
   [[ $answer =~ ^[Yy]$ ]]
 }

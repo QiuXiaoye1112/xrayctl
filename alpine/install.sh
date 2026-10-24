@@ -6,8 +6,8 @@ set -eu
 SCRIPT_OVERRIDE="${XRAYCTL_ALPINE_SCRIPT_URL:-}"
 TARGET="${XRAYCTL_COMMAND_PATH:-/usr/local/sbin/xrayctl}"
 
-info() { printf '[xrayctl-alpine] %s\n' "$*"; }
-die() { printf '[xrayctl-alpine] 错误: %s\n' "$*" >&2; exit 1; }
+info() { printf '\n信息 · %s\n' "$*"; }
+die() { printf '\n错误 · %s\n' "$*" >&2; exit 1; }
 
 [ "$(uname -s)" = Linux ] || die "仅支持 Linux。"
 [ "$(id -u)" -eq 0 ] || die "请使用 root 运行。"

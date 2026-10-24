@@ -280,8 +280,7 @@ validate_supported_capabilities() {
 validate_candidate() {
   local candidate=$1 validation_output
   if ! validation_output=$(jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' "$candidate" 2>&1); then
-    error "JSON 结构检查失败。"
-    [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+    error "JSON 结构检查失败。" "$validation_output"
     return 1
   fi
   if ! validate_supported_capabilities "$candidate"; then
@@ -290,8 +289,7 @@ validate_candidate() {
   fi
   if xray_installed; then
     if ! validation_output=$("$XRAY_BIN" run -test -format json -config "$candidate" 2>&1); then
-      error "Xray 核心拒绝了新配置，原始错误如下："
-      [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+      error "Xray 核心拒绝了新配置，原始错误如下：" "$validation_output"
       return 1
     fi
   fi
@@ -303,8 +301,7 @@ validate_restore_config() {
     "$candidate" >/dev/null || return 1
   if xray_installed; then
     validation_output=$("$XRAY_BIN" run -test -format json -config "$candidate" 2>&1) || {
-      error "恢复配置未通过 Xray 核心检查。"
-      [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+      error "恢复配置未通过 Xray 核心检查。" "$validation_output"
       return 1
     }
   fi
@@ -357,8 +354,7 @@ state_validate_metadata_candidate() {
     ((.domainTemplates.templates // []) | type=="array") and
     ((.domainTemplates.bindings // []) | type=="array")
   ' "$candidate" 2>&1); then
-    error "metadata JSON 结构检查失败。"
-    [[ -z $validation_output ]] || printf '%s\n' "$validation_output" >&2
+    error "metadata JSON 结构检查失败。" "$validation_output"
     return 1
   fi
 }
@@ -564,7 +560,7 @@ backup_all() {
   tar -czf "$target" -C / "${paths[@]}" 2>/dev/null || { rm -f "$target"; die "备份失败。"; }
   chmod 600 "$target"
   info "备份已创建：$target"
-  info "提示：备份包含 Xray 配置、metadata、流量记录和证书副本，不含 Certbot 账户/lineage 数据。"
+  info "备份包含 Xray 配置、metadata、流量记录和证书副本，不含 Certbot 账户/lineage 数据。"
 }
 
 restore_backup() {
