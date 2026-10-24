@@ -378,7 +378,7 @@ _scan_xrayctl_residuals() {
 # ============================================================
 
 _xrayctl_purge_level_2() {
-  heading "彻底删除"
+  heading "删除"
   cat <<'EOF'
 
 ⚠  即将永久删除 xrayctl 管理的全部数据：
@@ -408,7 +408,7 @@ EOF
   local answer
   read -r answer || { cancel_input; return 0; }
   if [[ $answer != "DELETE" ]]; then
-    info "已取消彻底删除。"
+    info "已取消删除。"
     return 0
   fi
   echo

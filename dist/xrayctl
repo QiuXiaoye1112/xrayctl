@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="a02c10e10073"
+readonly XRAYCTL_BUILD_COMMIT="d73834373f37"
 readonly XRAY_CORE_PINNED_VERSION="26.3.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -6563,7 +6563,7 @@ _scan_xrayctl_residuals() {
 # ============================================================
 
 _xrayctl_purge_level_2() {
-  heading "彻底删除"
+  heading "删除"
   cat <<'EOF'
 
 ⚠  即将永久删除 xrayctl 管理的全部数据：
@@ -6593,7 +6593,7 @@ EOF
   local answer
   read -r answer || { cancel_input; return 0; }
   if [[ $answer != "DELETE" ]]; then
-    info "已取消彻底删除。"
+    info "已取消删除。"
     return 0
   fi
   echo
@@ -7276,7 +7276,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl update [版本]           升级 Xray（默认固定: 26.3.27）
   xrayctl uninstall                 卸载 Xray 核心（保留配置）
   xrayctl uninstall --purge          完全卸载（保留备份）
-  xrayctl uninstall --erase          彻底删除（清除全部 xrayctl 数据）
+  xrayctl uninstall --erase          删除（清除全部 xrayctl 数据）
   xrayctl status                  查看状态
   xrayctl start|stop|restart      服务控制
   xrayctl logs [行数]             查看服务日志

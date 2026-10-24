@@ -571,7 +571,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl update [版本]           升级 Xray（默认固定: 26.3.27）
   xrayctl uninstall                 卸载 Xray 核心（保留配置）
   xrayctl uninstall --purge          完全卸载（保留备份）
-  xrayctl uninstall --erase          彻底删除（清除全部 xrayctl 数据）
+  xrayctl uninstall --erase          删除（清除全部 xrayctl 数据）
   xrayctl status                  查看状态
   xrayctl start|stop|restart      服务控制
   xrayctl logs [行数]             查看服务日志
