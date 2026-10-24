@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="8f68c41313de"
+readonly XRAYCTL_BUILD_COMMIT="7d9f9a5c34c0"
 readonly XRAY_CORE_PINNED_VERSION="26.3.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -5817,6 +5817,27 @@ _service_restore_or_initialize_config() {
   fi
 }
 
+_service_install_output() {
+  awk '
+    {
+      gsub(/\033\[[0-9;]*m/, "")
+      message = ""
+      if ($0 ~ /^Downloading Xray archive:/) message = "信息 · 正在下载核心安装包..."
+      else if ($0 ~ /^Downloading verification file/) message = "信息 · 正在下载校验文件..."
+      else if ($0 ~ /^info: Extract the Xray package/) message = "信息 · 正在解压并安装核心..."
+      else if ($0 ~ /^info: Stop the Xray service/) message = "信息 · 正在停止 Xray 服务..."
+      else if ($0 ~ /^WARNING: The .* user already exists/) message = "警告 · 复用已有的 Xray 用户，请确保该账户仅供 Xray 使用。"
+      else if ($0 ~ /^WARNING: Ensure this account is dedicated/) next
+      else if ($0 ~ /^info: Systemd service files have been installed/) message = "信息 · 服务配置已安装。"
+      else if ($0 ~ /^warning: The following are the actual parameters/ || $0 ~ /^warning: Please make sure the configuration file path/) next
+      else if ($0 ~ /^info: Xray .* is installed\./) message = "信息 · 核心安装完成。"
+      else if ($0 ~ /^info: Start the Xray service/) message = "信息 · 正在启动 Xray 服务..."
+      else if (tolower($0) ~ /^(warning|error):/) message = $0
+      if (message != "") { print message; fflush() }
+    }
+  '
+}
+
 install_or_update_xray() {
   ensure_runtime_dependencies install
   local mode=${1:-install} version=${2:-$XRAY_CORE_PINNED_VERSION} installer install_log status preserved_config=""
@@ -5831,7 +5852,7 @@ install_or_update_xray() {
     install_log=$(temp_file)
     local -a installer_args=(install)
     [[ -z $version ]] || installer_args+=(--version "${version#v}")
-    if TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" "${installer_args[@]}" >"$install_log" 2>&1; then
+    if TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" "${installer_args[@]}" 2>&1 | tee "$install_log" | _service_install_output; then
       rm -f "$installer" "$install_log"
     else
       status=$?
@@ -5846,6 +5867,7 @@ install_or_update_xray() {
   setup_runtime_access
   [[ $(platform_init_system) != openrc ]] || write_openrc_service
   install_quick_command
+  info "正在检查配置并启动服务..."
   validate_candidate "$CONFIG_FILE"
   platform_service_enable >/dev/null
   restart_service
