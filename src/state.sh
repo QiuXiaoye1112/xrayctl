@@ -479,7 +479,16 @@ runtime_tmp_dir() {
   printf '%s\n' "$base"
 }
 
-temp_file() { mktemp "$(runtime_tmp_dir)/xrayctl.XXXXXX"; }
+temp_file() {
+  local path
+  # BusyBox requires the template to end in Xs; Xray requires a JSON suffix.
+  path=$(mktemp "$(runtime_tmp_dir)/xrayctl.XXXXXX") || return 1
+  if ! mv -T -- "$path" "${path}.json"; then
+    rm -f -- "$path"
+    return 1
+  fi
+  printf '%s\n' "${path}.json"
+}
 
 _state_build_inbound_meta_set() {
   local current=$1 candidate=$2 tag=$3 host=$4

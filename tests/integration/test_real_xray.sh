@@ -39,6 +39,30 @@ jq -n '{
 }' >"$default_config"
 validate_config 'default configuration' "$default_config"
 
+# Exercise the manager's real candidate path, not only named JSON fixtures.
+export XRAYCTL_TMP_DIR="$TEST_ROOT/tmp"
+export XRAYCTL_XRAY_BIN="$REAL_XRAY_BIN"
+# shellcheck source=../../xrayctl.sh
+source "$REPO_ROOT/xrayctl.sh"
+trap - ERR
+trap cleanup_test_root EXIT
+candidate=$(temp_file)
+cp "$default_config" "$candidate"
+validate_candidate "$candidate"
+validate_restore_config "$candidate"
+rm -f "$candidate"
+
+if command -v busybox >/dev/null 2>&1; then
+  (
+    mktemp() { busybox mktemp "$@"; }
+    mv() { busybox mv "$@"; }
+    candidate=$(temp_file)
+    cp "$default_config" "$candidate"
+    validate_candidate "$candidate"
+    rm -f "$candidate"
+  )
+fi
+
 for fixture in "$REPO_ROOT"/tests/fixtures/protocols/*.json; do
   name=$(basename "$fixture" .json)
   config="$TEST_ROOT/${name}.json"

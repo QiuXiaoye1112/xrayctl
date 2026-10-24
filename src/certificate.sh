@@ -842,11 +842,11 @@ list_certificates() {
 }
 
 certificate_count() {
-  meta_cert_list | grep -c . 2>/dev/null || printf '0'
+  meta_cert_list | awk 'END {print NR}'
 }
 
 managed_certificate_count() {
-  meta_cert_list | grep -c . 2>/dev/null || printf '0'
+  meta_cert_list | awk 'END {print NR}'
 }
 
 # ============================================================
