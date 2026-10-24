@@ -141,10 +141,11 @@ for spec in '1 inbound_menu' '2 outbound_menu' '3 certificate_menu' '4 traffic_m
 done
 exercise_menu_route main_menu 5 'manage_bbr'
 
-for spec in '1 rename_inbound node' '2 modify_inbound_basic node' '3 modify_inbound_transport node'; do
+prompt_renamed_inbound_tag() { printf -v "$1" '%s' "$2"; }
+for spec in '1 rename_inbound node node' '2 modify_inbound_basic node' '3 modify_inbound_transport node'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route modify_inbound_menu "$choice" "$action" node vless
 done
-for spec in '1 rename_inbound node' '2 modify_inbound_basic node'; do
+for spec in '1 rename_inbound node node' '2 modify_inbound_basic node'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route modify_inbound_menu "$choice" "$action" node socks
 done
 

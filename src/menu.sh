@@ -295,28 +295,35 @@ client_menu_for_tag() {
 }
 
 modify_inbound_menu() {
-  local tag=$1 protocol=$2 choice
-  while inbound_exists "$tag"; do
+  local current_tag=$1 protocol=$2 parent_tag_var=${3-} choice renamed_tag
+  while inbound_exists "$current_tag"; do
     clear_screen
-    heading "修改入站信息 · ${tag}"
-    if [[ $protocol == vless ]]; then
-      printf '1) 修改入站名称\n2) 修改地址/端口\n3) 修改传输/安全\n0) 返回入站\n'
-      read -r -p "请选择: " choice || { cancel_input; return 0; }
-      case $choice in
-        1) run_menu_action rename_inbound "$tag"; pause; return;;
-        2) run_menu_action modify_inbound_basic "$tag"; pause;;
-        3) run_menu_action modify_inbound_transport "$tag"; pause;;
-        0) return;; *) warn "无效选项。"; pause;;
-      esac
-    else
-      printf '1) 修改入站名称\n2) 修改地址/端口\n0) 返回入站\n'
-      read -r -p "请选择: " choice || { cancel_input; return 0; }
-      case $choice in
-        1) run_menu_action rename_inbound "$tag"; pause; return;;
-        2) run_menu_action modify_inbound_basic "$tag"; pause;;
-        0) return;; *) warn "无效选项。"; pause;;
-      esac
-    fi
+    heading "修改入站信息 · ${current_tag}"
+    printf '1) 修改入站名称\n2) 修改地址/端口\n'
+    [[ $protocol != vless ]] || printf '3) 修改传输/安全\n'
+    printf '0) 返回入站\n'
+    read -r -p "请选择: " choice || { cancel_input; return 0; }
+    case $choice in
+      1)
+        # Keep the requested name in this shell: run_menu_action isolates writes
+        # in a subshell, so it cannot update the menus' selected tag for us.
+        prompt_renamed_inbound_tag renamed_tag "$current_tag" || continue
+        run_menu_action rename_inbound "$current_tag" "$renamed_tag"
+        if [[ $renamed_tag != "$current_tag" ]] && ! inbound_exists "$current_tag" && inbound_exists "$renamed_tag"; then
+          current_tag=$renamed_tag
+          # Update the caller too, so returning one level keeps this inbound.
+          [[ -z $parent_tag_var ]] || printf -v "$parent_tag_var" '%s' "$current_tag"
+        fi
+        pause
+        ;;
+      2) run_menu_action modify_inbound_basic "$current_tag"; pause;;
+      3)
+        if [[ $protocol == vless ]]; then run_menu_action modify_inbound_transport "$current_tag"
+        else warn "无效选项。"; fi
+        pause
+        ;;
+      0) return;; *) warn "无效选项。"; pause;;
+    esac
   done
 }
 
@@ -334,7 +341,7 @@ manage_inbound_menu() {
           printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 证书管理\n5) 查看 JSON\n0) 返回列表\n'
           read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
-            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
+            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
             4) manage_inbound_certificate_menu "$tag";; 5) run_menu_action show_inbound "$tag"; pause;;
             0) return;; *) warn "无效选项。"; pause;;
           esac
@@ -342,7 +349,7 @@ manage_inbound_menu() {
           printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
           read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
-            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
+            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
             4) run_menu_action show_inbound "$tag"; pause;;
             0) return;; *) warn "无效选项。"; pause;;
           esac
@@ -355,7 +362,7 @@ manage_inbound_menu() {
           printf '1) 客户端配置\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
           read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
-            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
+            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
             4) run_menu_action show_inbound "$tag"; pause;;
             0) return;; *) warn "无效选项。"; pause;;
           esac
@@ -363,7 +370,7 @@ manage_inbound_menu() {
           printf '1) 客户端配置\n2) 修改入站信息\n3) 查看 JSON\n0) 返回列表\n'
           read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
-            1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol";;
+            1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol" tag;;
             3) run_menu_action show_inbound "$tag"; pause;;
             0) return;; *) warn "无效选项。"; pause;;
           esac
@@ -376,7 +383,7 @@ manage_inbound_menu() {
           printf '1) 客户端配置\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
           read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
-            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol";;
+            1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
             4) run_menu_action show_inbound "$tag"; pause;;
             0) return;; *) warn "无效选项。"; pause;;
           esac
@@ -384,7 +391,7 @@ manage_inbound_menu() {
           printf '1) 客户端配置\n2) 修改入站信息\n3) 查看 JSON\n0) 返回列表\n'
           read -r -p "请选择: " choice || { cancel_input; return 0; }
           case $choice in
-            1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol";;
+            1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol" tag;;
             3) run_menu_action show_inbound "$tag"; pause;;
             0) return;; *) warn "无效选项。"; pause;;
           esac

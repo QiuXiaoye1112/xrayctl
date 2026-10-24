@@ -21,6 +21,7 @@ tests=(
   "tests/integration/test_coexistence.sh"
   "tests/integration/test_share.sh"
   "tests/integration/test_interactive_menus.sh"
+  "tests/integration/test_menu_navigation.sh"
   "tests/integration/test_regressions.sh"
   "tests/integration/test_runtime_access.sh"
   "tests/integration/test_real_xray.sh"
