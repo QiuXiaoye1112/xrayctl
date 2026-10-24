@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="04d83da3841a"
+readonly XRAYCTL_BUILD_COMMIT="a02c10e10073"
 readonly XRAY_CORE_PINNED_VERSION="26.3.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -7260,7 +7260,7 @@ main_menu() {
     case $choice in
       1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_menu;;
       5) run_menu_action manage_bbr; pause;; 6) service_menu;;
-      7) run_menu_action uninstall_xray 2; pause;;
+      7) clear_screen; run_menu_action uninstall_xray 2; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
