@@ -59,3 +59,14 @@ certificate_transaction_rollback "$snapshot" "$XRAYCTL_CERT_DIR/example.com.crt"
 [[ ! -e $XRAYCTL_META_FILE ]]
 
 printf 'ok - certificate transactions restore certificate pairs and metadata\n'
+
+# Empty metadata must yield one numeric zero for the TLS/menu arithmetic.
+init_meta
+[[ $(certificate_count) == 0 ]]
+[[ $(managed_certificate_count) == 0 ]]
+[[ $(jq '.certificates | length' "$META_FILE") == 0 ]]
+jq '.certificates={"first.example":{},"second.example":{}}' "$META_FILE" >"$TEST_ROOT/count.json"
+cp "$TEST_ROOT/count.json" "$META_FILE"
+[[ $(certificate_count) == 2 ]]
+[[ $(managed_certificate_count) == 2 ]]
+printf 'ok - certificate counts handle empty and populated metadata\n'

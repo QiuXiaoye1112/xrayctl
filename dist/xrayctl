@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="08599e0399db"
+readonly XRAYCTL_BUILD_COMMIT="4482f45317dc"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -1155,7 +1155,16 @@ runtime_tmp_dir() {
   printf '%s\n' "$base"
 }
 
-temp_file() { mktemp "$(runtime_tmp_dir)/xrayctl.XXXXXX"; }
+temp_file() {
+  local path
+  # BusyBox requires the template to end in Xs; Xray requires a JSON suffix.
+  path=$(mktemp "$(runtime_tmp_dir)/xrayctl.XXXXXX") || return 1
+  if ! mv -T -- "$path" "${path}.json"; then
+    rm -f -- "$path"
+    return 1
+  fi
+  printf '%s\n' "${path}.json"
+}
 
 _state_build_inbound_meta_set() {
   local current=$1 candidate=$2 tag=$3 host=$4
@@ -2269,11 +2278,11 @@ list_certificates() {
 }
 
 certificate_count() {
-  meta_cert_list | grep -c . 2>/dev/null || printf '0'
+  meta_cert_list | awk 'END {print NR}'
 }
 
 managed_certificate_count() {
-  meta_cert_list | grep -c . 2>/dev/null || printf '0'
+  meta_cert_list | awk 'END {print NR}'
 }
 
 # ============================================================
@@ -5607,6 +5616,12 @@ restart_service() {
       platform_service_logs 20 >&2 || true
       return 1
     fi
+    # A simple service can report active before Xray opens logs/listeners.
+    sleep 1
+    if ! service_is_active; then
+      platform_service_logs 20 >&2 || true
+      return 1
+    fi
   fi
 }
 
@@ -5637,7 +5652,8 @@ is_xrayctl_certbot_symlink() {
 }
 
 setup_runtime_access() {
-  local created_group=0 created_user=0
+  local created_group=0 created_user=0 log_user="$RUNTIME_USER"
+  local -a log_files=("${LOG_DIR}/access.log" "${LOG_DIR}/error.log")
   if [[ $(platform_init_system) == openrc ]]; then
     if ! grep -qE "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null; then addgroup -S "$RUNTIME_GROUP"; created_group=1; fi
     if ! id "$RUNTIME_USER" >/dev/null 2>&1; then
@@ -5647,15 +5663,32 @@ setup_runtime_access() {
   else
     if ! getent group "$RUNTIME_GROUP" >/dev/null 2>&1; then groupadd --system "$RUNTIME_GROUP"; created_group=1; fi
   fi
-  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR"
-  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CERT_DIR"
-  if [[ $(platform_init_system) == openrc ]]; then
-    install -d -m 750 -o "$RUNTIME_USER" -g "$RUNTIME_GROUP" "$LOG_DIR"
-    touch "${LOG_DIR}/access.log" "${LOG_DIR}/error.log" "${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log"
-    chown "$RUNTIME_USER:$RUNTIME_GROUP" "${LOG_DIR}/access.log" "${LOG_DIR}/error.log" \
-      "${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log"
-    chmod 640 "${LOG_DIR}/access.log" "${LOG_DIR}/error.log" "${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log"
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR" || return 1
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CERT_DIR" || return 1
+  if [[ $(platform_init_system) == systemd ]]; then
+    # The official installer and existing units may use a different service user.
+    log_user=root
+    if service_exists; then
+      log_user=$(systemctl show "$SERVICE_NAME" --property=User --value) || return 1
+      log_user=${log_user:-root}
+    fi
+  else
+    log_files+=("${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log")
   fi
+  [[ ! -L $LOG_DIR ]] || { error "日志目录不能是符号链接：$LOG_DIR"; return 1; }
+  # Keep directory entries under manager ownership so the service cannot swap
+  # a managed log for a symlink before a privileged permission repair.
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$LOG_DIR" || return 1
+  local log_file
+  for log_file in "${log_files[@]}"; do
+    if [[ -L $log_file || ( -e $log_file && ! -f $log_file ) ]]; then
+      error "日志路径必须是普通文件：$log_file"
+      return 1
+    fi
+  done
+  touch "${log_files[@]}" || return 1
+  chown "$log_user:$RUNTIME_GROUP" "${log_files[@]}" || return 1
+  chmod 640 "${log_files[@]}" || return 1
   if [[ -f $CONFIG_FILE ]]; then
     chown "$RUNTIME_OWNER:$RUNTIME_GROUP" "$CONFIG_FILE"
     chmod 640 "$CONFIG_FILE"

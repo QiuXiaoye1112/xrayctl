@@ -9,6 +9,12 @@ restart_service() {
       platform_service_logs 20 >&2 || true
       return 1
     fi
+    # A simple service can report active before Xray opens logs/listeners.
+    sleep 1
+    if ! service_is_active; then
+      platform_service_logs 20 >&2 || true
+      return 1
+    fi
   fi
 }
 
@@ -39,7 +45,8 @@ is_xrayctl_certbot_symlink() {
 }
 
 setup_runtime_access() {
-  local created_group=0 created_user=0
+  local created_group=0 created_user=0 log_user="$RUNTIME_USER"
+  local -a log_files=("${LOG_DIR}/access.log" "${LOG_DIR}/error.log")
   if [[ $(platform_init_system) == openrc ]]; then
     if ! grep -qE "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null; then addgroup -S "$RUNTIME_GROUP"; created_group=1; fi
     if ! id "$RUNTIME_USER" >/dev/null 2>&1; then
@@ -49,15 +56,32 @@ setup_runtime_access() {
   else
     if ! getent group "$RUNTIME_GROUP" >/dev/null 2>&1; then groupadd --system "$RUNTIME_GROUP"; created_group=1; fi
   fi
-  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR"
-  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CERT_DIR"
-  if [[ $(platform_init_system) == openrc ]]; then
-    install -d -m 750 -o "$RUNTIME_USER" -g "$RUNTIME_GROUP" "$LOG_DIR"
-    touch "${LOG_DIR}/access.log" "${LOG_DIR}/error.log" "${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log"
-    chown "$RUNTIME_USER:$RUNTIME_GROUP" "${LOG_DIR}/access.log" "${LOG_DIR}/error.log" \
-      "${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log"
-    chmod 640 "${LOG_DIR}/access.log" "${LOG_DIR}/error.log" "${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log"
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR" || return 1
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CERT_DIR" || return 1
+  if [[ $(platform_init_system) == systemd ]]; then
+    # The official installer and existing units may use a different service user.
+    log_user=root
+    if service_exists; then
+      log_user=$(systemctl show "$SERVICE_NAME" --property=User --value) || return 1
+      log_user=${log_user:-root}
+    fi
+  else
+    log_files+=("${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log")
   fi
+  [[ ! -L $LOG_DIR ]] || { error "日志目录不能是符号链接：$LOG_DIR"; return 1; }
+  # Keep directory entries under manager ownership so the service cannot swap
+  # a managed log for a symlink before a privileged permission repair.
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$LOG_DIR" || return 1
+  local log_file
+  for log_file in "${log_files[@]}"; do
+    if [[ -L $log_file || ( -e $log_file && ! -f $log_file ) ]]; then
+      error "日志路径必须是普通文件：$log_file"
+      return 1
+    fi
+  done
+  touch "${log_files[@]}" || return 1
+  chown "$log_user:$RUNTIME_GROUP" "${log_files[@]}" || return 1
+  chmod 640 "${log_files[@]}" || return 1
   if [[ -f $CONFIG_FILE ]]; then
     chown "$RUNTIME_OWNER:$RUNTIME_GROUP" "$CONFIG_FILE"
     chmod 640 "$CONFIG_FILE"
