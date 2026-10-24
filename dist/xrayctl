@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="37de2c6d5ba4"
+readonly XRAYCTL_BUILD_COMMIT="8f68c41313de"
 readonly XRAY_CORE_PINNED_VERSION="26.3.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -5776,7 +5776,7 @@ install_xray_core_openrc() {
   archive="${work}/${asset}"
   digest="${archive}.dgst"
   info "正在下载 Xray ${version}。"
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
     "${base}/${asset}" -o "$archive" || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray 下载失败。"; }
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 60 \
     "${base}/${asset}.dgst" -o "$digest" || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray 校验文件下载失败。"; }
@@ -5819,18 +5819,27 @@ _service_restore_or_initialize_config() {
 
 install_or_update_xray() {
   ensure_runtime_dependencies install
-  local mode=${1:-install} version=${2:-$XRAY_CORE_PINNED_VERSION} installer preserved_config=""
+  local mode=${1:-install} version=${2:-$XRAY_CORE_PINNED_VERSION} installer install_log status preserved_config=""
   _service_snapshot_existing_config preserved_config
   if [[ $(platform_init_system) == openrc ]]; then
     install_xray_core_openrc "$version"
   else
     installer=$(temp_file)
-    info "从 XTLS 官方仓库下载安装脚本。"
-    curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
+    info "正在安装 Xray ${version#v}..."
+    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
     chmod 700 "$installer"
-    if [[ -n $version ]]; then TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" install --version "${version#v}";
-    else TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" install; fi
-    rm -f "$installer"
+    install_log=$(temp_file)
+    local -a installer_args=(install)
+    [[ -z $version ]] || installer_args+=(--version "${version#v}")
+    if TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" "${installer_args[@]}" >"$install_log" 2>&1; then
+      rm -f "$installer" "$install_log"
+    else
+      status=$?
+      error "Xray 安装失败，安装器输出如下："
+      cat "$install_log" >&2
+      rm -f "$installer" "$install_log" "$preserved_config"
+      return "$status"
+    fi
   fi
   [[ -x $XRAY_BIN ]] || { rm -f "$preserved_config"; die "Xray 安装后未找到：$XRAY_BIN"; }
   _service_restore_or_initialize_config "$preserved_config"
@@ -5842,9 +5851,9 @@ install_or_update_xray() {
   restart_service
   traffic_runtime_ensure || warn "Xray 已启动，但流量统计运行时暂未恢复，请运行 xrayctl traffic enable 重试。"
   if [[ $mode == upgrade ]]; then
-    info "Xray 已升级：$($XRAY_BIN version | sed -n '1p')"
+    info "Xray $($XRAY_BIN version | awk 'NR==1 {print $2}') 已升级。"
   else
-    info "Xray 已安装/修复：$($XRAY_BIN version | sed -n '1p')"
+    info "Xray $($XRAY_BIN version | awk 'NR==1 {print $2}') 已安装/修复。"
   fi
 }
 
@@ -5874,7 +5883,7 @@ install_quick_command() {
     else
       download_url="${download_url}?xrayctl_cache=$(date +%s)"
     fi
-    if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+    if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
       --connect-timeout 15 --max-time 120 "$download_url" -o "$downloaded"; then
       rm -f "$downloaded"
       die "快捷命令脚本下载失败。"
