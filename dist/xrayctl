@@ -6576,7 +6576,6 @@ EOF
   rm -f "$SNAPSHOT_META"
 }
 
-
 # --- src/menu.sh ---
 outbound_menu() {
   local choice
