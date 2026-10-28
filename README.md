@@ -4,11 +4,11 @@
 
 当前版本：`1.4.0`
 
-> Alpine Linux 使用兼容 bootstrap，但安装的是同一个 `dist/xrayctl`。平台差异由 `platform.sh` 统一处理。参见 [Alpine/OpenRC 安装说明](alpine/README.md)。
+> Alpine/OpenRC 平台差异由 `platform.sh` 统一处理。参见 [Alpine/OpenRC 说明](alpine/README.md)。
 
 ## 功能
 
-- 安装、修复、指定版本安装、升级、保留配置卸载、彻底卸载
+- 主菜单彻底删除受管理资源
 - VLESS、SOCKS5、HTTP 入站
 - 新建 SOCKS5/HTTP 入站时用户名可留空；留空即无认证，并自动跳过密码输入
 - RAW、XHTTP、WebSocket 传输
@@ -28,8 +28,8 @@
 - 按入站累计 TCP/UDP 流量，展示统一的月度周期；可自定义每月起始日期和时间，只保留当前周期的记录
 - 可选月度流量限制（默认关闭）：按指定日期每月重置，用尽后只禁用对应入站，下个周期自动恢复
 - 配置校验失败时显示 Xray 核心的原始错误，便于准确定位问题
-- BBR 环境检测和开启/关闭、系统诊断
-- 安装后通过 `xrayctl` 快捷命令启动
+- BBR 环境检测和开启/关闭
+- 通过 `xrayctl` 快捷命令启动
 - 新增入站时自动探测公网地址；双栈同时列出 IPv4 和 IPv6，单栈只显示可用地址
 - 新增入站按”协议 → 加密 → 传输 → 证书/REALITY → 地址端口 → 客户端地址 → 用户”排列
 - TLS 自动读取证书域名/IP 作为 SNI；选择证书后直接使用该 SNI 作为客户端连接地址，不再重复选择
@@ -77,7 +77,7 @@ Xray Linux 管理脚本
 
 - 使用 systemd 的 Linux：Debian、Ubuntu、RHEL、CentOS、Rocky Linux、AlmaLinux、Fedora、Arch Linux、openSUSE
 - Alpine Linux + OpenRC
-- systemd 平台的架构范围由 XTLS 官方安装器决定；Alpine/OpenRC 内置 x86_64、aarch64、armv7 release asset 映射
+- 运行环境和 Xray 核心需自行准备
 - 以 root 身份运行写操作
 
 ### 与 sbctl 共存
@@ -88,67 +88,11 @@ BBR 是主机全局开关，xrayctl 与 sbctl 都读取内核当前状态，也�
 
 流量统计同样完全隔离：xrayctl 使用 `xrayctl_traffic` nftables 表（或 `XRAYCTL_TRAFFIC_IN/OUT` iptables 链），sbctl 使用自己的对象。脚本只删除带有自身注释的规则；检测到同名但不属于 xrayctl 的规则时会拒绝覆盖。
 
-## 快速开始
-
-安装后所有平台都使用 `xrayctl` 进入管理菜单。两个 bootstrap 最终下载同一个发行文件，并在内部确认 `main` 的最新提交版本。
-
-### Debian、Ubuntu、CentOS 等 systemd 系统
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh | sudo bash
-```
-
-已使用 root 登录时，将 `sudo bash` 改为 `bash` 即可。
-
-### Alpine Linux（OpenRC）
-
-以 root 身份执行。Alpine 默认自带 BusyBox `wget`，可以直接安装：
-
-```sh
-wget -qO- https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
-```
-
-如果 Alpine 已安装 `curl`，也可以使用：
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
-```
-
-> Alpine bootstrap 会先通过 `apk` 准备 Bash、curl、证书和解压工具；业务代码与 systemd 版完全共用。
-
-### systemd 版的其他安装方式
-
-默认安装和升级的 Xray 核心版本固定为 `26.3.27`。如需手动指定其他版本，可在命令末尾传入版本号：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh | sudo bash -s -- 26.3.27
-```
-
-如果希望先检查安装脚本再执行，可以手动下载并阅读：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh -o install-xrayctl.sh
-less install-xrayctl.sh
-sudo bash install-xrayctl.sh
-xrayctl
-```
-
-推荐的新入站组合是 `VLESS → REALITY → RAW`。它不需要域名证书，顺序对应脚本中的“入站协议 → 加密方式 → 传输方式”。
-
-如果使用 TLS：
-
-1. 选择自动探测到的公网 IPv4/IPv6，或选择“域名/其他地址”。
-2. 在云平台安全组开放 TCP 80。
-3. 从“TLS 证书”签发或导入证书。
-4. 新建 TLS 入站时选择托管证书；已有 TLS 入站可在该入站的“证书管理”中更换。
-5. IP 证书使用 Let’s Encrypt shortlived 配置，需要 Certbot 5.4+，脚本会安装并启用自动续期定时器。
-
 ## 常用命令
 
 ```bash
 xrayctl                          # 交互菜单
 xrayctl status                   # 状态
-xrayctl update                   # 按固定版本安装/修复核心（26.3.27）
 xrayctl inbound list             # 入站列表
 xrayctl inbound add              # 新建入站
 xrayctl inbound rename OLD NEW   # 修改入站名称
@@ -177,7 +121,6 @@ xrayctl traffic limit enable     # 启用月度流量限制功能
 xrayctl traffic limit set TAG 100 15 18:30 # 每月 100 GB，每月 15 日 18:30 重置
 xrayctl traffic limit remove TAG # 取消该入站额度
 xrayctl cert issue example.com admin@example.com
-xrayctl diagnose
 ```
 
 完整命令帮助：
@@ -222,17 +165,9 @@ xrayctl help
 - 配置校验只接受上述协议和传输；其他入站协议或传输会被拒绝。
 - 请遵守服务器所在地法律、服务商条款和网络使用政策。
 
-## 回滚与卸载
+## 删除
 
-新增、修改和删除不会创建永久备份。新配置与 metadata 通过结构/Xray 检查后才会联合替换；如果 metadata 写入或服务重启失败，脚本会使用临时快照一起恢复 config 与 metadata，完成后删除临时快照。
-
-```bash
-xrayctl uninstall               # 卸载核心，保留配置
-xrayctl uninstall --purge       # 完全卸载，保留备份
-xrayctl uninstall --erase       # 删除 xrayctl 创建的全部资源（含备份）
-```
-
-普通卸载和完全卸载都会先创建备份，备份包含流量记录。恢复时配置、metadata、证书、流量文件和防火墙运行时作为一个整体处理；失败会一起回滚。删除操作通过 metadata 资产登记和固定路径检查限制在 xrayctl 自己创建的资源。
+主菜单“卸载”进入彻底删除确认，删除受管理资源和备份，并检查残留。资源归属和路径检查仍会保护无关数据。
 
 ## 开发、构建与测试
 
@@ -261,17 +196,13 @@ bash -n dist/xrayctl
 bash tests/run.sh
 ```
 
-测试覆盖 Bash syntax、ShellCheck、重复函数、模块 source 依赖、validator、协议 fixture、config/metadata 联合事务、migration 幂等、inbound/client/outbound 生命周期、流量统计与月度限额、防火墙隔离、安装器安全检查、CLI 与单文件构建。CI 还会下载并校验当前 Xray release，用真实核心检查默认配置和全部协议 fixture，并在 Alpine 容器复跑统一测试套件。本地已有 Xray 二进制时可执行：
+测试覆盖 Bash syntax、ShellCheck、重复函数、模块 source 依赖、validator、协议 fixture、config/metadata 联合事务、migration 幂等、inbound/client/outbound 生命周期、流量统计与月度限额、防火墙隔离、CLI 与单文件构建。CI 还会下载并校验当前 Xray release，用真实核心检查默认配置和全部协议 fixture，并在 Alpine 容器复跑统一测试套件。本地已有 Xray 二进制时可执行：
 
 ```bash
 XRAYCTL_REAL_XRAY_BIN=/path/to/xray bash tests/integration/test_real_xray.sh
 ```
 
 同一 Certbot 数据目录存在多个 Let's Encrypt 账户时，已有证书优先沿用 lineage 记录的账户；非交互式新签发可通过 `XRAYCTL_CERTBOT_ACCOUNT=<账户ID>` 明确选择。重构前审计见 [`architecture-audit.md`](architecture-audit.md)。
-
-## 安装卡在 APT
-
-如果旧版安装过程停在 `0% [Waiting for headers]`，可按 `Ctrl+C` 中止后重新执行一键安装。当前版本会优先从 [jq 官方 GitHub 仓库](https://github.com/jqlang/jq/releases)下载并校验静态版 jq，从而绕过 APT；其他依赖仍会使用带连接超时、重试次数和 180 秒总超时的 APT，不再无限等待失效的软件源。
 
 NAT 容器没有 `NET_ADMIN` 权限时，请使用服务商控制台管理端口。
 

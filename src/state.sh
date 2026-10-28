@@ -265,7 +265,7 @@ ensure_config() {
 }
 
 xray_installed() { [[ -x $XRAY_BIN ]]; }
-require_xray_installed() { xray_installed || die "Xray 尚未安装，请先运行：sudo xrayctl install"; }
+require_xray_installed() { xray_installed || die "Xray 尚未安装，请先自行安装 Xray"; }
 
 validate_supported_capabilities() {
   jq -e '

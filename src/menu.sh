@@ -555,7 +555,7 @@ main_menu() {
     case $choice in
       1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_menu;;
       5) run_menu_action manage_bbr; pause;; 6) service_menu;;
-      7) clear_screen; run_menu_action uninstall_xray 2; pause;;
+      7) clear_screen; run_menu_action uninstall_xray; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -567,11 +567,6 @@ xrayctl - Xray Linux 管理脚本
 
 用法:
   xrayctl                         打开交互菜单
-  xrayctl install [版本]          安装/修复（默认固定: 26.3.27）
-  xrayctl update [版本]           升级 Xray（默认固定: 26.3.27）
-  xrayctl uninstall                 卸载 Xray 核心（保留配置）
-  xrayctl uninstall --purge          完全卸载（保留备份）
-  xrayctl uninstall --erase          删除（清除全部 xrayctl 数据）
   xrayctl status                  查看状态
   xrayctl start|stop|restart      服务控制
   xrayctl logs [行数]             查看服务日志
@@ -615,7 +610,6 @@ xrayctl - Xray Linux 管理脚本
   xrayctl cert renew <标识>          续期单个证书
   xrayctl cert cloudflare            管理 Cloudflare DNS 凭据
   xrayctl bbr                        启用/关闭 BBR（交互式）
-  xrayctl diagnose                系统诊断
   xrayctl version
 
 支持协议: VLESS、SOCKS5、HTTP
@@ -633,9 +627,6 @@ dispatch() {
       [[ $XRAYCTL_BUILD_COMMIT == development ]] || printf ' (commit %s)' "$XRAYCTL_BUILD_COMMIT"
       printf '\n'
       ;;
-    install) install_or_update_xray install "${1-}";;
-    update|upgrade) install_or_update_xray upgrade "${1-}";;
-    uninstall) if [[ ${1-} == --purge ]]; then uninstall_xray 1; elif [[ ${1-} == --erase ]]; then uninstall_xray 2; else uninstall_xray 0; fi;;
     status) show_status;;
     start|stop|restart|enable|disable) service_action "$command";;
     logs) show_logs "${1:-100}";;
@@ -711,7 +702,7 @@ dispatch() {
         cloudflare) cloudflare_credentials_menu;;
         *) die "未知 cert 子命令：${1}";; esac;;
 
-    bbr) manage_bbr;; diagnose|doctor) system_diagnostics;; quick-command) ensure_runtime_dependencies quick-command; install_quick_command;;
+    bbr) manage_bbr;;
     internal-traffic-collect) internal_traffic_collect;;
     internal-traffic-watch) internal_traffic_watch;;
     *) error "未知命令：$command"; show_help; return 2;;

@@ -259,24 +259,6 @@ _uninstall_xray_core() {
   fi
 }
 
-_uninstall_xray_core_keep_config() {
-  local installer
-  if [[ $(platform_init_system) == openrc ]]; then _uninstall_xray_core_fallback; return 0; fi
-  installer=$(temp_file)
-  if curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
-    "$OFFICIAL_INSTALLER_URL" -o "$installer" 2>/dev/null; then
-    chmod 700 "$installer"
-    TERM="${TERM:-xterm}" bash "$installer" remove >/dev/null 2>&1 || true
-    rm -f "$installer"
-    return 0
-  else
-    rm -f "$installer"
-    warn "无法下载 Xray 官方卸载脚本，使用本地安全回退。"
-    _uninstall_xray_core_fallback
-    return 0
-  fi
-}
-
 _uninstall_remove_bbr() {
   local bbr_config
   bbr_config=$(_snapshot_meta_resource_get "bbrConfig")
@@ -374,7 +356,7 @@ _scan_xrayctl_residuals() {
 }
 
 # ============================================================
-# Three uninstall level implementations
+# Complete removal
 # ============================================================
 
 _xrayctl_purge_level_2() {
@@ -443,76 +425,7 @@ EOF
   rm -f "$SNAPSHOT_META"
 }
 
-_xrayctl_uninstall_level_1() {
-  heading "完全卸载"
-  confirm "将卸载 Xray 并删除配置、证书、日志与元数据，保留备份。确定吗？" N || return 0
-
-  local final_backup
-  final_backup="${BACKUP_DIR}/pre-uninstall-$(timestamp).tar.gz"
-  if backup_all "$final_backup" >/dev/null 2>&1; then
-    info "最终备份已创建：${final_backup}"
-  else
-    warn "最终备份失败，已取消完全卸载。"
-    return 1
-  fi
-
-  _uninstall_snapshot_metadata
-  local step_failures=0 residual_count=0
-  _uninstall_disable_timers           || ((step_failures+=1))
-  traffic_remove_all                  || ((step_failures+=1))
-  _uninstall_remove_managed_certs     || ((step_failures+=1))
-  _uninstall_remove_cloudflare        || ((step_failures+=1))
-  _uninstall_remove_certbot           || ((step_failures+=1))
-  _uninstall_xray_core                || ((step_failures+=1))
-  _uninstall_remove_systemd_overrides || ((step_failures+=1))
-  _uninstall_remove_runtime_group     || ((step_failures+=1))
-  _uninstall_remove_quick_command     || ((step_failures+=1))
-  _cleanup_legacy_resources           || ((step_failures+=1))
-  _uninstall_remove_config            || ((step_failures+=1))
-  _uninstall_remove_logs              || ((step_failures+=1))
-
-  _scan_xrayctl_residuals residual_count 0
-
-  if ((step_failures > 0)); then
-    warn "完全卸载有 ${step_failures} 个清理步骤失败，请结合残留检查确认。"
-  fi
-
-  if ((residual_count > 0)); then
-    warn "检测到 ${residual_count} 项残留，请手动检查。"
-  fi
-  info "完全卸载完成；备份保留在 ${BACKUP_DIR}。"
-  rm -f "$SNAPSHOT_META"
-}
-
-_xrayctl_uninstall_level_0() {
-  heading "卸载程序"
-  confirm "卸载 Xray 核心但保留配置、证书、备份和 xrayctl。确定吗？" N || return 0
-
-  local final_backup
-  final_backup="${BACKUP_DIR}/pre-uninstall-$(timestamp).tar.gz"
-  backup_all "$final_backup" >/dev/null 2>&1 || true
-
-  if traffic_runtime_stop; then
-    [[ ! -f $TRAFFIC_FILE ]] || traffic_set_enabled false || warn "流量记录已保留，但未能写入停止状态。"
-  else
-    warn "流量统计运行时未能完整停止，请检查防火墙规则。"
-  fi
-  _uninstall_xray_core_keep_config
-  info "Xray 已卸载。配置、证书、备份和自动续期仍保留。"
-  info "需要时可运行 xrayctl install 重新安装 Xray。"
-}
-
-# ============================================================
-# Unified uninstall entry point
-# ============================================================
-
 uninstall_xray() {
   ensure_system_context uninstall
-  local level=${1:-0}
-  case $level in
-    0) _xrayctl_uninstall_level_0;;
-    1) _xrayctl_uninstall_level_1;;
-    2) _xrayctl_purge_level_2;;
-    *) die "无效卸载级别：$level";;
-  esac
+  _xrayctl_purge_level_2
 }

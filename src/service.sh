@@ -104,167 +104,6 @@ EOF
 
 setup_certificate_access() { setup_runtime_access; }
 
-xray_release_asset() {
-  case $(uname -m) in
-    x86_64|amd64) printf '%s\n' Xray-linux-64.zip ;;
-    aarch64|arm64) printf '%s\n' Xray-linux-arm64-v8a.zip ;;
-    armv7l|armv7|armhf) printf '%s\n' Xray-linux-arm32-v7a.zip ;;
-    *) die "暂不支持此 Alpine 架构：$(uname -m)" ;;
-  esac
-}
-
-write_openrc_service() {
-  cat >"$OPENRC_SERVICE" <<EOF
-#!/sbin/openrc-run
-name="Xray"
-description="Xray Service managed by xrayctl"
-command="${XRAY_BIN}"
-command_args="run -config ${CONFIG_FILE}"
-command_user="${RUNTIME_USER}:${RUNTIME_GROUP}"
-capabilities="^cap_net_bind_service"
-command_background=true
-pidfile="/run/${SERVICE_NAME}.pid"
-output_log="${LOG_DIR}/openrc.log"
-error_log="${LOG_DIR}/openrc-error.log"
-export XRAY_LOCATION_ASSET="${XRAY_SHARE_DIR}"
-
-depend() {
-  need net
-  after firewall
-}
-
-start_pre() {
-  checkpath --directory --mode 0750 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}"
-  "${XRAY_BIN}" run -test -format json -config "${CONFIG_FILE}"
-  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/access.log"
-  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/error.log"
-  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/openrc.log"
-  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/openrc-error.log"
-}
-EOF
-  chmod 755 "$OPENRC_SERVICE"
-}
-
-install_xray_core_openrc() {
-  local requested=${1-} version asset base archive digest expected actual work
-  install_packages unzip
-  asset=$(xray_release_asset)
-  if [[ -n $requested ]]; then
-    version="v${requested#v}"
-  else
-    version=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-      --connect-timeout 15 --max-time 60 "$XRAY_RELEASE_API" | jq -r '.tag_name // empty')
-    [[ $version == v* ]] || die "无法获取 Xray 最新版本。"
-  fi
-  base="${XRAY_RELEASE_BASE}/${version}"
-  work=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-openrc.XXXXXX")
-  archive="${work}/${asset}"
-  digest="${archive}.dgst"
-  info "正在下载 Xray ${version}。"
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
-    "${base}/${asset}" -o "$archive" || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray 下载失败。"; }
-  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 60 \
-    "${base}/${asset}.dgst" -o "$digest" || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray 校验文件下载失败。"; }
-  expected=$(awk -F'= ' '$1=="SHA2-256" {print $2; exit}' "$digest")
-  actual=$(sha256sum "$archive" | awk '{print $1}')
-  [[ -n $expected && $actual == "$expected" ]] \
-    || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray SHA-256 校验失败。"; }
-  unzip -q "$archive" -d "$work/unpacked"
-  install -d -m 755 "$(dirname "$XRAY_BIN")" "$XRAY_SHARE_DIR"
-  install -m 755 "$work/unpacked/xray" "$XRAY_BIN"
-  install -m 644 "$work/unpacked/geoip.dat" "${XRAY_SHARE_DIR}/geoip.dat"
-  install -m 644 "$work/unpacked/geosite.dat" "${XRAY_SHARE_DIR}/geosite.dat"
-  find "$work" -mindepth 1 -delete
-  rmdir "$work"
-}
-
-_service_snapshot_existing_config() {
-  local __var=$1 snapshot=""
-  if [[ -f $CONFIG_FILE ]]; then
-    validate_candidate "$CONFIG_FILE" || return 1
-    snapshot=$(temp_file)
-    cp -p "$CONFIG_FILE" "$snapshot" || { rm -f "$snapshot"; return 1; }
-  fi
-  printf -v "$__var" '%s' "$snapshot"
-}
-
-_service_restore_or_initialize_config() {
-  local preserved_config=${1-}
-  if [[ -n $preserved_config ]]; then
-    [[ -f $preserved_config ]] || { error "安装前配置快照丢失，拒绝覆盖现有配置。"; return 1; }
-    validate_candidate "$preserved_config" || { rm -f "$preserved_config"; return 1; }
-    install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR"
-    install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$preserved_config" "$CONFIG_FILE"
-    rm -f "$preserved_config"
-    ensure_config
-  else
-    write_default_config
-  fi
-}
-
-_service_install_output() {
-  awk '
-    {
-      original = $0
-      gsub(/\033\[[0-9;]*m/, "")
-      if ($0 ~ /^Downloading verification file/) details = 1
-      if (!details) { print original; fflush(); next }
-      message = ""
-      if ($0 ~ /^Downloading verification file/) message = "信息 · 正在下载校验文件..."
-      else if ($0 ~ /^info: Extract the Xray package/) message = "信息 · 正在解压并安装核心..."
-      else if ($0 ~ /^info: Stop the Xray service/) message = "信息 · 正在停止 Xray 服务..."
-      else if ($0 ~ /^WARNING: The .* user already exists/) message = "警告 · 复用已有的 Xray 用户，请确保该账户仅供 Xray 使用。"
-      else if ($0 ~ /^WARNING: Ensure this account is dedicated/) next
-      else if ($0 ~ /^info: Systemd service files have been installed/) message = "信息 · 服务配置已安装。"
-      else if ($0 ~ /^warning: The following are the actual parameters/ || $0 ~ /^warning: Please make sure the configuration file path/) next
-      else if ($0 ~ /^info: Xray .* is installed\./) message = "信息 · 核心安装完成。"
-      else if ($0 ~ /^info: Start the Xray service/) { message = "信息 · 正在启动 Xray 服务..."; details = 0 }
-      else if (tolower($0) ~ /^(warning|error):/) message = $0
-      if (message != "") { print message; fflush() }
-    }
-  '
-}
-
-install_or_update_xray() {
-  ensure_runtime_dependencies install
-  local mode=${1:-install} version=${2:-$XRAY_CORE_PINNED_VERSION} installer install_log status preserved_config=""
-  _service_snapshot_existing_config preserved_config
-  if [[ $(platform_init_system) == openrc ]]; then
-    install_xray_core_openrc "$version"
-  else
-    installer=$(temp_file)
-    info "从 XTLS 官方仓库下载安装脚本。"
-    curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
-    chmod 700 "$installer"
-    install_log=$(temp_file)
-    local -a installer_args=(install)
-    [[ -z $version ]] || installer_args+=(--version "${version#v}")
-    if TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" "${installer_args[@]}" 2>&1 | tee "$install_log" | _service_install_output; then
-      rm -f "$installer" "$install_log"
-    else
-      status=$?
-      error "Xray 安装失败，安装器输出如下："
-      cat "$install_log" >&2
-      rm -f "$installer" "$install_log" "$preserved_config"
-      return "$status"
-    fi
-  fi
-  [[ -x $XRAY_BIN ]] || { rm -f "$preserved_config"; die "Xray 安装后未找到：$XRAY_BIN"; }
-  _service_restore_or_initialize_config "$preserved_config"
-  setup_runtime_access
-  [[ $(platform_init_system) != openrc ]] || write_openrc_service
-  install_quick_command
-  validate_candidate "$CONFIG_FILE"
-  platform_service_enable >/dev/null
-  restart_service
-  traffic_runtime_ensure || warn "Xray 已启动，但流量统计运行时暂未恢复，请运行 xrayctl traffic enable 重试。"
-  if [[ $mode == upgrade ]]; then
-    info "Xray 已升级：$($XRAY_BIN version | sed -n '1p')"
-  else
-    info "Xray 已安装/修复：$($XRAY_BIN version | sed -n '1p')"
-  fi
-}
-
 install_quick_command() {
   local source=${BASH_SOURCE[0]:-} downloaded="" backup="" download_url="" ref_json="" commit=""
   mkdir -p "$(dirname "$QUICK_COMMAND")" "$(dirname "$QUICK_SYMLINK")"
@@ -327,7 +166,7 @@ install_quick_command() {
 }
 
 # ============================================================
-# Uninstall — three levels
+# Uninstall
 #   Level 0: remove Xray core, keep config/certs/backups/xrayctl/timer
 #   Level 1: full uninstall, keep backups
 #   Level 2: purge everything xrayctl ever created
@@ -472,30 +311,6 @@ manage_bbr() {
       _enable_bbr
     fi
   fi
-}
-
-system_diagnostics() {
-  local os_name=unknown traffic_backend_name
-  if [[ -r /etc/os-release ]]; then
-    os_name=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release)
-    os_name=${os_name#\"}; os_name=${os_name%\"}
-  fi
-  heading "系统诊断"
-  printf '系统: %s\n内核: %s\n架构: %s\n时间: %s\n' "$os_name" "$(uname -r)" "$(uname -m)" "$(date -Is)"
-  printf '拥塞控制: %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
-  printf 'BBR 持久化来源: %s\n' "$(bbr_manager)"
-  printf 'IPv4 转发: %s\n' "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || printf unknown)"
-  traffic_backend_name=$(traffic_recorded_backend); traffic_backend_name=${traffic_backend_name:-未设置}
-  printf '流量统计: %s（后端：%s）\n' "$(traffic_is_enabled && printf 运行中 || printf 已停止)" "$traffic_backend_name"
-  printf '流量限制: %s（已设置 %s 个入站）\n' "$(traffic_limits_are_enabled && printf 已启用 || printf 未启用)" "$(traffic_limit_count)"
-  if command_exists timedatectl; then timedatectl show -p NTPSynchronized -p Timezone 2>/dev/null || true; fi
-  if command_exists ss; then heading "Xray 监听端口"; ss -lntup 2>/dev/null | grep -E 'xray|State|Netid' || true; fi
-  heading "最近服务日志"; platform_service_logs 20 2>/dev/null || true
-}
-
-repair_quick_command() {
-  ensure_runtime_dependencies quick-command
-  install_quick_command
 }
 
 node_count_summary() {
