@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="4637c5d3629e"
+readonly XRAYCTL_BUILD_COMMIT="ac4f32b5e888"
 readonly XRAY_CORE_PINNED_VERSION="26.3.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -5937,13 +5937,6 @@ install_quick_command() {
   meta_resource_register "quickSymlink" "$QUICK_SYMLINK"
 }
 
-# ============================================================
-# Uninstall
-#   Level 0: remove Xray core, keep config/certs/backups/xrayctl/timer
-#   Level 1: full uninstall, keep backups
-#   Level 2: purge everything xrayctl ever created
-# ============================================================
-
 show_status() {
   local traffic_state quota_state backend
   heading "Xray 状态"
@@ -6445,7 +6438,7 @@ _uninstall_remove_owned_jq() {
 }
 
 _scan_xrayctl_residuals() {
-  local __count_var=${1:-} scan_backups=${2:-1} count=0
+  local __count_var=${1:-} count=0
   local paths=(
     "$XRAY_BIN"
     /usr/local/bin/xray-linux-*
@@ -6464,6 +6457,7 @@ _scan_xrayctl_residuals() {
     /etc/systemd/system/xray.service.d
     "$OPENRC_SERVICE"
     "$CERT_RENEW_HOOK"
+    "$BACKUP_DIR"
     "$TRAFFIC_FILE"
     "$TRAFFIC_SYSTEMD_SERVICE"
     "$TRAFFIC_SYSTEMD_TIMER"
@@ -6471,7 +6465,6 @@ _scan_xrayctl_residuals() {
     /etc/sysctl.d/99-xrayctl-bbr.conf
     /var/log/xray
   )
-  ((scan_backups == 0)) || paths+=("$BACKUP_DIR")
 
   for p in "${paths[@]}"; do
     if compgen -G "$p" >/dev/null 2>&1 || [[ -e $p ]]; then
@@ -6516,7 +6509,8 @@ _scan_xrayctl_residuals() {
 # Complete removal
 # ============================================================
 
-_xrayctl_purge_level_2() {
+uninstall_xray() {
+  ensure_system_context uninstall
   heading "删除"
   cat <<'EOF'
 
@@ -6580,11 +6574,6 @@ EOF
   echo
   printf '未修改：\n  - 系统 Certbot\n  - /etc/letsencrypt\n  - 其他网站证书\n  - 系统软件包\n'
   rm -f "$SNAPSHOT_META"
-}
-
-uninstall_xray() {
-  ensure_system_context uninstall
-  _xrayctl_purge_level_2
 }
 
 # --- src/menu.sh ---

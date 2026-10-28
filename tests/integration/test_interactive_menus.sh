@@ -136,7 +136,8 @@ for spec in '1 inbound_menu' '2 outbound_menu' '3 certificate_menu' '4 traffic_m
   exercise_menu_route main_menu "$choice" "$action"
 done
 exercise_menu_route main_menu 5 'manage_bbr'
-exercise_menu_route main_menu 7 'uninstall_xray 2'
+# Uninstall now has one cleanup path and takes no legacy purge-level argument.
+exercise_menu_route main_menu 7 'uninstall_xray'
 
 prompt_renamed_inbound_tag() { printf -v "$1" '%s' "$2"; }
 for spec in '1 rename_inbound node node' '2 modify_inbound_basic node' '3 modify_inbound_transport node'; do

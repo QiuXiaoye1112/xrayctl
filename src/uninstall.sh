@@ -288,7 +288,7 @@ _uninstall_remove_owned_jq() {
 }
 
 _scan_xrayctl_residuals() {
-  local __count_var=${1:-} scan_backups=${2:-1} count=0
+  local __count_var=${1:-} count=0
   local paths=(
     "$XRAY_BIN"
     /usr/local/bin/xray-linux-*
@@ -307,6 +307,7 @@ _scan_xrayctl_residuals() {
     /etc/systemd/system/xray.service.d
     "$OPENRC_SERVICE"
     "$CERT_RENEW_HOOK"
+    "$BACKUP_DIR"
     "$TRAFFIC_FILE"
     "$TRAFFIC_SYSTEMD_SERVICE"
     "$TRAFFIC_SYSTEMD_TIMER"
@@ -314,7 +315,6 @@ _scan_xrayctl_residuals() {
     /etc/sysctl.d/99-xrayctl-bbr.conf
     /var/log/xray
   )
-  ((scan_backups == 0)) || paths+=("$BACKUP_DIR")
 
   for p in "${paths[@]}"; do
     if compgen -G "$p" >/dev/null 2>&1 || [[ -e $p ]]; then
@@ -359,7 +359,8 @@ _scan_xrayctl_residuals() {
 # Complete removal
 # ============================================================
 
-_xrayctl_purge_level_2() {
+uninstall_xray() {
+  ensure_system_context uninstall
   heading "删除"
   cat <<'EOF'
 
@@ -423,9 +424,4 @@ EOF
   echo
   printf '未修改：\n  - 系统 Certbot\n  - /etc/letsencrypt\n  - 其他网站证书\n  - 系统软件包\n'
   rm -f "$SNAPSHOT_META"
-}
-
-uninstall_xray() {
-  ensure_system_context uninstall
-  _xrayctl_purge_level_2
 }
