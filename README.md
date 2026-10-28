@@ -77,7 +77,7 @@ Xray Linux 管理脚本
 
 - 使用 systemd 的 Linux：Debian、Ubuntu、RHEL、CentOS、Rocky Linux、AlmaLinux、Fedora、Arch Linux、openSUSE
 - Alpine Linux + OpenRC
-- 运行环境和 Xray 核心需自行准备
+- systemd 平台使用 XTLS 官方安装器；Alpine/OpenRC 支持 x86_64、aarch64、armv7
 - 以 root 身份运行写操作
 
 ### 与 sbctl 共存
@@ -87,6 +87,22 @@ xrayctl 可以与 sbctl/sing-box 同时安装。两者使用独立的命令、�
 BBR 是主机全局开关，xrayctl 与 sbctl 都读取内核当前状态，也都可以开启或关闭。关闭时会清理两者的已知持久化文件，避免重启后被另一份配置重新开启；第三方 sysctl 配置不会被修改。两套证书环境保持隔离，但 Certbot 操作会通过 `/run/lock/certbot.lock` 串行执行，避免同时操作 80 端口/nginx；同一个域名仍建议只交给一个工具自动签发和续期，避免重复申请。
 
 流量统计同样完全隔离：xrayctl 使用 `xrayctl_traffic` nftables 表（或 `XRAYCTL_TRAFFIC_IN/OUT` iptables 链），sbctl 使用自己的对象。脚本只删除带有自身注释的规则；检测到同名但不属于 xrayctl 的规则时会拒绝覆盖。
+
+## 安装
+
+通用 Linux（需要 root）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/install.sh | sudo bash
+```
+
+Alpine Linux（以 root 运行）：
+
+```sh
+wget -qO- https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
+```
+
+安装器会安装管理命令和 Xray 核心；运行 `xrayctl` 进入菜单，或使用 `xrayctl install [版本]` 安装或修复核心。bootstrap 下载的是仓库 main 分支的发行文件；本地修改发布到该分支后上述远程命令才会生效。
 
 ## 常用命令
 

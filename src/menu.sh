@@ -466,11 +466,12 @@ service_menu() {
     heading "服务管理"
     printf '状态: %s  |  开机自启: %s  |  Xray: %s\n\n' \
       "$(service_state_summary)" "$(startup_state_summary)" "$(xray_version_summary)"
-    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n0) 返回\n'
+    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装 Xray\n0) 返回\n'
     read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action toggle_service_running; pause;; 2) run_menu_action service_action restart; pause;;
       3) run_menu_action toggle_service_startup; pause;; 4) run_menu_action show_logs 100; pause;;
+      5) run_menu_action install_or_update_xray; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -567,6 +568,7 @@ xrayctl - Xray Linux 管理脚本
 
 用法:
   xrayctl                         打开交互菜单
+  xrayctl install [版本]              安装/修复 Xray
   xrayctl status                  查看状态
   xrayctl start|stop|restart      服务控制
   xrayctl logs [行数]             查看服务日志
@@ -627,6 +629,7 @@ dispatch() {
       [[ $XRAYCTL_BUILD_COMMIT == development ]] || printf ' (commit %s)' "$XRAYCTL_BUILD_COMMIT"
       printf '\n'
       ;;
+    install) install_or_update_xray "${1-}";;
     status) show_status;;
     start|stop|restart|enable|disable) service_action "$command";;
     logs) show_logs "${1:-100}";;
