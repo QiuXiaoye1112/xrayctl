@@ -322,13 +322,6 @@ install_quick_command() {
   meta_resource_register "quickSymlink" "$QUICK_SYMLINK"
 }
 
-# ============================================================
-# Uninstall
-#   Level 0: remove Xray core, keep config/certs/backups/xrayctl/timer
-#   Level 1: full uninstall, keep backups
-#   Level 2: purge everything xrayctl ever created
-# ============================================================
-
 show_status() {
   local traffic_state quota_state backend
   heading "Xray 状态"
