@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 inbound_exists() { jq -e --arg tag "$1" '.inbounds[] | select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
 
 inbound_configuration_is_supported() {
@@ -120,7 +121,7 @@ add_inbound() {
   tag=$(jq -r '.tag' <<<"$inbound")
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
-  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
   traffic_after_config_change || warn "入站已创建，但流量规则暂未同步，采集任务会自动重试。"
   heading "入站已创建"
   show_inbound "$tag"
@@ -207,7 +208,7 @@ rename_inbound() {
       else . end |
       if (.ruleTag // "")==("xrayctl-outbound:"+$old) then .ruleTag=("xrayctl-outbound:"+$new) else . end
     ))' "$CONFIG_FILE" >"$tmp"
-  state_apply_candidate_file "$tmp" state_commit_inbound_rename "$old_tag" "$new_tag" || return
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_rename "$old_tag" "$new_tag" || return
   traffic_after_config_change "$old_tag" "$new_tag" || warn "入站已重命名，但流量记录暂未同步，采集任务会自动重试。"
   info "入站已重命名：${old_tag} → ${new_tag}。"
 }
@@ -252,7 +253,7 @@ modify_inbound_transport() {
         if $method=="raw" and $security!="none" then .flow="xtls-rprx-vision" else del(.flow) end
       )
     else . end' "$CONFIG_FILE" >"$tmp"
-  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" || return
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" || return
   traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
   info "传输已更新，请重新导出客户端分享链接。"
 }
@@ -279,7 +280,7 @@ delete_inbound() {
         else true end
       )
     ]' "$CONFIG_FILE" >"$tmp"
-  state_apply_candidate_file "$tmp" state_commit_inbound_delete "$tag" || return
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_delete "$tag" || return
   traffic_after_config_change "$tag" || warn "入站已删除，但流量记录暂未同步，采集任务会自动重试。"
   info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
 }
@@ -449,7 +450,7 @@ delete_client() {
       )) else . end
     ' "$CONFIG_FILE" >"$tmp"
   fi
-  state_apply_candidate_file "$tmp" apply_candidate || return
+  state_apply_candidate_file "$tmp" state_commit_user_template_identity "$tag" "$managed_id" "" || return
   if [[ -n $managed_id ]]; then
     traffic_user_forget_client "$tag" "$managed_id" || warn "用户已删除，但流量记录暂未清理。"
   fi
@@ -479,7 +480,7 @@ rotate_client_credential() {
         del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp" ;;
     *) die "不支持此协议。";;
   esac
-  state_apply_candidate_file "$tmp" apply_candidate || return
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" apply_candidate || return
   info "新凭据：$value"
 }
 
@@ -539,7 +540,7 @@ rename_client() {
       return 1
     fi
   fi
-  if ! state_apply_candidate_file "$tmp" apply_candidate; then
+  if ! XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_user_template_identity "$tag" "${old_identity:-$old_label}" "${new_identity:-$new_label}"; then
     ((lock_owned == 0)) || traffic_lock_release
     return 1
   fi

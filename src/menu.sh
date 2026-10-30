@@ -1,10 +1,11 @@
+#!/usr/bin/env bash
 outbound_menu() {
   local choice
   while true; do
     clear_screen
     heading "出站管理"
     list_outbound_overview
-    printf '\n1) 入站出站管理\n2) 域名模板库\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 查看出站详情\n5) 删除出站\n0) 返回\n'
+    printf '\n1) 入站出站管理\n2) 用户域名模板库\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 查看出站详情\n5) 删除出站\n0) 返回\n'
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) inbound_outbound_menu;;
@@ -31,7 +32,7 @@ _outbound_user_labels() {
 }
 
 _outbound_inbound_default() {
-  jq -r --arg inbound "$1" '[.routing.rules[]? | select(.ruleTag==("xrayctl-outbound:"+$inbound)) | .outboundTag][0] // "Xray 原生默认"' "$CONFIG_FILE"
+  jq -r --arg inbound "$1" '[.routing.rules[]? | select(.ruleTag==("xrayctl-outbound:"+$inbound)) | .outboundTag][0] // .outbounds[0].tag // "未设置"' "$CONFIG_FILE"
 }
 
 _outbound_user_default() {
@@ -47,89 +48,217 @@ _outbound_user_domain_count() {
   ' "$CONFIG_FILE"
 }
 
-user_domain_rule_menu() {
-  local inbound=$1 label=$2 choice match domains outbound
+
+_outbound_user_domain_rules_display() {
+  local inbound=$1 identity=$2 rows type match outbound found=0 number=0 groups=0
+  rows=$(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+    [ .routing.rules[]? |
+      select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and
+        .inboundTag==[$inbound] and .user==[$identity] and (.template // "")=="") |
+      (.domain[0] // "") as $value |
+      {match:(if ($value|startswith("full:")) then "exact"
+              elif ($value|startswith("domain:")) then "suffix" else "" end),
+       domain:(if ($value|startswith("full:")) then $value[5:]
+               elif ($value|startswith("domain:")) then $value[7:] else $value end),
+       outbound:(.outboundTag // "")}
+    ] | map(select(.match!="")) |
+    sort_by([(if .match=="exact" then 0 else 1 end), (.outbound|ascii_downcase), (.domain|ascii_downcase), .domain]) |
+    group_by([.match,.outbound])[] as $group |
+    (["group",$group[0].match,$group[0].outbound] | @tsv),
+    ($group[] | ["rule",.domain] | @tsv)
+  ' "$CONFIG_FILE") || return 1
+  if [[ -z $rows ]]; then info '还没有直接域名规则。'; return 0; fi
+  while IFS=$'\t' read -r type match outbound domain; do
+    case $type in
+      group)
+        ((groups == 0)) || printf '\n'
+        groups=$((groups + 1))
+        [[ $match == exact ]] && match='精确' || match='子域名'
+        printf '%s%s%s → %s%s%s\n' \
+          "$C_BOLD$C_CYAN" "$match" "$C_RESET" \
+          "$C_BOLD$C_GREEN" "$( _outbound_display_name "$outbound" )" "$C_RESET"
+        ;;
+      rule)
+        ((number+=1))
+        print_table_cell "$number" 4; printf '  %s\n' "$match"
+        ;;
+    esac
+    found=1
+  done <<<"$rows"
+  ((found)) || info '还没有直接域名规则。'
+}
+user_domain_add_menu() {
+  local inbound=$1 label=$2 match domains outbound local_ip=''
+  choose match '匹配方式' '域名及所有子域名' '仅精确域名' || return 0
+  [[ $match == 1 ]] && match=suffix || match=exact
+  prompt_domain_list domains '域名（多个请用英文逗号分隔）' || return 0
+  select_outbound outbound 1 1 local_ip 0 || return 0
+  run_menu_action outbound_user_domain_add "$inbound" "$label" "$match" "$domains" "$outbound" "$local_ip"
+  pause
+}
+
+user_domain_delete_menu() {
+  local inbound=$1 label=$2 identity choice
+  _outbound_user_identity identity "$inbound" "$label" || return 1
+  # Collect all non-template user domain rules (suffix and exact)
+  local -a rule_domains=() rule_matches=() rule_outbounds=() display_items=()
+  local r_match r_domain r_outbound display_match display_out
+  while IFS=$'\t' read -r r_match r_domain r_outbound; do
+    [[ -n $r_domain ]] || continue
+    rule_matches+=("$r_match")
+    rule_domains+=("$r_domain")
+    rule_outbounds+=("$r_outbound")
+    [[ $r_match == exact ]] && display_match='精确' || display_match='子域名'
+    display_out=$(_outbound_display_name "$r_outbound")
+    display_items+=("$r_domain（$display_match → $display_out）")
+  done < <(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+    [ .routing.rules[]? |
+      select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and
+        .inboundTag==[$inbound] and .user==[$identity] and (.template // "")==""  ) |
+      (.domain[0] // "") as $value |
+      {match:(if ($value|startswith("full:")) then "exact"
+              elif ($value|startswith("domain:")) then "suffix" else "" end),
+       domain:(if ($value|startswith("full:")) then $value[5:]
+               elif ($value|startswith("domain:")) then $value[7:] else $value end),
+       outbound:(.outboundTag // "")}
+    ] | map(select(.match!=""))[] | [.match,.domain,.outbound] | @tsv
+  ' "$CONFIG_FILE")
+  if (("${#rule_domains[@]}" == 0)); then
+    info '还没有可删除的直接域名规则。'
+    pause; return 0
+  fi
+  choose choice '选择要删除的域名规则' "${display_items[@]}" || return 0
+  local idx=$((choice - 1))
+  local del_domain="${rule_domains[$idx]}"
+  local del_match="${rule_matches[$idx]}"
+  local del_outbound="${rule_outbounds[$idx]}"
+  [[ $del_match == exact ]] && display_match='精确' || display_match='子域名'
+  printf '\n将要删除：%s（%s → %s）\n' "$del_domain" "$display_match" "$(_outbound_display_name "$del_outbound")"
+  confirm "确认删除？" N || { info '已取消。'; pause; return 0; }
+  run_menu_action outbound_user_domain_delete "$inbound" "$label" "$del_match" "$del_domain"
+  pause
+}
+
+user_template_names() {
+  local inbound=$1 identity=$2
+  ensure_meta
+  jq -r --arg inbound "$inbound" --arg user "$identity" \
+    '[.domainTemplates.userBindings[]? | select(.inbound==$inbound and .user==$user) | .template] | if length==0 then "无" else join(", ") end' "$META_FILE"
+}
+
+user_template_bindings_display() {
+  local inbound=$1 identity=$2 name outbound found=0
+  ensure_meta
+  while IFS=$'\t' read -r name outbound; do
+    [[ -n $name ]] || continue
+    printf '  %s → %s\n' "$name" "$( _outbound_display_name "$outbound" )"
+    found=1
+  done < <(jq -r --arg inbound "$inbound" --arg user "$identity" \
+    '.domainTemplates.userBindings[]? | select(.inbound==$inbound and .user==$user) | [.template,.outbound] | @tsv' "$META_FILE")
+  if ((found == 0)); then printf '  无\n'; fi
+}
+
+user_template_remove_menu() {
+  local inbound=$1 label=$2 identity=$3 choice name
+  local -a names=()
+  mapfile -t names < <(jq -r --arg inbound "$inbound" --arg user "$identity" \
+    '.domainTemplates.userBindings[]? | select(.inbound==$inbound and .user==$user) | .template' "$META_FILE")
+  if ((${#names[@]}==0)); then info '该用户没有已应用模板。'; pause; return 0; fi
+  choose choice '选择要移除的模板' "${names[@]}" || return 0
+  name=${names[$((choice-1))]}
+  run_menu_action user_template_remove "$inbound" "$label" "$name"
+  pause
+}
+
+user_template_menu() {
+  local inbound=$1 label=$2 identity choice name outbound local_ip=''
+  _outbound_user_identity identity "$inbound" "$label" || return 1
   while true; do
     clear_screen
-    heading "用户域名分流 · ${label}"
-    outbound_user_domain_list "$inbound" "$label" || return 1
-    printf '\n1) 查看规则\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    heading "用户模板 · ${label}"
+    printf '已应用模板：\n'
+    user_template_bindings_display "$inbound" "$identity"
+    printf '\n1) 应用模板\n2) 移除模板\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
-      1) pause;;
-      2)
-        choose match '匹配方式' '域名及所有子域名' '仅精确域名' || continue
-        [[ $match == 1 ]] && match=suffix || match=exact
-        prompt_value domains '域名（多个请用英文逗号分隔）' || continue
-        select_outbound outbound 1 1 "" 1 || continue
-        run_menu_action outbound_user_domain_add "$inbound" "$label" "$match" "$domains" "$outbound"; pause
-        ;;
-      3)
-        choose match '删除匹配方式' '域名及所有子域名' '仅精确域名' || continue
-        [[ $match == 1 ]] && match=suffix || match=exact
-        prompt_value domains '要删除的域名（多个请用英文逗号分隔）' || continue
-        run_menu_action outbound_user_domain_delete "$inbound" "$label" "$match" "$domains"; pause
-        ;;
+      1)
+        select_domain_template name || continue
+        local_ip=''
+        select_outbound outbound 1 1 local_ip 0 || continue
+        run_menu_action user_template_apply "$inbound" "$label" "$name" "$outbound" "$local_ip"
+        pause;;
+      2) user_template_remove_menu "$inbound" "$label" "$identity";;
       0) return;; *) warn '无效选项。'; pause;;
     esac
   done
 }
 
 user_outbound_detail_menu() {
-  local inbound=$1 label=$2 choice identity default
+  local inbound=$1 label=$2 choice identity default display_default
   while true; do
     clear_screen
     _outbound_user_identity identity "$inbound" "$label" || return 1
     default=$(_outbound_user_default "$inbound" "$identity")
+    [[ -n $default ]] || default=$(_outbound_inbound_default "$inbound")
+    display_default=$(_outbound_display_name "$default")
     heading "用户出站管理 · ${label}"
-    printf '用户：%s\n当前默认出站：%s\n入站默认出站：%s\n继承入站出站：%s\n独立域名规则：%s 条\n\n' \
-      "$label" "${default:-继承入站}" "$(_outbound_inbound_default "$inbound")" \
-      "$([[ -z $default ]] && printf 是 || printf 否)" "$(_outbound_user_domain_count "$inbound" "$identity")"
-    printf '1) 设置默认出站\n2) 取消独立默认出站\n3) 管理域名分流\n4) 恢复继承入站规则\n0) 返回\n'
+    printf '默认出站：%s\n模板：\n' "$display_default"
+    user_template_bindings_display "$inbound" "$identity"
+    heading '域名分流规则'
+    printf '\n'
+    _outbound_user_domain_rules_display "$inbound" "$identity"
+    printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
-      1) run_menu_action outbound_user_default_set "$inbound" "$label" ""; pause;;
-      2) run_menu_action outbound_user_default_unset "$inbound" "$label"; pause;;
-      3) user_domain_rule_menu "$inbound" "$label";;
-      4) run_menu_action outbound_user_restore "$inbound" "$label"; pause;;
+      1) user_template_menu "$inbound" "$label";;
+      2) user_domain_add_menu "$inbound" "$label";;
+      3) user_domain_delete_menu "$inbound" "$label";;
       0) return;; *) warn '无效选项。'; pause;;
     esac
   done
 }
 
 inbound_user_outbound_menu() {
-  local inbound=$1 label choice identity default
+  local inbound=$1 choice
   local -a labels=()
   mapfile -t labels < <(_outbound_user_labels "$inbound")
-  while true; do
-    clear_screen
-    heading "用户出站管理 · ${inbound}"
-    if ((${#labels[@]}==0)); then info '该入站没有可识别的认证用户。'; pause; return 0; fi
-    for label in "${labels[@]}"; do
-      _outbound_user_identity identity "$inbound" "$label" || continue
-      default=$(_outbound_user_default "$inbound" "$identity")
-      printf '用户：%s | 默认出站：%s | 独立域名规则：%s 条\n' \
-        "$label" "${default:-继承入站}" "$(_outbound_user_domain_count "$inbound" "$identity")"
-    done
-    choose choice '选择用户' "${labels[@]}" || return 0
-    user_outbound_detail_menu "$inbound" "${labels[$((choice-1))]}"
-  done
+  if ((${#labels[@]}==0)); then info '该入站没有可识别的认证用户。'; pause; return 0; fi
+  choose choice '选择用户' "${labels[@]}" || return 0
+  user_outbound_detail_menu "$inbound" "${labels[$((choice-1))]}"
 }
 
 inbound_outbound_detail_menu() {
-  local inbound=$1 choice
+  local inbound=$1 choice label identity default display_default count inbound_default first_user
+  local -a labels=()
   while inbound_exists "$inbound"; do
     clear_screen
     heading "入站出站管理 · ${inbound}"
-    printf '入站默认出站：%s\n公共域名分流规则：%s 条\n用户数量：%s\n\n' \
-      "$(_outbound_inbound_default "$inbound")" "$(domain_rule_inbound_count "$inbound")" \
-      "$(jq -r --arg inbound "$inbound" '[.inbounds[]|select(.tag==$inbound)|(.settings.clients // .settings.accounts // .settings.users // [])[]?]|length' "$CONFIG_FILE")"
-    printf '1) 设置入站默认出站\n2) 入站域名分流\n3) 用户出站管理\n0) 返回\n'
+    mapfile -t labels < <(_outbound_user_labels "$inbound")
+    inbound_default=$(_outbound_inbound_default "$inbound")
+    printf '入站默认出站：%s\n\n用户：\n' "$(_outbound_display_name "$inbound_default")"
+    if ((${#labels[@]})); then
+      first_user=1
+      for label in "${labels[@]}"; do
+        if ((first_user)); then first_user=0; else printf '\n'; fi
+        if _outbound_user_identity identity "$inbound" "$label" 2>/dev/null; then
+          default=$(_outbound_user_default "$inbound" "$identity")
+          count=$(_outbound_user_domain_count "$inbound" "$identity")
+          [[ -n $default ]] || default=$inbound_default
+          display_default=$(_outbound_display_name "$default")
+          printf '  %s\n  默认出站：%s\n  分流规则：%s 条\n  模板：%s\n' \
+            "$label" "$display_default" "$count" "$(user_template_names "$inbound" "$identity")"
+        else
+          printf '  %s\n  默认出站：未知\n  分流规则：未知\n  模板：无\n' "$label"
+        fi
+      done
+    else
+      printf '  无\n'
+    fi
+    printf '\n1) 设置默认出站\n2) 用户出站管理\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action assign_outbound "$inbound" ""; pause;;
-      2) domain_rule_detail_menu "$inbound";;
-      3) inbound_user_outbound_menu "$inbound";;
+      2) inbound_user_outbound_menu "$inbound";;
       0) return;; *) warn '无效选项。'; pause;;
     esac
   done
@@ -138,152 +267,15 @@ inbound_outbound_detail_menu() {
 inbound_outbound_menu() {
   ensure_config
   local -a tags=()
-  local inbound choice
+  local choice
   mapfile -t tags < <(_outbound_inbound_tags)
   ((${#tags[@]})) || { info '还没有可管理的入站。'; pause; return 0; }
   if ((${#tags[@]}==1)); then
     inbound_outbound_detail_menu "${tags[0]}"
     return
   fi
-  while true; do
-    clear_screen
-    heading '选择入站'
-    for inbound in "${tags[@]}"; do
-      printf '%s | 默认出站：%s | 公共域名分流：%s 条 | 用户：%s\n' \
-        "$inbound" "$(_outbound_inbound_default "$inbound")" "$(domain_rule_inbound_count "$inbound")" \
-        "$(jq -r --arg inbound "$inbound" '[.inbounds[]|select(.tag==$inbound)|(.settings.clients // .settings.accounts // .settings.users // [])[]?]|length' "$CONFIG_FILE")"
-    done
-    choose choice '选择入站' "${tags[@]}" || return 0
-    inbound_outbound_detail_menu "${tags[$((choice-1))]}"
-  done
-}
-
-domain_rule_detail_menu() {
-  local tag=$1 choice template outbound has_binding=0
-  while inbound_exists "$tag"; do
-    clear_screen
-    heading "域名分流 · ${tag}"
-    printf '模板：\n'
-    has_binding=0
-    while IFS=$'\t' read -r template outbound; do
-      [[ -n $template ]] || continue
-      printf '  %s → %s\n' "$template" "$outbound"
-      has_binding=1
-    done < <(list_inbound_template_bindings "$tag")
-    ((has_binding)) || printf '  无\n'
-    printf '\n'
-    list_domain_rules "$tag" --menu
-    printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
-    case $choice in
-      1) inbound_template_manage_menu "$tag";;
-      2) if run_menu_action add_domain_rule "$tag" "" "" "" --prompt; then pause; fi;;
-      3) if run_menu_action delete_domain_rule "$tag" "" "" --direct-only; then pause; fi;;
-      0) return;; *) warn "无效选项。"; pause;;
-    esac
-  done
-}
-
-domain_rule_inbound_templates() {
-  local tag=$1 template outbound summary=''
-  while IFS=$'\t' read -r template outbound; do
-    [[ -n $template ]] || continue
-    [[ -n $summary ]] && summary+=', '
-    summary+="$template"
-  done < <(list_inbound_template_bindings "$tag")
-  printf '%s' "${summary:-无}"
-}
-
-domain_rule_inbound_count() {
-  local tag=$1
-  jq -r --arg tag "$tag" "$(_xrayctl_domain_rule_jq)
-    [.routing.rules[]? | select(xrayctl_domain_rule and (.inboundTag // [])==[\$tag])] | length" \
-    "$CONFIG_FILE"
-}
-
-domain_rule_menu() {
-  local choice tag number=0
-  local -a tags=()
-  ensure_config
-  while true; do
-    clear_screen
-    heading '域名分流'
-    printf '入站列表\n\n'
-    tags=()
-    while IFS= read -r tag; do
-      [[ -n $tag ]] && tags+=("$tag")
-    done < <(jq -r '.inbounds[] | select(.protocol|test("^(vless|socks|http)$")) | .tag' "$CONFIG_FILE")
-    if ((${#tags[@]} == 0)); then
-      info '还没有可管理的入站。'
-    else
-      for ((number=0; number<${#tags[@]}; number++)); do
-        tag=${tags[$number]}
-        printf '%d) %s\n' "$((number + 1))" "$tag"
-        printf '   模板：%s\n' "$(domain_rule_inbound_templates "$tag")"
-        printf '   域名规则：%s 条\n\n' "$(domain_rule_inbound_count "$tag")"
-      done
-    fi
-    printf '操作：\n'
-    printf '  [%d] 管理模板\n' "$(( ${#tags[@]} + 1 ))"
-    printf '  [0] 返回\n'
-    read -r -p '请选择: ' choice || { cancel_selection; return 1; }
-    case $choice in
-      0) return;;
-      ''|*[!0-9]*) warn '无效选项。'; pause;;
-      *)
-        if ((choice == ${#tags[@]} + 1)); then
-          template_library_menu
-        elif ((choice >= 1 && choice <= ${#tags[@]})); then
-          domain_rule_detail_menu "${tags[$((choice-1))]}"
-        else
-          warn '无效选项。'
-          pause
-        fi
-        ;;
-    esac
-  done
-}
-
-select_inbound_template() {
-  local inbound=$1 __var=$2 answer template_name
-  local -a names=()
-  while IFS=$'\t' read -r template_name _; do
-    [[ -n $template_name ]] && names+=("$template_name")
-  done < <(list_inbound_template_bindings "$inbound")
-  ((${#names[@]})) || { warn "当前入站还没有应用模板。"; return 1; }
-  choose answer "选择模板" "${names[@]}" || return 1
-  printf -v "$__var" '%s' "${names[$((answer-1))]}"
-}
-
-inbound_template_manage_menu() {
-  local inbound=$1 choice name outbound
-  while inbound_exists "$inbound"; do
-    clear_screen
-    heading "入站模板 · ${inbound}"
-    printf '已应用模板：\n'
-    while IFS=$'\t' read -r name outbound; do
-      [[ -n $name ]] || continue
-      printf '  %s → %s\n' "$name" "$outbound"
-    done < <(list_inbound_template_bindings "$inbound")
-    printf '\n1) 添加模板\n2) 移除模板\n3) 修改出站\n0) 返回\n'
-    read -r -p '请选择: ' choice || { cancel_selection; return 1; }
-    case $choice in
-      1) if apply_domain_template_menu "$inbound"; then :; fi; pause;;
-      2)
-        select_inbound_template "$inbound" name || { pause; continue; }
-        confirm "从入站 ${inbound} 移除模板 ${name}？" N || continue
-        run_menu_action remove_domain_template "$inbound" "$name"
-        pause
-        ;;
-      3)
-        select_inbound_template "$inbound" name || { pause; continue; }
-        select_outbound outbound 1 || continue
-        run_menu_action update_domain_template_outbound "$inbound" "$name" "$outbound"
-        pause
-        ;;
-      0) return;; *) warn '无效选项。'; pause;;
-    esac
-  done
+  choose choice '选择入站' "${tags[@]}" || return 0
+  inbound_outbound_detail_menu "${tags[$((choice-1))]}"
 }
 
 select_domain_template() {
@@ -364,14 +356,14 @@ template_manage_menu() {
     read -r -p '请选择: ' choice || { cancel_selection; return 1; }
     case $choice in
       1)
-        choose type "域名类型" "精确域名" "域名及所有子域名" || { pause; continue; }
+        choose type "域名类型" "精确域名" "域名及所有子域名" || continue
         [[ $type == 1 ]] && match=exact || match=suffix
-        prompt_value domains "域名（多个请用英文逗号分隔）" || continue
+        prompt_domain_list domains "域名（多个请用英文逗号分隔）" || continue
         run_menu_action add_domain_template_domains "$name" "$match" "$domains"
         pause
         ;;
       2)
-        choose type "域名类型" "精确域名" "域名及所有子域名" || { pause; continue; }
+        choose type "域名类型" "精确域名" "域名及所有子域名" || continue
         [[ $type == 1 ]] && match=exact || match=suffix
         if delete_domain_template_domains_menu "$name" "$match"; then pause; fi
         ;;
@@ -412,13 +404,6 @@ template_library_menu() {
         ;;
     esac
   done
-}
-
-apply_domain_template_menu() {
-  local inbound=$1 name outbound
-  select_domain_template name || return 1
-  select_outbound outbound 1 || return 1
-  run_menu_action apply_domain_template "$inbound" "$name" "$outbound"
 }
 
 client_menu_for_tag() {
@@ -556,7 +541,7 @@ inbound_menu() {
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action add_inbound; pause;;
-      2) if select_inbound tag; then manage_inbound_menu "$tag"; else pause; fi;;
+      2) if select_inbound tag; then manage_inbound_menu "$tag"; fi;;
       3) run_menu_action print_all_share_links; pause;;
       4) run_menu_action delete_inbound; pause;;
       0) return;; *) warn "无效选项。"; pause;;
@@ -810,9 +795,6 @@ xrayctl - Xray Linux 管理脚本
   xrayctl outbound user rule delete <入站> <用户> <suffix|exact> <域名[,域名...]>
   xrayctl outbound user restore <入站> <用户>
   xrayctl outbound delete <出站标签>
-  xrayctl outbound rule list [入站]
-  xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>
-  xrayctl outbound rule delete [入站] [suffix|exact] [域名]
   xrayctl client list [标签]
   xrayctl client add [标签]
   xrayctl client rename [标签] [旧名称] [新名称]
@@ -927,14 +909,6 @@ dispatch() {
               esac
               ;;
             *) die "未知 outbound user 子命令：${2}";;
-          esac
-          ;;
-        rule)
-          case ${2:-list} in
-            list) list_domain_rules "${3-}";;
-            add) add_domain_rule "${3-}" "${4-}" "${5-}" "${6-}";;
-            delete|remove) delete_domain_rule "${3-}" "${4-}" "${5-}";;
-            *) die "未知 outbound rule 子命令：${2}";;
           esac
           ;;
         *) die "未知 outbound 子命令：${1}";; esac;;

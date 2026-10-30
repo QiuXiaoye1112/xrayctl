@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 share_separator() { printf '%s\n' '------------------------------------------------------------------------'; }
 
 print_share_entry() {

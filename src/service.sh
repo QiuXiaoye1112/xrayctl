@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 service_exists() { platform_service_exists; }
 service_is_active() { platform_service_is_active; }
 service_is_enabled() { platform_service_is_enabled; }

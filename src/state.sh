@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 init_meta_base() {
   mkdir -p "$CONFIG_DIR"
 
@@ -18,9 +19,9 @@ init_meta_base() {
     ((.certificates // {})|type)=="object" and
     ((.managedResources // {})|type)=="object" and
      ((.migrations // {})|type)=="object" and
-     ((.domainTemplates // {templates:[],bindings:[]})|type)=="object" and
+     ((.domainTemplates // {templates:[],userBindings:[]})|type)=="object" and
      ((.domainTemplates.templates // [])|type)=="array" and
-     ((.domainTemplates.bindings // [])|type)=="array"
+      ((.domainTemplates.userBindings // [])|type)=="array"
   ' "$META_FILE" >/dev/null 2>&1; then
     chmod 600 "$META_FILE"
     return 0
@@ -35,7 +36,9 @@ init_meta_base() {
     .certificates = (.certificates // {}) |
     .managedResources = (.managedResources // {}) |
      .migrations = (.migrations // {}) |
-     .domainTemplates = (.domainTemplates // {templates:[],bindings:[]})
+     .domainTemplates = (.domainTemplates // {}) |
+     .domainTemplates.templates = (.domainTemplates.templates // []) |
+     .domainTemplates.userBindings = (.domainTemplates.userBindings // [])
   ' "$META_FILE" >"$tmp" || {
     rm -f "$tmp"
     return 1
@@ -350,9 +353,9 @@ state_validate_metadata_candidate() {
     ((.certificates // {}) | type=="object") and
     ((.managedResources // {}) | type=="object") and
     ((.migrations // {}) | type=="object") and
-    ((.domainTemplates // {templates:[],bindings:[]}) | type=="object") and
+    ((.domainTemplates // {templates:[],userBindings:[]}) | type=="object") and
     ((.domainTemplates.templates // []) | type=="array") and
-    ((.domainTemplates.bindings // []) | type=="array")
+    ((.domainTemplates.userBindings // []) | type=="array")
   ' "$candidate" 2>&1); then
     error "metadata JSON 结构检查失败。" "$validation_output"
     return 1
@@ -550,8 +553,8 @@ _state_build_inbound_meta_delete() {
   local current=$1 candidate=$2 tag=$3
   jq --arg tag "$tag" '
     del(.inbounds[$tag]) |
-    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
-    .domainTemplates.bindings = [.domainTemplates.bindings[]? | select(.inbound != $tag)]' \
+    .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
+    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? | select(.inbound != $tag)]' \
     "$current" >"$candidate"
 }
 
@@ -561,8 +564,8 @@ _state_build_inbound_meta_rename() {
     if .inbounds[$old] then
       .inbounds[$new]=(.inbounds[$old] + {updatedAt:$now}) | del(.inbounds[$old])
     else . end |
-    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
-    .domainTemplates.bindings = [.domainTemplates.bindings[]? |
+    .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
+    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? |
       if .inbound==$old then .inbound=$new else . end]' \
     "$current" >"$candidate"
 }
@@ -577,6 +580,19 @@ state_commit_inbound_delete() {
 
 state_commit_inbound_rename() {
   state_commit "$1" _state_build_inbound_meta_rename "$2" "$3"
+}
+
+_state_build_user_template_identity() {
+  local current=$1 candidate=$2 inbound=$3 old=$4 new=$5
+  jq --arg inbound "$inbound" --arg old "$old" --arg new "$new" '
+    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? |
+      if .inbound==$inbound and .user==$old then
+        if $new=="" then empty else .user=$new end
+      else . end]' "$current" >"$candidate"
+}
+
+state_commit_user_template_identity() {
+  state_commit "$1" _state_build_user_template_identity "$2" "$3" "$4"
 }
 
 
@@ -611,8 +627,7 @@ backup_all() {
   [[ ! -f $TRAFFIC_FILE ]] || paths+=("${TRAFFIC_FILE#/}")
   tar -czf "$target" -C / "${paths[@]}" 2>/dev/null || { rm -f "$target"; die "备份失败。"; }
   chmod 600 "$target"
-  info "备份已创建：$target"
-  info "备份包含 Xray 配置、metadata、流量记录和证书副本，不含 Certbot 账户/lineage 数据。"
+  info "备份已创建：$target（包含 Xray 配置、metadata、流量记录和证书副本，不含 Certbot 账户/lineage 数据）。"
 }
 
 restore_backup() {

@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # shellcheck shell=bash
 # Per-inbound rolling traffic accounting and per-user monthly quotas. Linux
 # packet counters provide inbound samples; only the current display period is
@@ -434,7 +435,7 @@ traffic_user_reconcile_locked() {
     else . end
   ' "$prepared" >"$candidate" || rc=1
   if ((rc==0)) && ! jq -s -e '.[0]==.[1]' "$CONFIG_FILE" "$candidate" >/dev/null; then
-    state_commit "$candidate" || rc=1
+    XRAYCTL_QUIET_CONFIG_APPLIED=1 state_commit "$candidate" || rc=1
   fi
   rm -f "$candidate" "$prepared" "$recovered"; traffic_lock_release
   return "$rc"
@@ -559,7 +560,7 @@ traffic_user_limit_set() {
   local tag=${1-} label=${2-} quota_gb=${3-} reset_day=${4-} reset_time=${5-}
   local id quota now existing old_day old_time anchor_time cycle_end tmp rc=0 interactive=0
   traffic_user_require_manager
-  traffic_user_enable || return 1
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 traffic_user_enable || return 1
   traffic_user_select tag label "$tag" "$label" || return 0
   id=$(traffic_user_id "$tag" "$label")
   [[ -n $id ]] || return 1

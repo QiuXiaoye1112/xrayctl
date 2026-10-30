@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 cleanup_step() {
   local description=$1
   shift

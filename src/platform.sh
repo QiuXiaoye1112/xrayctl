@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 validate_ipv4() {
   local value=$1 a b c d extra
   IFS=. read -r a b c d extra <<<"$value"

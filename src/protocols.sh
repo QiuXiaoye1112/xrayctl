@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 protocol_list() {
   printf '%s\n' vless socks http
 }

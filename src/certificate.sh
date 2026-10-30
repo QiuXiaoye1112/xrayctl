@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 certificate_server_names() {
   local cert=$1 san concrete
   san=$(openssl x509 -in "$cert" -noout -text 2>/dev/null \
@@ -385,7 +386,6 @@ restart_xray_if_certificate_changed() {
     warn "证书已更新，但 Xray 重启失败。"
     return 1
   fi
-  info "Xray 已重启以加载新证书。"
 }
 
 sync_managed_certificate() {
@@ -465,7 +465,7 @@ update_tls_inbound_certificate() {
         certificates:[{certificateFile:$cert,keyFile:$key}]
       }
     )' "$CONFIG_FILE" >"$tmp"
-  state_apply_candidate_file "$tmp" apply_candidate || return
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" apply_candidate || return
   info "证书已更新：${tag}"
 }
 
@@ -963,7 +963,6 @@ renew_one_certificate() {
       [[ -n $__result_var ]] && printf -v "$__result_var" '%s' "failed"
       return 1
     fi
-    info "Xray 已重启以加载新证书。"
   fi
 
   certificate_transaction_commit "$transaction"

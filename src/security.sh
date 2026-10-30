@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 prompt_tls_certificate() {
   local __cert=$1 __key=$2 __sni=$3 identifier cert_value key_value sni_value
   if (( $(managed_certificate_count) > 0 )) && confirm "使用托管证书？" Y; then
