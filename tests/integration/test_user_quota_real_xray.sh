@@ -146,6 +146,10 @@ if [[ ${XRAYCTL_TEST_FIREWALL:-0} == 1 ]]; then
   traffic_rules_restore_serialized
   if [[ $(fetch "$alice") != hello ]]; then printf 'not ok - Alice could not connect after both resets\n' >&2; exit 1; fi
   wait "$listener_pid" || true; listener_pid=''
+  # Remove the one-byte inbound quota used by this scenario before the next
+  # user-only checks; subsequent real traffic would legitimately exhaust it.
+  traffic_remove_limit_data a
+  traffic_rules_restore_serialized
 else
 traffic_user_reset a alice
 respond
