@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="459ac0d2c196"
+readonly XRAYCTL_BUILD_COMMIT="3534564b2d64"
 readonly XRAY_CORE_PINNED_VERSION="26.3.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -4825,7 +4825,7 @@ traffic_limits_disable() {
   fi
   if ! traffic_user_reconcile; then
     traffic_set_limits_enabled true || true
-    traffic_is_enabled && traffic_rules_restore_serialized || true
+    if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
     warn "用户额度规则关闭失败，流量限制已恢复为开启状态。"
     return 1
   fi

@@ -1430,7 +1430,7 @@ traffic_limits_disable() {
   fi
   if ! traffic_user_reconcile; then
     traffic_set_limits_enabled true || true
-    traffic_is_enabled && traffic_rules_restore_serialized || true
+    if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
     warn "用户额度规则关闭失败，流量限制已恢复为开启状态。"
     return 1
   fi
