@@ -373,13 +373,17 @@ _state_cleanup_transaction_files() {
 }
 
 state_commit() {
-  local candidate=$1 meta_mutator=${2-} old_active=0
+  local candidate=$1 meta_mutator=${2-} old_active=0 traffic_locked=0
   local config_snapshot meta_snapshot meta_candidate=""
   if [[ -n $meta_mutator ]]; then shift 2; else shift; fi
-  ensure_config
+  if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} == 1 ]]; then
+    [[ -r $CONFIG_FILE && -r $META_FILE ]] || { error "用户额度配置事务缺少现有配置或 metadata。"; return 1; }
+  else
+    ensure_config
+  fi
   validate_candidate "$candidate" || return 1
   service_is_active && old_active=1
-  setup_runtime_access || return 1
+  if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} != 1 ]]; then setup_runtime_access || return 1; fi
 
   if [[ -n $meta_mutator ]]; then
     meta_candidate=$(temp_file)
@@ -398,7 +402,25 @@ state_commit() {
   cp -p "$CONFIG_FILE" "$config_snapshot"
   cp -p "$META_FILE" "$meta_snapshot"
 
+  # Keep the stats snapshot and the restart in the same traffic-lock critical
+  # section. The timer never acquires the management lock while holding this
+  # lock, so it cannot invert the management -> traffic lock ordering.
+  if [[ -f $TRAFFIC_FILE ]] && { jq -e '.xrayctlUserStats.enabled==true' "$CONFIG_FILE" >/dev/null 2>&1 || jq -e '.xrayctlUserStats.enabled==true' "$candidate" >/dev/null 2>&1; }; then
+    if [[ ${TRAFFIC_LOCK_HELD:-0} != 1 ]]; then
+      if ! traffic_lock_acquire; then
+        _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+        warn "用户流量采集正在运行，配置暂未提交。"
+        return 1
+      fi
+      traffic_locked=1
+    fi
+    if ((old_active)) && [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} != 1 ]]; then
+      traffic_user_collect_locked || warn "重启前未能采集用户流量，该间隔可能丢失。"
+    fi
+  fi
+
   if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$CONFIG_FILE"; then
+    ((traffic_locked == 0)) || traffic_lock_release
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
   fi
@@ -406,6 +428,7 @@ state_commit() {
   if [[ -n $meta_candidate ]] && ! install -m 600 "$meta_candidate" "$META_FILE"; then
     error "metadata 提交失败，正在回滚配置和 metadata。"
     _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
+    ((traffic_locked == 0)) || traffic_lock_release
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
   fi
@@ -414,10 +437,23 @@ state_commit() {
     error "重启失败，正在回滚配置和 metadata。"
     _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
     restart_service || true
+    ((traffic_locked == 0)) || traffic_lock_release
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
   fi
 
+  # Moving a managed inbound's records must happen before the timer can sample
+  # its new tag, otherwise the same counters could receive two baselines.
+  if [[ $meta_mutator == _state_build_inbound_meta_rename && ${TRAFFIC_LOCK_HELD:-0} == 1 ]] && ! traffic_rename_records_locked "$1" "$2"; then
+    error "流量记录迁移失败，正在回滚入站重命名。"
+    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
+    ((old_active == 0)) || restart_service || true
+    ((traffic_locked == 0)) || traffic_lock_release
+    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+    return 1
+  fi
+
+  ((traffic_locked == 0)) || traffic_lock_release
   _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
   info "配置已应用。"
 }
@@ -425,8 +461,23 @@ state_commit() {
 apply_candidate() { state_commit "$1"; }
 
 state_apply_candidate_file() {
-  local candidate=$1 operation=$2 rc
+  local candidate=$1 operation=$2 rc normalized="" address
   shift 2
+  if traffic_user_managed_config; then
+    if ! jq -e '.xrayctlUserStats.enabled==true' "$candidate" >/dev/null; then
+      rm -f "$candidate"
+      warn "用户流量管理正在使用此配置；拒绝移除统计配置。"
+      return 1
+    fi
+    address=$(jq -r '.api.listen // ""' "$candidate") || { rm -f "$candidate"; return 1; }
+    normalized=$(temp_file) || { rm -f "$candidate"; return 1; }
+    if ! traffic_user_prepare_config "$candidate" "$normalized" "$address"; then
+      rm -f "$candidate" "$normalized"
+      return 1
+    fi
+    rm -f "$candidate"
+    candidate=$normalized
+  fi
   if "$operation" "$candidate" "$@"; then
     rc=0
   else
@@ -613,7 +664,7 @@ restore_backup() {
   if [[ -d "$temp/${CERT_DIR#/}" ]]; then cp -a "$temp/${CERT_DIR#/}/." "$CERT_DIR/"; fi
   if [[ -f "$temp/${TRAFFIC_FILE#/}" ]]; then
     mkdir -p "$(dirname "$TRAFFIC_FILE")"
-    install -m 600 "$temp/${TRAFFIC_FILE#/}" "$TRAFFIC_FILE"
+    traffic_write_file "$temp/${TRAFFIC_FILE#/}"
     restored_traffic=1
   fi
   if ! init_meta || ! setup_runtime_access || \
@@ -625,7 +676,7 @@ restore_backup() {
     mkdir -p "$CERT_DIR"
     if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/"; fi
     if ((had_traffic)); then
-      mkdir -p "$(dirname "$TRAFFIC_FILE")"; install -m 600 "$snapshot/traffic.json" "$TRAFFIC_FILE"
+      mkdir -p "$(dirname "$TRAFFIC_FILE")"; traffic_write_file "$snapshot/traffic.json"
     elif ((restored_traffic)); then
       rm -f "$TRAFFIC_FILE"
     fi

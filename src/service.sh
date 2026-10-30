@@ -4,6 +4,9 @@ service_is_enabled() { platform_service_is_enabled; }
 
 restart_service() {
   if service_exists; then
+    if [[ ${TRAFFIC_LOCK_HELD:-0} != 1 ]] && service_is_active && traffic_user_managed_config; then
+      traffic_user_collect_serialized || warn "重启前未能采集用户流量，未采集部分可能丢失。"
+    fi
     platform_service_restart
     if ! service_is_active; then
       platform_service_logs 20 >&2 || true
@@ -228,6 +231,9 @@ _service_install_output() {
 install_or_update_xray() {
   ensure_runtime_dependencies install
   local version=${1:-$XRAY_CORE_PINNED_VERSION} installer install_log status preserved_config=""
+  if service_is_active && traffic_user_managed_config; then
+    traffic_user_collect_serialized || warn "安装前未能采集用户流量，未采集部分可能丢失。"
+  fi
   _service_snapshot_existing_config preserved_config
   if [[ $(platform_init_system) == openrc ]]; then
     install_xray_core_openrc "$version"
@@ -339,6 +345,9 @@ service_action() {
   ensure_runtime_dependencies service
   local action=$1
   service_exists || die "Xray 服务不存在。"
+  if [[ $action == stop || $action == restart || $action == disable ]] && service_is_active && traffic_user_managed_config; then
+    traffic_user_collect_serialized || warn "服务操作前未能采集用户流量，未采集部分可能丢失。"
+  fi
   case $action in
     start) platform_service_start ;;
     stop) platform_service_stop ;;

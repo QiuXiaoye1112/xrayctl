@@ -12,6 +12,578 @@ TRAFFIC_SYSTEMD_SERVICE="${SYSTEMD_UNIT_DIR}/xrayctl-traffic-collect.service"
 TRAFFIC_SYSTEMD_TIMER="${SYSTEMD_UNIT_DIR}/xrayctl-traffic-collect.timer"
 TRAFFIC_OPENRC_SERVICE="${OPENRC_INIT_DIR}/xrayctl-traffic-collect"
 
+traffic_user_managed_config() {
+  [[ -r $CONFIG_FILE ]] && jq -e '.xrayctlUserStats.enabled==true' "$CONFIG_FILE" >/dev/null 2>&1
+}
+
+# The core aggregates user counters by email across all inbounds. Keep the
+# display label in the client object and use a separate, globally unique email
+# for accounting. UUIDs and share-link labels are unchanged. This function
+# produces a candidate only; the caller must validate and commit it through
+# the normal configuration transaction.
+traffic_user_prepare_identities() {
+  local input=$1 output=$2 working next index client_index label original identity mappings='[]'
+  if ! jq -e '
+    def valid_label: . == null or (type=="string" and length<=128 and (test("[\\r\\n\\t]")|not) and (contains(">>>")|not));
+    [.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? |
+      select((.email|valid_label|not) or (.xrayctlLabel|valid_label|not))] | length==0
+  ' "$input" >/dev/null; then
+    warn "VLESS 用户名称含有无法安全处理的字符，请先修正配置。"
+    return 1
+  fi
+  working=$(temp_file) || return 1
+  cp "$input" "$working" || { rm -f "$working"; return 1; }
+  while IFS=$'\t' read -r index client_index; do
+    [[ $index =~ ^[0-9]+$ && $client_index =~ ^[0-9]+$ ]] || continue
+    original=$(jq -r --argjson i "$index" --argjson j "$client_index" '.inbounds[$i].settings.clients[$j].email // ""' "$working") || { rm -f "$working"; return 1; }
+    if [[ -n $original ]] && jq -e --arg email "$original" '[.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? | select(.xrayctlLabel != null and .email==$email)] | length>0' "$working" >/dev/null; then
+      rm -f "$working"
+      warn "用户名称与已有内部统计标识冲突，拒绝改变用户路由。"
+      return 1
+    fi
+    label=$original
+    if [[ -z $label ]]; then
+      label=$(jq -r --argjson i "$index" --argjson j "$client_index" '"user-" + (.inbounds[$i].settings.clients[$j].id // ($j|tostring))' "$working") || { rm -f "$working"; return 1; }
+    fi
+    while :; do
+      identity="xrayctl-user-$(random_hex 16)" || { rm -f "$working"; return 1; }
+      jq -e --arg id "$identity" '[.. | objects | .email? // empty | select(type=="string" and ascii_downcase == ($id|ascii_downcase))] | length == 0' "$working" >/dev/null && break
+    done
+    next=$(temp_file) || { rm -f "$working"; return 1; }
+    jq --argjson i "$index" --argjson j "$client_index" --arg label "$label" --arg identity "$identity" \
+      '.inbounds[$i].settings.clients[$j] |= (.xrayctlLabel=$label | .email=$identity)' "$working" >"$next" || { rm -f "$next" "$working"; return 1; }
+    mv -f "$next" "$working" || { rm -f "$next" "$working"; return 1; }
+    mappings=$(jq -nc --argjson maps "$mappings" --arg old "$original" --arg new "$identity" '$maps + [{old:$old,new:$new}]') || { rm -f "$working"; return 1; }
+  done < <(jq -r '.inbounds | to_entries[] | select(.value.protocol=="vless") | .key as $i | (.value.settings.clients // [] | to_entries[]) | select(.value.xrayctlLabel == null) | [$i,.key] | @tsv' "$input")
+  # A regexp user rule can match the generated email even when it did not
+  # match the original label. Refuse such a migration instead of silently
+  # changing routing. Rules that matched an old name gain its new exact ID.
+  if ! jq -e '
+    [.routing.rules[]?.user[]? | select(type=="string" and startswith("regexp:")) |
+      .[7:] | select((test("\\(\\?[=!<]|\\\\[1-9]") or (try (test("") | true) catch false | not)))] | length==0
+  ' "$input" >/dev/null; then
+    rm -f "$working"
+    warn "用户路由包含无法安全迁移的正则表达式。"
+    return 1
+  fi
+  if ! jq -e --argjson mappings "$mappings" '
+    def matches($name;$terms): any($terms[]; . as $term |
+      if ($term|startswith("regexp:")) then (try ($name|test($term[7:])) catch false) else $name==$term end);
+    [.routing.rules[]? | select((.user|type)=="array") | .user as $terms |
+      $mappings[] | select(.old != "") | select(matches(.new;$terms) and (matches(.old;$terms)|not))] | length==0
+  ' "$input" >/dev/null; then
+    rm -f "$working"
+    warn "现有用户路由正则可能匹配新的统计标识，拒绝改变路由行为。"
+    return 1
+  fi
+  # Existing user-targeted rules continue to match the migrated users. Keep
+  # their old entries because a non-VLESS account may still use that email.
+  jq --argjson mappings "$mappings" '
+    if (.routing.rules|type)=="array" then
+      .routing.rules |= map(if (.user|type)=="array" then
+        .user |= (map(. as $rule | [$rule] + [$mappings[] | select(.old != "") |
+          select(if ($rule|startswith("regexp:")) then (try (.old|test($rule[7:])) catch false) else .old==$rule end) | .new]) | add // [] | unique)
+      else . end)
+    else . end
+  ' "$working" >"$output" || { rm -f "$working"; return 1; }
+  rm -f "$working"
+  # Reject ambiguous pre-existing managed identifiers and labels, rather than
+  # ever assigning one core counter to two users.
+  jq -e '
+    [.. | objects | .email? | select(type=="string") | ascii_downcase] as $all |
+    ([.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? |
+      ((.xrayctlLabel|type)=="string" and (.xrayctlLabel|length)>0 and
+       (.email|type)=="string" and (.email|test("^xrayctl-user-[0-9a-f]{32}$")) and
+       (.email | ascii_downcase | . as $id | [$all[] | select(.==$id)] | length == 1))] | all) and
+    ([.inbounds[]? | select(.protocol=="vless") | [.settings.clients[]? | (.xrayctlLabel // .email)] | length == (unique|length)] | all)
+  ' "$output" >/dev/null
+}
+
+traffic_user_prepare_config() {
+  local input=$1 output=$2 address=$3 identities api_tag
+  if [[ ! $address =~ ^127\.0\.0\.1:([0-9]+)$ ]] || ! validate_port "${BASH_REMATCH[1]}"; then
+    warn "用户统计 API 必须监听有效的本机 IPv4 地址。"; return 1
+  fi
+  # Reuse an existing direct loopback API while preserving its services and
+  # tag. Refuse other API layouts and routes to the API because they may make
+  # the newly added statistics service externally reachable.
+  if ! jq -e --arg address "$address" '
+    (.api.tag // "xrayctl-user-stats") as $apiTag |
+    (.api == null or ((.api.tag|type)=="string" and (.api.tag|length)>0 and .api.listen==$address)) and
+    ([.routing.rules[]? | select(.outboundTag == $apiTag)] | length == 0) and
+    ([.inbounds[]?, .outbounds[]? | select(.tag == $apiTag)] | length == 0) and
+    (if .xrayctlUserStats.enabled != true then
+       ([.routing.rules[]? | select((.ruleTag // "") | startswith("xrayctl-user-limit:"))] | length == 0) and
+       ([.inbounds[]?, .outbounds[]? | select(.tag == "xrayctl-user-deny")] | length == 0)
+     else true end)
+  ' "$input" >/dev/null; then
+    warn "已有 API 配置或标签冲突，无法安全配置本机用户统计。"
+    return 1
+  fi
+  api_tag=$(jq -r '.api.tag // "xrayctl-user-stats"' "$input") || return 1
+  identities=$(temp_file) || return 1
+  traffic_user_prepare_identities "$input" "$identities" || { rm -f "$identities"; warn "用户统计标识或用户名称冲突。"; return 1; }
+  jq --arg address "$address" --arg apiTag "$api_tag" '
+    .stats=(.stats // {}) |
+    .api=(.api // {}) | .api.tag=$apiTag | .api.listen=$address |
+    .api.services=((.api.services // []) + ["StatsService"] | unique) |
+    .xrayctlUserStats={enabled:true} |
+    .policy=(.policy // {}) | .policy.levels=(.policy.levels // {}) |
+    reduce ([0] + [.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? | (.level // 0)] | unique[]) as $level
+      (. ; .policy.levels[($level|tostring)]=((.policy.levels[($level|tostring)] // {}) + {statsUserUplink:true,statsUserDownlink:true}))
+  ' "$identities" >"$output" || { rm -f "$identities"; return 1; }
+  rm -f "$identities"
+}
+
+# A PID alone can be reused. Combine it with the Linux boot ID and kernel
+# process start ticks, and compare before/after every API query. This works
+# with both systemd's MainPID and the OpenRC service's pidfile.
+traffic_user_core_epoch() {
+  local pid boot start stat_line
+  case $(platform_init_system) in
+    systemd) pid=$(systemctl show "$SERVICE_NAME" -p MainPID --value 2>/dev/null) || return 1 ;;
+    openrc) pid=$(cat "/run/${SERVICE_NAME}.pid" 2>/dev/null) || return 1 ;;
+    *) return 1 ;;
+  esac
+  [[ $pid =~ ^[0-9]+$ ]] && ((pid > 0)) || return 1
+  [[ -r /proc/$pid/stat && -r /proc/sys/kernel/random/boot_id ]] || return 1
+  boot=$(cat /proc/sys/kernel/random/boot_id) || return 1
+  stat_line=$(cat "/proc/$pid/stat") || return 1
+  stat_line=${stat_line##*) }
+  start=$(awk '{print $20}' <<<"$stat_line")
+  [[ $start =~ ^[0-9]+$ && $boot =~ ^[0-9a-fA-F-]+$ ]] || return 1
+  printf '%s:%s:%s' "$boot" "$pid" "$start"
+}
+
+# StatsService is queried without reset. An absent stat is not treated as a
+# zero: it can mean a user has not yet produced traffic. Never accept a partial
+# or malformed response as a successful sample.
+traffic_user_read_samples() {
+  local address=$1 payload
+  [[ $address =~ ^127\.0\.0\.1:([0-9]+)$ ]] && validate_port "${BASH_REMATCH[1]}" || return 1
+  payload=$("$XRAY_BIN" api statsquery -s "$address" -t 3 -pattern 'user>>>' 2>/dev/null) || return 1
+  jq -ce '
+    if type!="object" or ((.stat // [])|type)!="array" then error("invalid stats response") else . end |
+    (.stat // []) as $stats |
+    if ([$stats[] | select((.name|type)!="string" or (((.value // 0)|type)!="number" and ((.value // 0)|type)!="string") or (((.value // 0)|tostring)|test("^[0-9]+$")|not))] | length)>0 or
+       ([$stats[].name] | length != (unique|length)) then error("invalid stat entry") else . end |
+    reduce $stats[] as $item ({};
+      if ($item.name | test("^user>>>[^>]+>>>traffic>>>(uplink|downlink)$")) then
+        ($item.name | capture("^user>>>(?<id>[^>]+)>>>traffic>>>(?<direction>uplink|downlink)$")) as $parsed |
+        .[$parsed.id][$parsed.direction]=(($item.value // 0)|tonumber)
+      else . end)
+  ' <<<"$payload"
+}
+
+traffic_user_rolled_limits_json() {
+  local now=$1 tag id anchor_day anchor_time start end used next_boundary
+  while IFS=$'\t' read -r tag id anchor_day anchor_time start end used; do
+    [[ -n $tag && -n $id ]] || continue
+    if ! traffic_validate_timestamp "$start" || ! traffic_validate_timestamp "$end"; then continue; fi
+    while traffic_iso_compare "$now" ge "$end"; do
+      start=$end
+      next_boundary=$(traffic_limit_next_timestamp "$start" "$anchor_day" "$anchor_time") || return 1
+      end=$next_boundary; used=0
+    done
+    jq -nc --arg tag "$tag" --arg id "$id" --arg start "$start" --arg end "$end" --argjson used "$used" \
+      '{tag:$tag,id:$id,start:$start,end:$end,used:$used}'
+  done < <(jq -r '.inbounds | to_entries[]? | .key as $tag | (.value.users // {} | to_entries[]?) |
+    select(.value.limit.enabled==true) | [$tag,.key,((.value.limit.anchorDay // .value.limit.resetDay // 0)|tostring),
+      (.value.limit.anchorTime // ""),(.value.limit.cycleStart // ""),(.value.limit.cycleEnd // ""),
+      ((.value.limit.usedBytes // 0)|floor|tostring)] | @tsv' "$TRAFFIC_FILE") | jq -s '.'
+}
+
+# Caller holds TRAFFIC_LOCK. Xray's dispatcher counts each payload once per
+# direction, not once per network leg. Preserve those raw directional totals;
+# quota usage explicitly estimates the two network legs, as inbound quotas do.
+# This is an estimate: protocol overhead and retransmissions are not present in
+# Xray's payload counters. Failed reads never change this data.
+traffic_user_update_samples() {
+  local samples=$1 epoch=$2 now period_start inventory active_tags rolled tmp
+  now=$(traffic_now)
+  period_start=$(traffic_period_start "$now") || return 1
+  inventory=$(jq -c '[.inbounds[]? | select(.protocol=="vless") | .tag as $tag | .settings.clients[]? |
+    select(.xrayctlLabel != null and (.email|type)=="string") |
+    {tag:$tag,id:.email,label:.xrayctlLabel}]' "$CONFIG_FILE") || return 1
+  active_tags=$(jq -c '[.inbounds[]? | select(.protocol=="vless") | .tag]' "$CONFIG_FILE") || return 1
+  rolled=$(traffic_user_rolled_limits_json "$now") || return 1
+  tmp=$(temp_file) || return 1
+  jq --argjson samples "$samples" --argjson inventory "$inventory" --argjson activeTags "$active_tags" --argjson rolled "$rolled" --arg epoch "$epoch" --arg now "$now" --arg periodStart "$period_start" '
+    reduce $rolled[] as $cycle (. ;
+      .inbounds[$cycle.tag].users[$cycle.id].limit |= (.cycleStart=$cycle.start | .cycleEnd=$cycle.end | .usedBytes=$cycle.used)
+    ) |
+    # A manually renamed inbound can be recognized by the stable, globally
+    # unique identity. Move its user state before calculating deltas.
+    reduce $inventory[] as $client (. ;
+      if .inbounds[$client.tag].users[$client.id] != null then . else
+        [.inbounds | to_entries[] | select(.key != $client.tag and .value.users[$client.id] != null) | .key] as $oldTags |
+        if ($oldTags|length)==1 then
+          .inbounds[$client.tag].users[$client.id]=.inbounds[$oldTags[0]].users[$client.id] |
+          del(.inbounds[$oldTags[0]].users[$client.id])
+        else . end
+      end
+    ) |
+    reduce $activeTags[] as $tag (. ;
+      if .inbounds[$tag].users != null then
+        .inbounds[$tag].users |= with_entries(.key as $id | select(any($inventory[]; .tag==$tag and .id==$id)))
+      else . end
+    ) |
+    reduce $inventory[] as $client (.;
+      .inbounds[$client.tag] |= ((. // {}) | .daily=(.daily // {})) |
+      .inbounds[$client.tag].users= (.inbounds[$client.tag].users // {}) |
+      .inbounds[$client.tag].users[$client.id] = ((.inbounds[$client.tag].users[$client.id] // {}) + {label:$client.label}) |
+      .inbounds[$client.tag].users[$client.id] |= (. as $user |
+        ($samples[$client.id] // {}) as $sample |
+        (($user.last.epoch // "") == $epoch) as $same |
+        (if $same then ($user.last.uplink // 0) else 0 end) as $oldUp |
+        (if $same then ($user.last.downlink // 0) else 0 end) as $oldDown |
+        (if $sample.uplink == null then 0 elif $sample.uplink >= $oldUp then $sample.uplink-$oldUp else $sample.uplink end) as $up |
+        (if $sample.downlink == null then 0 elif $sample.downlink >= $oldDown then $sample.downlink-$oldDown else $sample.downlink end) as $down |
+        .uplinkBytes=((.uplinkBytes // 0)+$up) | .downlinkBytes=((.downlinkBytes // 0)+$down) |
+        .cycles=((.cycles // {}) | with_entries(select(.key==$periodStart))) |
+        .cycles[$periodStart]=((.cycles[$periodStart] // 0)+2*$up+2*$down) |
+        if .limit.enabled==true then .limit.usedBytes=((.limit.usedBytes // 0)+2*$up+2*$down) else . end |
+        .accountingMultiplier=2 |
+        .last={epoch:$epoch,uplink:($sample.uplink // $oldUp),downlink:($sample.downlink // $oldDown)}
+      )
+    ) | .userLastCollectedAt=$now | .userCoreEpoch=$epoch
+  ' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
+  traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+}
+
+traffic_user_collect_locked() {
+  local address before after samples previous
+  address=$(jq -r 'if .xrayctlUserStats.enabled==true then (.api.listen // "") else "" end' "$CONFIG_FILE") || return 1
+  [[ -n $address ]] || return 0
+  if ! jq -e --slurpfile traffic "$TRAFFIC_FILE" '
+    $traffic[0] as $state |
+    [.. | objects | .email? | select(type=="string") | ascii_downcase] as $all |
+    [.inbounds[]? | select(.protocol=="vless") | .tag as $tag | .settings.clients[]? | . as $client |
+      ((.xrayctlLabel|type)=="string" and (.xrayctlLabel|length)>0 and (.email|type)=="string" and (.email|test("^xrayctl-user-[0-9a-f]{32}$")) and
+        (.email | ascii_downcase | . as $id | [$all[] | select(.==$id)] | length==1) and
+        ($state.inbounds[$tag].users[($client.email // "" | tostring)] != null or
+          ([($state.inbounds[$tag].users // {}) | to_entries[] | select(.value.label==$client.xrayctlLabel)] | length==0)))] | all
+  ' "$CONFIG_FILE" >/dev/null; then
+    warn "用户配置包含未登记或重复的统计标识，本次用户采集已跳过。"
+    return 1
+  fi
+  before=$(traffic_user_core_epoch) || { warn "无法确定 Xray 进程身份，用户流量采集已跳过。"; return 1; }
+  samples=$(traffic_user_read_samples "$address") || { warn "Xray 用户统计 API 不可用，本次保留已有用户流量及限制。"; return 1; }
+  after=$(traffic_user_core_epoch) || { warn "无法确认 Xray 进程身份，用户流量采集已跳过。"; return 1; }
+  [[ $before == "$after" ]] || { warn "采集期间 Xray 已重启，本次用户流量采集已跳过。"; return 1; }
+  previous=$(jq -r '.userCoreEpoch // ""' "$TRAFFIC_FILE") || return 1
+  if [[ -n $previous && $previous != "$before" ]]; then
+    warn "Xray 已重启；重启前最后一次采集之后的用户流量无法追回。"
+  fi
+  traffic_user_update_samples "$samples" "$before"
+}
+
+traffic_user_collect_serialized() {
+  local rc=0
+  [[ -f $TRAFFIC_FILE && -f $CONFIG_FILE ]] || return 0
+  traffic_lock_acquire || return 1
+  traffic_user_collect_locked || rc=1
+  traffic_lock_release
+  return "$rc"
+}
+
+traffic_user_forget_inbound() {
+  local tag=$1 tmp rc=0
+  [[ -f $TRAFFIC_FILE ]] || return 0
+  traffic_lock_acquire || return 1
+  tmp=$(temp_file)
+  jq --arg tag "$tag" 'del(.inbounds[$tag].users)' "$TRAFFIC_FILE" >"$tmp" || rc=1
+  if ((rc==0)); then traffic_write_file "$tmp" || rc=1; fi
+  rm -f "$tmp"; traffic_lock_release
+  return "$rc"
+}
+
+traffic_user_forget_client() {
+  local tag=$1 id=$2 tmp rc=0
+  [[ -f $TRAFFIC_FILE && -n $id ]] || return 0
+  traffic_lock_acquire || return 1
+  tmp=$(temp_file)
+  jq --arg tag "$tag" --arg id "$id" 'del(.inbounds[$tag].users[$id])' "$TRAFFIC_FILE" >"$tmp" || rc=1
+  if ((rc==0)); then traffic_write_file "$tmp" || rc=1; fi
+  rm -f "$tmp"; traffic_lock_release
+  return "$rc"
+}
+
+# If an administrator edits a managed client's email directly, recover its
+# stable accounting identity from the existing per-inbound record when the
+# label identifies exactly one record. Never guess when the match is unclear.
+traffic_user_recover_identities() {
+  local input=$1 output=$2
+  jq --slurpfile state "$TRAFFIC_FILE" '
+    $state[0] as $s |
+    .inbounds |= map(if .protocol=="vless" then
+      .tag as $tag | .settings.clients |= map(. as $client |
+        if .xrayctlLabel == null or $s.inbounds[$tag].users[($client.email // "")] != null then .
+        else
+          [($s.inbounds[$tag].users // {}) | to_entries[] | select(.value.label==$client.xrayctlLabel) | .key] as $matches |
+          if ($matches|length)==1 then .email=$matches[0] else . end
+        end)
+    else . end)
+  ' "$input" >"$output"
+}
+
+# Must be called with the management lock held. The traffic lock protects the
+# quota snapshot until the configuration transaction has committed or rolled
+# back. User rules are before all existing routes; inbound firewall rules remain
+# independent and are never changed here.
+traffic_user_reconcile_locked() {
+  local candidate prepared recovered address rc=0 TRAFFIC_USER_RECONCILE_COMMIT=1
+  traffic_user_managed_config || return 0
+  [[ -f $TRAFFIC_FILE ]] || return 0
+  traffic_lock_acquire || return 1
+  # Capture the latest counters before deriving the rules. A failed API read
+  # leaves the existing quota state untouched, so it cannot clear a ban.
+  traffic_user_collect_locked || true
+  candidate=$(temp_file) || { traffic_lock_release; return 1; }
+  prepared=$(temp_file) || { rm -f "$candidate"; traffic_lock_release; return 1; }
+  recovered=$(temp_file) || { rm -f "$candidate" "$prepared"; traffic_lock_release; return 1; }
+  if ! jq -e '[.inbounds[]? | select(.tag=="xrayctl-user-deny")] | length==0' "$CONFIG_FILE" >/dev/null ||
+     ! jq -e '[.outbounds[]? | select(.tag=="xrayctl-user-deny" and .protocol!="blackhole")] | length==0' "$CONFIG_FILE" >/dev/null; then
+    warn "用户额度的保留出站标签已被占用。"
+    rm -f "$candidate" "$prepared" "$recovered"; traffic_lock_release; return 1
+  fi
+  address=$(jq -r '.api.listen // ""' "$CONFIG_FILE")
+  if ! traffic_user_recover_identities "$CONFIG_FILE" "$recovered" || ! traffic_user_prepare_config "$recovered" "$prepared" "$address"; then
+    rm -f "$candidate" "$prepared" "$recovered"; traffic_lock_release; return 1
+  fi
+  jq --slurpfile state "$TRAFFIC_FILE" '
+    $state[0] as $s |
+    [ .inbounds[]? | select(.protocol=="vless") | .tag as $tag | .settings.clients[]? |
+      select(.xrayctlLabel != null and (.email|type)=="string") | .email as $id |
+      $s.inbounds[$tag].users[$id].limit as $limit |
+      select($s.limitsEnabled==true and $limit.enabled==true and ($limit.quotaBytes // 0)>0 and ($limit.usedBytes // 0)>=($limit.quotaBytes // 0)) |
+      {type:"field",ruleTag:("xrayctl-user-limit:"+$id),inboundTag:[$tag],user:[$id],outboundTag:"xrayctl-user-deny"}
+    ] as $rules |
+    .routing=(.routing // {rules:[]}) |
+    .routing.rules=($rules + [(.routing.rules // [])[] | select((.ruleTag // "" | startswith("xrayctl-user-limit:"))|not)]) |
+    if ($rules|length)>0 and ([.outbounds[]? | select(.tag=="xrayctl-user-deny")] | length)==0 then
+      .outbounds += [{protocol:"blackhole",tag:"xrayctl-user-deny"}]
+    else . end
+  ' "$prepared" >"$candidate" || rc=1
+  if ((rc==0)) && ! jq -s -e '.[0]==.[1]' "$CONFIG_FILE" "$candidate" >/dev/null; then
+    state_commit "$candidate" || rc=1
+  fi
+  rm -f "$candidate" "$prepared" "$recovered"; traffic_lock_release
+  return "$rc"
+}
+
+traffic_user_reconcile() {
+  traffic_user_managed_config || return 0
+  if [[ ${XRAYCTL_MANAGEMENT_LOCK_HELD:-0} == 1 ]]; then
+    traffic_user_reconcile_locked
+  else
+    (
+      mkdir -p "$(dirname "$LOCK_FILE")"
+      if command_exists flock; then
+        exec 8>"$LOCK_FILE"
+        flock -n 8 || exit 1
+      else
+        local lock_dir="${LOCK_FILE}.d"
+        mkdir "$lock_dir" 2>/dev/null || exit 1
+        trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+      fi
+      traffic_user_reconcile_locked
+    )
+  fi
+}
+
+traffic_user_require_manager() {
+  if [[ ${XRAYCTL_MANAGEMENT_LOCK_HELD:-0} != 1 ]]; then
+    ensure_runtime_dependencies user-traffic
+  else
+    traffic_require_root user-traffic
+  fi
+}
+
+traffic_user_choose_address() {
+  local port hex attempt
+  for ((attempt=0; attempt<100; attempt++)); do
+    port=$((40000 + RANDOM % 20000))
+    if jq -e --argjson port "$port" '[.inbounds[]? | select(.port==$port)] | length>0' "$CONFIG_FILE" >/dev/null 2>&1; then continue; fi
+    printf -v hex '%04X' "$port"
+    if ! awk -v port=":$hex" 'NR>1 && $4=="0A" && substr($2,length($2)-length(port)+1)==port {found=1} END {exit !found}' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+      printf '127.0.0.1:%s' "$port"
+      return 0
+    fi
+  done
+  return 1
+}
+
+traffic_user_enable() {
+  traffic_user_require_manager
+  ensure_config
+  require_xray_installed
+  traffic_is_enabled || { warn "请先开启流量统计。"; return 1; }
+  local address candidate needs_timer_update=0
+  if [[ $(platform_init_system) == systemd ]] &&
+     { [[ ! -f $TRAFFIC_SYSTEMD_SERVICE ]] || ! grep -Fq "$(dirname "$CONFIG_FILE")" "$TRAFFIC_SYSTEMD_SERVICE"; }; then
+    needs_timer_update=1
+  fi
+  if jq -e '.api != null and (.api.listen|type)=="string"' "$CONFIG_FILE" >/dev/null; then
+    address=$(jq -r '.api.listen // ""' "$CONFIG_FILE")
+  else
+    address=$(traffic_user_choose_address) || { warn "无法选择本机统计 API 端口。"; return 1; }
+  fi
+  candidate=$(temp_file) || return 1
+  if ! traffic_user_prepare_config "$CONFIG_FILE" "$candidate" "$address"; then rm -f "$candidate"; return 1; fi
+  if ! jq -s -e '.[0]==.[1]' "$CONFIG_FILE" "$candidate" >/dev/null; then
+    if ! state_apply_candidate_file "$candidate" apply_candidate; then return 1; fi
+  else
+    rm -f "$candidate"
+  fi
+  if ((needs_timer_update)) && ! traffic_timer_install; then
+    warn "用户统计已配置，但采集服务升级失败，无法自动应用用户额度；请修复后重试。"
+    return 1
+  fi
+  traffic_user_collect_serialized || { warn "用户统计已配置，但当前无法读取 Xray API。"; return 1; }
+}
+
+traffic_user_select() {
+  local __tag=$1 __label=$2 picked_tag=${3-} picked_label=${4-}
+  [[ -n $picked_tag ]] || select_inbound picked_tag '^vless$' || return 1
+  jq -e --arg tag "$picked_tag" '[.inbounds[]? | select(.tag==$tag and .protocol=="vless")] | length==1' "$CONFIG_FILE" >/dev/null || { warn "请选择 VLESS 入站。"; return 1; }
+  [[ -n $picked_label ]] || select_client picked_label "$picked_tag" || return 1
+  client_label_exists "$picked_tag" "$picked_label" || { warn "找不到用户：${picked_label}"; return 1; }
+  printf -v "$__tag" '%s' "$picked_tag"
+  printf -v "$__label" '%s' "$picked_label"
+}
+
+traffic_user_id() {
+  jq -r --arg tag "$1" --arg label "$2" '.inbounds[] | select(.tag==$tag and .protocol=="vless") | .settings.clients[]? | select((.xrayctlLabel // .email)==$label) | .email' "$CONFIG_FILE"
+}
+
+traffic_user_limit_set() {
+  local tag=${1-} label=${2-} quota_gb=${3-} reset_day=${4-} reset_time=${5-}
+  local id quota now existing old_day old_time anchor_time cycle_end tmp rc=0 interactive=0
+  traffic_user_require_manager
+  traffic_limits_are_enabled || { warn "请先启用流量限制。"; return 1; }
+  traffic_user_enable || return 1
+  traffic_user_select tag label "$tag" "$label" || return 0
+  id=$(traffic_user_id "$tag" "$label")
+  [[ -n $id ]] || return 1
+  if [[ -z $quota_gb || -z $reset_day && -t 0 ]]; then interactive=1; fi
+  while [[ -z $quota_gb ]]; do
+    read -r -p "每月流量额度（GB）: " quota_gb || { cancel_input; return 0; }
+    traffic_limit_quota_bytes "$quota_gb" >/dev/null || { warn "请输入大于 0 的数字。"; quota_gb=""; }
+  done
+  quota=$(traffic_limit_quota_bytes "$quota_gb") || { warn "流量额度无效。"; return 1; }
+  traffic_user_collect_serialized || return 1
+  now=$(traffic_now)
+  existing=$(jq -r --arg tag "$tag" --arg id "$id" '.inbounds[$tag].users[$id].limit.enabled==true' "$TRAFFIC_FILE")
+  old_day=$((10#${now:8:2})); old_time="${now:11:5}:00"
+  if [[ $existing == true ]]; then
+    old_day=$(jq -r --arg tag "$tag" --arg id "$id" '.inbounds[$tag].users[$id].limit.anchorDay' "$TRAFFIC_FILE")
+    old_time=$(jq -r --arg tag "$tag" --arg id "$id" '.inbounds[$tag].users[$id].limit.anchorTime' "$TRAFFIC_FILE")
+  fi
+  if [[ -z $reset_day && $interactive == 1 ]]; then prompt_value reset_day '每月重置日期（1-31）' "$old_day" || return 0; fi
+  reset_day=${reset_day:-$old_day}
+  if [[ ! $reset_day =~ ^[0-9]+$ ]] || ((10#$reset_day < 1 || 10#$reset_day > 31)); then warn "重置日期无效。"; return 1; fi
+  reset_day=$((10#$reset_day))
+  if [[ -z $reset_time && $interactive == 1 ]]; then prompt_value reset_time '每月重置时间（HH:MM，服务器本地时间）' "${old_time:0:5}" || return 0; fi
+  reset_time=${reset_time:-${old_time:0:5}}
+  if [[ ! $reset_time =~ ^[0-9]{2}:[0-9]{2}$ ]] || ! traffic_validate_timestamp "2026-01-01 ${reset_time}:00"; then warn "重置时间无效。"; return 1; fi
+  anchor_time=${reset_time}:00
+  if [[ $existing == true && $reset_day == "$old_day" && $anchor_time == "$old_time" ]]; then
+    cycle_end=$(jq -r --arg tag "$tag" --arg id "$id" '.inbounds[$tag].users[$id].limit.cycleEnd' "$TRAFFIC_FILE")
+  else
+    cycle_end=$(traffic_limit_first_cycle_end "$now" "$reset_day" "$anchor_time") || return 1
+  fi
+  traffic_lock_acquire || return 1
+  tmp=$(temp_file)
+  jq --arg tag "$tag" --arg id "$id" --arg label "$label" --argjson quota "$quota" --argjson day "$reset_day" --arg time "$anchor_time" --arg now "$now" --arg end "$cycle_end" '
+    .inbounds[$tag].users[$id]=((.inbounds[$tag].users[$id] // {}) + {label:$label}) |
+    .inbounds[$tag].users[$id].limit |= ((. // {enabled:true,cycleStart:$now,usedBytes:0}) + {enabled:true,quotaBytes:$quota,resetDay:$day,anchorDay:$day,anchorTime:$time,cycleEnd:$end})
+  ' "$TRAFFIC_FILE" >"$tmp" || rc=1
+  if ((rc==0)); then traffic_write_file "$tmp" || rc=1; fi
+  rm -f "$tmp"; traffic_lock_release
+  ((rc==0)) || return 1
+  traffic_user_reconcile || { warn "用户额度已保存，但封禁规则暂未同步。"; return 1; }
+  info "已设置 ${tag} / ${label} 的用户额度，已用流量保留。"
+}
+
+traffic_user_limit_remove() {
+  local tag=${1-} label=${2-} assume_yes=${3:-0} id tmp rc=0
+  traffic_user_require_manager; ensure_config
+  traffic_user_managed_config || { warn "用户流量统计尚未配置。"; return 1; }
+  traffic_user_select tag label "$tag" "$label" || return 0
+  id=$(traffic_user_id "$tag" "$label")
+  jq -e --arg tag "$tag" --arg id "$id" '.inbounds[$tag].users[$id].limit.enabled==true' "$TRAFFIC_FILE" >/dev/null || { warn "该用户没有流量额度。"; return 1; }
+  [[ $assume_yes == 1 ]] || confirm "取消 ${tag} / ${label} 的用户额度？" N || return 0
+  traffic_user_collect_serialized || true
+  traffic_lock_acquire || return 1
+  tmp=$(temp_file)
+  jq --arg tag "$tag" --arg id "$id" 'del(.inbounds[$tag].users[$id].limit)' "$TRAFFIC_FILE" >"$tmp" || rc=1
+  if ((rc==0)); then traffic_write_file "$tmp" || rc=1; fi
+  rm -f "$tmp"; traffic_lock_release
+  ((rc==0)) || return 1
+  traffic_user_reconcile || { warn "额度已取消，但封禁规则暂未同步。"; return 1; }
+  info "已取消 ${tag} / ${label} 的用户额度。"
+}
+
+traffic_user_reset() {
+  local tag=${1-} label=${2-} assume_yes=${3:-0} id now end day time tmp rc=0
+  traffic_user_require_manager; ensure_config
+  traffic_user_managed_config || { warn "用户流量统计尚未配置。"; return 1; }
+  traffic_user_select tag label "$tag" "$label" || return 0
+  id=$(traffic_user_id "$tag" "$label")
+  [[ $assume_yes == 1 ]] || confirm "清零 ${tag} / ${label} 的用户流量和当前额度周期？" N || return 0
+  # Refuse to reset without a fresh baseline: otherwise later sampling would
+  # re-add traffic that was already included in the reset.
+  traffic_user_collect_serialized || return 1
+  now=$(traffic_now); end=""
+  if jq -e --arg tag "$tag" --arg id "$id" '.inbounds[$tag].users[$id].limit.enabled==true' "$TRAFFIC_FILE" >/dev/null; then
+    day=$(jq -r --arg tag "$tag" --arg id "$id" '.inbounds[$tag].users[$id].limit.anchorDay' "$TRAFFIC_FILE")
+    time=$(jq -r --arg tag "$tag" --arg id "$id" '.inbounds[$tag].users[$id].limit.anchorTime' "$TRAFFIC_FILE")
+    end=$(traffic_limit_first_cycle_end "$now" "$day" "$time") || return 1
+  fi
+  traffic_lock_acquire || return 1
+  tmp=$(temp_file)
+  jq --arg tag "$tag" --arg id "$id" --arg now "$now" --arg end "$end" '
+    .inbounds[$tag].users[$id].uplinkBytes=0 | .inbounds[$tag].users[$id].downlinkBytes=0 | .inbounds[$tag].users[$id].cycles={} |
+    if .inbounds[$tag].users[$id].limit.enabled==true then
+      .inbounds[$tag].users[$id].limit.usedBytes=0 | .inbounds[$tag].users[$id].limit.cycleStart=$now | .inbounds[$tag].users[$id].limit.cycleEnd=$end
+    else . end
+  ' "$TRAFFIC_FILE" >"$tmp" || rc=1
+  if ((rc==0)); then traffic_write_file "$tmp" || rc=1; fi
+  rm -f "$tmp"; traffic_lock_release
+  ((rc==0)) || return 1
+  traffic_user_reconcile || { warn "流量已清零，但封禁规则暂未同步。"; return 1; }
+  info "已清零 ${tag} / ${label} 的用户流量。"
+}
+
+traffic_users_show() {
+  local tag label id used quota remaining start end enabled status percentage period_start period_end current_bytes current_tag=""
+  [[ -r $CONFIG_FILE && -r $TRAFFIC_FILE ]] || { warn "用户流量统计尚未配置。"; return 1; }
+  traffic_user_managed_config || { warn "请先运行 xrayctl traffic user enable 配置用户流量统计。"; return 1; }
+  IFS=$'\t' read -r period_start period_end < <(traffic_period_bounds "$(traffic_now)")
+  heading '用户流量额度'
+  while IFS=$'\t' read -r tag id label current_bytes used quota start end enabled; do
+    [[ -n $tag && -n $id ]] || continue
+    if [[ $tag != "$current_tag" ]]; then printf '\n入站: %s\n' "$tag"; current_tag=$tag; fi
+    if [[ $enabled == true && $quota =~ ^[0-9]+$ && $quota -gt 0 ]]; then
+      remaining=$((quota > used ? quota-used : 0))
+      if ((used >= quota)); then status='超额'; else status='正常'; fi
+      traffic_limits_are_enabled || status='限制已关闭'
+      percentage=$(traffic_format_percent "$used" "$quota")
+      printf '  %s | 已用 %s / %s | 剩余 %s | %s | %s\n    周期: %s 至 %s\n' "$label" "$(traffic_format_bytes "$used")" "$(traffic_format_bytes "$quota")" "$(traffic_format_bytes "$remaining")" "$percentage" "$status" "$start" "$end"
+    else
+      printf '  %s | 已用 %s | 额度: 未限制\n    周期: %s 至 %s\n' "$label" "$(traffic_format_bytes "$current_bytes")" "$period_start" "$period_end"
+    fi
+  done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --arg periodStart "$period_start" '
+    $state[0] as $s | .inbounds[]? | select(.protocol=="vless") | .tag as $tag |
+    .settings.clients[]? | .email as $id | ($s.inbounds[$tag].users[$id] // {}) as $u |
+    [$tag,$id,(.xrayctlLabel // .email // ""),($u.cycles[$periodStart] // 0),
+      ($u.limit.usedBytes // 0),($u.limit.quotaBytes // 0),($u.limit.cycleStart // "-"),($u.limit.cycleEnd // "-"),($u.limit.enabled // false)] | @tsv
+  ' "$CONFIG_FILE")
+  [[ -n $current_tag ]] || info "没有 VLESS 用户。"
+}
+
 traffic_require_root() {
   [[ ${XRAYCTL_TESTING:-0} == 1 ]] || require_root "$@"
 }
@@ -154,19 +726,46 @@ traffic_default_json() {
   printf '%s\n' '{"schema":1,"accountingMultiplier":2,"enabled":false,"limitsEnabled":false,"backend":"","lastCollectedAt":"","period":{"day":1,"time":"00:00:00"},"periodsSeeded":false,"inbounds":{}}'
 }
 
+# Install a complete JSON file by rename in the same directory so readers
+# outside the lock never observe a truncated or partially written document.
+traffic_write_file() {
+  local source=$1 staging
+  mkdir -p "$(dirname "$TRAFFIC_FILE")" || return 1
+  staging=$(mktemp "${TRAFFIC_FILE}.tmp.XXXXXX") || return 1
+  if ! install -m 600 "$source" "$staging" || ! mv -f "$staging" "$TRAFFIC_FILE"; then
+    rm -f "$staging"
+    return 1
+  fi
+}
+
 traffic_init_file() {
+  local own_lock=0 rc=0
+  if [[ ${TRAFFIC_LOCK_HELD:-0} != 1 ]]; then
+    traffic_lock_acquire || return 1
+    own_lock=1
+  fi
+  traffic_init_file_locked || rc=1
+  ((own_lock == 0)) || traffic_lock_release
+  return "$rc"
+}
+
+traffic_init_file_locked() {
   local dir tmp
   dir=$(dirname "$TRAFFIC_FILE")
   mkdir -p "$dir"
   chmod 700 "$dir" 2>/dev/null || true
   if [[ ! -s $TRAFFIC_FILE ]] || ! jq -e 'type=="object" and ((.inbounds // {})|type)=="object"' "$TRAFFIC_FILE" >/dev/null 2>&1; then
     [[ ! -f $TRAFFIC_FILE ]] || cp -a "$TRAFFIC_FILE" "${TRAFFIC_FILE}.broken-$(timestamp)"
-    tmp=$(temp_file); traffic_default_json >"$tmp"; install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+    tmp=$(temp_file) || return 1
+    traffic_default_json >"$tmp" || { rm -f "$tmp"; return 1; }
+    traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
   elif ! jq -e '.schema==1 and (.enabled|type)=="boolean" and (.limitsEnabled|type)=="boolean" and (.backend|type)=="string" and (.lastCollectedAt|type)=="string" and (.period.day|type)=="number" and (.period.time|type)=="string" and (.periodsSeeded|type)=="boolean"' "$TRAFFIC_FILE" >/dev/null 2>&1; then
     tmp=$(temp_file)
     jq '.schema=1 | .enabled=(.enabled==true) | .limitsEnabled=(.limitsEnabled==true) | .backend=(.backend // "") | .lastCollectedAt=(.lastCollectedAt // "") | .period=(.period // {day:1,time:"00:00:00"}) | .periodsSeeded=(.periodsSeeded==true) | .inbounds=(if (.inbounds|type)=="object" then .inbounds else {} end)' \
       "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
-    install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+    traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
   fi
 }
 
@@ -180,7 +779,7 @@ traffic_set_enabled() {
   traffic_lock_acquire || return 1
   tmp=$(temp_file)
   jq --argjson enabled "$enabled" '.enabled=$enabled' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
+  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   return "$rc"
 }
@@ -195,7 +794,7 @@ traffic_set_limits_enabled() {
   traffic_lock_acquire || return 1
   tmp=$(temp_file)
   jq --argjson enabled "$enabled" '.limitsEnabled=$enabled' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
+  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   return "$rc"
 }
@@ -206,10 +805,14 @@ traffic_recorded_backend() {
 }
 
 traffic_set_backend() {
-  local backend=$1 tmp
+  local backend=$1 tmp own_lock=0 rc=0
   traffic_init_file
-  tmp=$(temp_file); jq --arg backend "$backend" '.backend=$backend' "$TRAFFIC_FILE" >"$tmp"
-  install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+  if [[ ${TRAFFIC_LOCK_HELD:-0} != 1 ]]; then traffic_lock_acquire || return 1; own_lock=1; fi
+  tmp=$(temp_file); jq --arg backend "$backend" '.backend=$backend' "$TRAFFIC_FILE" >"$tmp" || rc=1
+  if ((rc==0)); then traffic_write_file "$tmp" || rc=1; fi
+  rm -f "$tmp"
+  ((own_lock == 0)) || traffic_lock_release
+  return "$rc"
 }
 
 traffic_inventory_json() {
@@ -270,7 +873,8 @@ traffic_seed_periods() {
       ))
     else . end | .periodsSeeded=true
   ' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
-  install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+  traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
 }
 
 traffic_update_file() {
@@ -331,7 +935,8 @@ traffic_update_file() {
     .inbounds |= with_entries(select((.value.deleted != true) or ((.value.daily|length) > 0) or ((.value.cycles|length) > 0) or (.value.limit.enabled==true))) |
     if $markCollected then .lastCollectedAt=$now else . end
   ' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
-  install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+  traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
 }
 
 traffic_sync_inventory() {
@@ -344,6 +949,7 @@ traffic_sync_inventory() {
 
 traffic_lock_acquire() {
   local attempt=0 owner=""
+  [[ ${TRAFFIC_LOCK_HELD:-0} != 1 ]] || return 1
   mkdir -p "$(dirname "$TRAFFIC_LOCK")"
   while ! mkdir "$TRAFFIC_LOCK" 2>/dev/null; do
     owner=$(cat "$TRAFFIC_LOCK/pid" 2>/dev/null || true)
@@ -356,14 +962,18 @@ traffic_lock_acquire() {
     ((attempt < 100)) || return 1
     sleep 0.05
   done
-  printf '%s\n' "$$" >"$TRAFFIC_LOCK/pid"
+  printf '%s\n' "${BASHPID:-$$}" >"$TRAFFIC_LOCK/pid"
+  TRAFFIC_LOCK_HELD=1
 }
 
 traffic_lock_release() {
   local owner
   owner=$(cat "$TRAFFIC_LOCK/pid" 2>/dev/null || true)
-  [[ $owner != "$$" ]] || rm -f "$TRAFFIC_LOCK/pid" 2>/dev/null || true
-  rmdir "$TRAFFIC_LOCK" 2>/dev/null || true
+  if [[ $owner == "${BASHPID:-$$}" ]]; then
+    rm -f "$TRAFFIC_LOCK/pid" 2>/dev/null || true
+    rmdir "$TRAFFIC_LOCK" 2>/dev/null || true
+  fi
+  TRAFFIC_LOCK_HELD=0
 }
 
 traffic_backend() {
@@ -610,23 +1220,38 @@ traffic_collect() {
   # counters still represent the same packets and the next retry would add
   # them again.  Restore the pre-collection file so the retry is idempotent.
   if ((rc != 0)); then
-    install -m 600 "$snapshot" "$TRAFFIC_FILE" || true
+    traffic_write_file "$snapshot" || true
+  elif ! traffic_user_collect_locked; then
+    # User API failures must never prevent the independent inbound accounting
+    # and firewall quota rules from being committed.
+    warn "用户流量本次未采集；入站流量采集仍已完成。"
   fi
   rm -f "$snapshot"
   traffic_lock_release
+  if ((rc == 0)); then
+    traffic_user_reconcile || warn "用户额度规则暂未同步，将在下次采集时重试。"
+  fi
   ((rc == 0)) || { warn "流量采集未完成，现有累计记录已尽量保留。"; return 1; }
 }
 
 traffic_rename_records() {
-  local old=$1 new=$2 tmp rc=0
+  local rc=0
   [[ -f $TRAFFIC_FILE ]] || return 0
   traffic_lock_acquire || return 1
+  traffic_rename_records_locked "$1" "$2" || rc=1
+  traffic_lock_release
+  return "$rc"
+}
+
+traffic_rename_records_locked() {
+  local old=$1 new=$2 tmp rc=0
+  [[ -f $TRAFFIC_FILE ]] || return 0
   tmp=$(temp_file)
   jq --arg old "$old" --arg new "$new" '
     if .inbounds[$old] then
       (.inbounds[$new] // {daily:{}}) as $target |
       (.inbounds[$old]) as $source |
-      .inbounds[$new]=($source + {daily:($target.daily // {}),cycles:($target.cycles // {}),deleted:false}) |
+      .inbounds[$new]=($source + {daily:($target.daily // {}),cycles:($target.cycles // {}),users:(($target.users // {}) + ($source.users // {})),deleted:false}) |
       reduce (($source.daily // {})|to_entries[]) as $day (.;
         .inbounds[$new].daily[$day.key]=((.inbounds[$new].daily[$day.key] // 0) + $day.value)
       ) |
@@ -636,8 +1261,8 @@ traffic_rename_records() {
       del(.inbounds[$old])
     else . end
   ' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
-  rm -f "$tmp"; traffic_lock_release
+  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
+  rm -f "$tmp"
   return "$rc"
 }
 
@@ -647,7 +1272,7 @@ traffic_remove_limit_data() {
   traffic_lock_acquire || return 1
   tmp=$(temp_file)
   jq --arg tag "$tag" 'del(.inbounds[$tag].limit)' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
+  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   return "$rc"
 }
@@ -655,12 +1280,17 @@ traffic_remove_limit_data() {
 traffic_after_config_change() {
   local old=${1-} new=${2-}
   [[ -f $TRAFFIC_FILE ]] || return 0
-  if traffic_is_enabled; then traffic_collect || return 1; else traffic_sync_inventory || return 1; fi
+  # Move the stable user identities before sampling the renamed config. If we
+  # sampled first, the new tag would get a second baseline for the same user.
   if [[ -n $old && -n $new ]]; then
     traffic_rename_records "$old" "$new" || return 1
+  fi
+  if traffic_is_enabled; then traffic_collect || return 1; else traffic_sync_inventory || return 1; fi
+  if [[ -n $old && -n $new ]]; then
     traffic_is_enabled && traffic_rules_restore_serialized
   elif [[ -n $old ]]; then
-    traffic_remove_limit_data "$old"
+    traffic_remove_limit_data "$old" || return 1
+    traffic_user_forget_inbound "$old"
   fi
 }
 
@@ -774,6 +1404,12 @@ traffic_limits_enable() {
     warn "流量限制启用失败，已恢复为关闭状态。"
     return 1
   fi
+  if ! traffic_user_reconcile; then
+    traffic_set_limits_enabled false || true
+    traffic_rules_restore_serialized || true
+    warn "用户额度规则启用失败，流量限制已恢复为关闭状态。"
+    return 1
+  fi
   info "流量限制已启用；未设置额度的入站不会受到限制。"
 }
 
@@ -791,6 +1427,12 @@ traffic_limits_disable() {
     fi
   else
     traffic_rules_clear || return 1
+  fi
+  if ! traffic_user_reconcile; then
+    traffic_set_limits_enabled true || true
+    traffic_is_enabled && traffic_rules_restore_serialized || true
+    warn "用户额度规则关闭失败，流量限制已恢复为开启状态。"
+    return 1
   fi
   info "流量限制已关闭，额度配置和周期累计值已保留。"
 }
@@ -863,7 +1505,7 @@ traffic_limit_set() {
           cycleStart:$now,cycleEnd:$cycleEnd,usedBytes:0}
       end
     ' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
+  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   ((rc == 0)) || return 1
   traffic_rules_restore_serialized || { warn "额度已保存，但防火墙规则暂未同步，采集任务会自动重试。"; return 1; }
@@ -922,7 +1564,7 @@ traffic_period_set() {
   traffic_update_file '{}' false || { traffic_lock_release; return 1; }
   tmp=$(temp_file)
   jq --argjson day "$day" --arg clock "$clock" '.period={day:$day,time:$clock} | .periodsSeeded=false' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
+  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
   rm -f "$tmp"
   if ((rc == 0)); then traffic_update_file '{}' false || rc=1; fi
   traffic_lock_release
@@ -1045,7 +1687,7 @@ traffic_clear_tag_records() {
       if .inbounds[$tag].limit.enabled==true then .inbounds[$tag].limit.usedBytes=0 else . end
     end
   ' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
+  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   ((rc == 0)) || return 1
   if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
@@ -1055,7 +1697,7 @@ traffic_clear_tag_records() {
 traffic_clear_all_records() {
   local answer tmp rc=0
   traffic_collect || true; traffic_init_file
-  printf '输入 RESET 确认清空全部流量记录和所有当前周期已用流量：'
+  printf '输入 RESET 确认清空全部入站流量记录和入站额度已用量（不清空用户流量）：'
   read -r answer || { cancel_input; return 0; }
   [[ $answer == RESET ]] || { info "已取消。"; return 0; }
   traffic_lock_acquire || return 1
@@ -1066,11 +1708,11 @@ traffic_clear_all_records() {
       if .value.limit.enabled==true then .value.limit.usedBytes=0 else . end
     )
   ' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then install -m 600 "$tmp" "$TRAFFIC_FILE" || rc=1; fi
+  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   ((rc == 0)) || return 1
   if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
-  info "已清空全部流量记录。"
+  info "已清空全部入站流量记录。"
 }
 
 traffic_timer_install() {
@@ -1090,7 +1732,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=$(dirname "$TRAFFIC_FILE") $(dirname "$TRAFFIC_LOCK")
+ReadWritePaths=$(dirname "$TRAFFIC_FILE") $(dirname "$TRAFFIC_LOCK") $(dirname "$CONFIG_FILE") $(dirname "$META_FILE")
 EOF_SERVICE
       cat >"$TRAFFIC_SYSTEMD_TIMER" <<EOF_TIMER
 [Unit]

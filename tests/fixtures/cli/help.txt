@@ -12,6 +12,11 @@ xrayctl - Xray Linux 管理脚本
   xrayctl traffic limit show|enable|disable
   xrayctl traffic limit set <标签> <GB> <重置日> [HH:MM]
   xrayctl traffic limit remove <标签>
+  xrayctl traffic user enable
+  xrayctl traffic user show
+  xrayctl traffic user set <入站> <用户> <GB> <重置日> [HH:MM]
+  xrayctl traffic user remove <入站> <用户> [--yes]
+  xrayctl traffic user reset <入站> <用户> [--yes]
   xrayctl inbound list            列出入站
   xrayctl inbound add             交互新增入站
   xrayctl inbound show <标签>     查看入站 JSON

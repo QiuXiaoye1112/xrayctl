@@ -576,7 +576,10 @@ issue_domain_http() {
       certbot_issue_cmd "$domain" "${certbot_args[@]}"
       ;;
     xray)
-      service_is_active && { was_active=1; platform_service_stop; CERT_STOPPED_SERVICE=1; }
+      if service_is_active; then
+        if traffic_user_managed_config; then traffic_user_collect_serialized || warn "停止服务前未能采集用户流量。"; fi
+        was_active=1; platform_service_stop; CERT_STOPPED_SERVICE=1
+      fi
       if ! certbot_issue_cmd "$domain" "${certbot_args[@]}"; then
         ((was_active)) && { platform_service_start || true; CERT_STOPPED_SERVICE=0; }
         return 1
@@ -623,7 +626,10 @@ issue_ip_certificate() {
   case $owner in
     free) certbot_issue_cmd "$identifier" "${certbot_args[@]}";;
     xray)
-      service_is_active && { was_active=1; platform_service_stop; CERT_STOPPED_SERVICE=1; }
+      if service_is_active; then
+        if traffic_user_managed_config; then traffic_user_collect_serialized || warn "停止服务前未能采集用户流量。"; fi
+        was_active=1; platform_service_stop; CERT_STOPPED_SERVICE=1
+      fi
       if ! certbot_issue_cmd "$identifier" "${certbot_args[@]}"; then
         ((was_active)) && { platform_service_start || true; CERT_STOPPED_SERVICE=0; }
         return 1

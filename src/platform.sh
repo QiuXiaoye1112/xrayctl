@@ -42,8 +42,8 @@ platform_service_exists() {
 
 platform_openrc_service() {
   # OpenRC supervisors must not inherit the management flock. Closing the
-  # descriptor for this command leaves the caller's lock held until it exits.
-  rc-service "$@" 9>&-
+  # descriptors for this command leave the caller's locks held until it exits.
+  rc-service "$@" 9>&- 8>&-
 }
 
 platform_service_is_active() {
@@ -76,7 +76,7 @@ platform_service_stop() {
 
 platform_service_restart() {
   case $(platform_init_system) in
-    systemd) systemctl daemon-reload; systemctl restart "$SERVICE_NAME" ;;
+    systemd) if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} != 1 ]]; then systemctl daemon-reload; fi; systemctl restart "$SERVICE_NAME" ;;
     openrc)
       if platform_service_is_active; then
         platform_openrc_service "$SERVICE_NAME" restart
@@ -122,7 +122,7 @@ platform_service_hook_command() {
   local action=$1
   case $(platform_init_system) in
     systemd) printf 'systemctl %s %s\n' "$action" "$SERVICE_NAME" ;;
-    openrc) printf 'rc-service %s %s 9>&-\n' "$SERVICE_NAME" "$action" ;;
+    openrc) printf 'rc-service %s %s 9>&- 8>&-\n' "$SERVICE_NAME" "$action" ;;
   esac
 }
 
@@ -345,6 +345,7 @@ acquire_lock() {
     mkdir "$lock_dir" 2>/dev/null || die "另一个 xrayctl 操作正在运行。"
     trap 'rmdir "'"$lock_dir"'" 2>/dev/null || true' EXIT HUP INT TERM
   fi
+  XRAYCTL_MANAGEMENT_LOCK_HELD=1
 }
 
 ensure_runtime_dependencies() {

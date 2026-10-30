@@ -307,7 +307,7 @@ list_clients() {
   case $protocol in
     vless)
       print_table_cell "序号" 5; print_table_cell "用户" 16; print_table_cell "凭据" 40; printf '\n'
-      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.xrayctlLabel // .value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
         | while IFS=$'\t' read -r number label credential; do
         print_table_cell "$number" 5; print_table_cell "$label" 16; print_table_cell "$credential" 40; printf '\n'
       done
@@ -330,7 +330,7 @@ select_client() {
     )
   else
     while IFS= read -r current_label; do [[ -z $current_label ]] || labels+=("$current_label"); done < <(
-      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])[].email' "$CONFIG_FILE"
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])[] | (.xrayctlLabel // .email)' "$CONFIG_FILE"
     )
   fi
   ((${#labels[@]} > 0)) || { warn "该入站没有可选用户。"; return 1; }
@@ -344,7 +344,7 @@ client_label_exists() {
   if [[ $protocol == socks || $protocol == http ]]; then
     jq -e --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]?|select(.user==$client_label)' "$CONFIG_FILE" >/dev/null
   else
-    jq -e --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select(.email==$client_label)' "$CONFIG_FILE" >/dev/null
+    jq -e --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select((.xrayctlLabel // .email)==$client_label)' "$CONFIG_FILE" >/dev/null
   fi
 }
 
@@ -400,7 +400,7 @@ add_client() {
 
 delete_client() {
   ensure_runtime_dependencies client-delete; ensure_config
-  local tag=${1-} label=${2-} assume_yes=${3:-0} protocol tmp count
+  local tag=${1-} label=${2-} assume_yes=${3:-0} protocol tmp count managed_id=""
   [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
@@ -417,11 +417,18 @@ delete_client() {
       ) |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else
-    count=$(jq --arg tag "$tag" --arg client_label "$label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)]|length' "$CONFIG_FILE")
+    managed_id=$(jq -r --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select(.xrayctlLabel==$client_label)|.email // empty' "$CONFIG_FILE")
+    count=$(jq --arg tag "$tag" --arg client_label "$label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || die "找不到用户：$label"
-    jq --arg tag "$tag" --arg client_label "$label" '(.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(select(.email!=$client_label))' "$CONFIG_FILE" >"$tmp"
+    jq --arg tag "$tag" --arg client_label "$label" --arg id "$managed_id" '
+      (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(select((.xrayctlLabel // .email)!=$client_label)) |
+      if $id!="" and (.routing.rules|type)=="array" then .routing.rules |= map(select((.ruleTag // "") != ("xrayctl-user-limit:"+$id))) else . end
+    ' "$CONFIG_FILE" >"$tmp"
   fi
-  state_apply_candidate_file "$tmp" apply_candidate
+  state_apply_candidate_file "$tmp" apply_candidate || return
+  if [[ -n $managed_id ]]; then
+    traffic_user_forget_client "$tag" "$managed_id" || warn "用户已删除，但流量记录暂未清理。"
+  fi
 }
 
 rotate_client_credential() {
@@ -437,7 +444,7 @@ rotate_client_credential() {
     vless)
       generated=$(generate_uuid)
       prompt_validated_value value "新 UUID" "$generated" validate_uuid "UUID 格式无效，请重新输入。" || { rm -f "$tmp"; return 1; }
-      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
+      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
     socks|http)
       prompt_secret value "新密码" "$(random_password)" || { rm -f "$tmp"; return 1; }
       jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '
@@ -478,9 +485,9 @@ rename_client() {
       ) |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else
-    count=$(jq --arg tag "$tag" --arg client_label "$old_label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$client_label)]|length' "$CONFIG_FILE")
+    count=$(jq --arg tag "$tag" --arg client_label "$old_label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
-    jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select(.email==$old)|.email)=$new' "$CONFIG_FILE" >"$tmp"
+    jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '(.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(if (.xrayctlLabel // .email)==$old then if .xrayctlLabel != null then .xrayctlLabel=$new else .email=$new end else . end)' "$CONFIG_FILE" >"$tmp"
   fi
   state_apply_candidate_file "$tmp" apply_candidate || return
   info "用户已重命名：${old_label} -> ${new_label}"

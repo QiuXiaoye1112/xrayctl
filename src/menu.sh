@@ -492,7 +492,7 @@ traffic_menu() {
   while true; do
     clear_screen
     traffic_show || true
-    printf '\n1) 刷新\n2) 流量限制\n3) 清空指定入站记录\n4) 清空全部流量记录\n'
+    printf '\n1) 刷新\n2) 流量限制\n3) 清空指定入站记录\n4) 清空全部入站流量记录\n'
     if traffic_is_enabled; then printf '5) 停止流量统计\n'; else printf '5) 开启流量统计\n'; fi
     printf '6) 设置月度统计起点\n'
     printf '0) 返回\n'
@@ -520,7 +520,7 @@ traffic_limit_menu() {
     clear_screen
     traffic_limits_show || true
     if traffic_limits_are_enabled; then
-      printf '操作\n1) 刷新状态\n2) 设置/修改入站额度\n3) 取消入站额度\n4) 关闭流量限制\n0) 返回\n'
+      printf '操作\n1) 刷新状态\n2) 设置/修改入站额度\n3) 取消入站额度\n4) 关闭流量限制\n5) 用户流量额度\n0) 返回\n'
     else
       printf '操作\n1) 启用流量限制\n0) 返回\n'
     fi
@@ -531,6 +531,7 @@ traffic_limit_menu() {
         2) run_menu_action traffic_limit_set; pause;;
         3) run_menu_action traffic_limit_remove; pause;;
         4) run_menu_action traffic_limits_disable; pause;;
+        5) traffic_user_menu;;
         0) return 0;;
         *) warn "无效选项。"; pause;;
       esac
@@ -541,6 +542,25 @@ traffic_limit_menu() {
         *) warn "无效选项。"; pause;;
       esac
     fi
+  done
+}
+
+traffic_user_menu() {
+  local choice
+  if ! run_menu_action traffic_user_enable; then pause; return; fi
+  while true; do
+    clear_screen
+    traffic_users_show || true
+    printf '\n1) 查看/刷新用户流量\n2) 设置/修改用户额度\n3) 取消用户额度\n4) 重置指定用户流量\n0) 返回\n'
+    read -r -p '请选择: ' choice || { cancel_input; return 0; }
+    case $choice in
+      1) run_menu_action traffic_collect || true;;
+      2) run_menu_action traffic_user_limit_set; pause;;
+      3) run_menu_action traffic_user_limit_remove; pause;;
+      4) run_menu_action traffic_user_reset; pause;;
+      0) return;;
+      *) warn '无效选项。'; pause;;
+    esac
   done
 }
 
@@ -578,6 +598,11 @@ xrayctl - Xray Linux 管理脚本
   xrayctl traffic limit show|enable|disable
   xrayctl traffic limit set <标签> <GB> <重置日> [HH:MM]
   xrayctl traffic limit remove <标签>
+  xrayctl traffic user enable
+  xrayctl traffic user show
+  xrayctl traffic user set <入站> <用户> <GB> <重置日> [HH:MM]
+  xrayctl traffic user remove <入站> <用户> [--yes]
+  xrayctl traffic user reset <入站> <用户> [--yes]
   xrayctl inbound list            列出入站
   xrayctl inbound add             交互新增入站
   xrayctl inbound show <标签>     查看入站 JSON
@@ -657,6 +682,16 @@ dispatch() {
             set) traffic_limit_set "${3-}" "${4-}" "${5-}" "${6-}";;
             remove|delete) traffic_limit_remove "${3-}";;
             *) die "未知 traffic limit 子命令：${2}";;
+          esac
+          ;;
+        user)
+          case ${2:-show} in
+            show) traffic_collect || true; traffic_users_show;;
+            enable) traffic_user_enable;;
+            set) traffic_user_limit_set "${3-}" "${4-}" "${5-}" "${6-}" "${7-}";;
+            remove|delete) traffic_user_limit_remove "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
+            reset) traffic_user_reset "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
+            *) die "未知 traffic user 子命令：${2}";;
           esac
           ;;
         [0-9][0-9][0-9][0-9]-*) traffic_collect || true; traffic_show "$1" "${2:-$(traffic_today)}";;

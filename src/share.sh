@@ -57,7 +57,7 @@ print_links() {
         [[ -z $filter || $label == "$filter" ]] || continue
         link="vless://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")"
         print_share_entry "$label" "链接" "$link"
-      done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.email // ""), "\u0000", (.id // ""), "\u0000"' "$CONFIG_FILE")
+      done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", (.id // ""), "\u0000"' "$CONFIG_FILE")
       ;;
     socks)
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then

@@ -60,10 +60,12 @@ pass "platform service API routes systemd and OpenRC operations"
 # lock. Include collector setup and certificate hook commands in that boundary.
 rc-service() {
   if { : >&9; } 2>/dev/null; then fail "OpenRC inherited the management lock descriptor"; fi
+  if { : >&8; } 2>/dev/null; then fail "OpenRC inherited the collector lock descriptor"; fi
   PLATFORM_CALL="rc-service ${1-} ${2-}"
   [[ ${2-} != status || ${MOCK_OPENRC_ACTIVE:-1} == 1 ]]
 }
 exec 9>"${TEST_ROOT}/manager.lock"
+exec 8>"${TEST_ROOT}/collector.lock"
 platform_service_start
 platform_service_stop
 platform_service_restart
@@ -86,7 +88,9 @@ QUICK_COMMAND=$original_quick_command
 TRAFFIC_OPENRC_SERVICE=$original_traffic_openrc_service
 eval "$original_meta_resource_register"
 { : >&9; } 2>/dev/null || fail "OpenRC service call closed the caller's lock descriptor"
+{ : >&8; } 2>/dev/null || fail "OpenRC service call closed the caller's collector lock descriptor"
 exec 9>&-
+exec 8>&-
 platform_service_start
 pass "OpenRC services and certificate hooks do not inherit the management lock"
 
