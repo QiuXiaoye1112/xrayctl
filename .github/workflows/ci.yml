@@ -80,6 +80,8 @@ jobs:
           docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -ec '
             apk add --no-cache bash curl jq openssl coreutils openrc python3 ripgrep unzip >/dev/null
             export TERM=xterm XRAYCTL_TESTING=1
+            mkdir -p /run/openrc
+            touch /run/openrc/softlevel
             version=v26.6.27
             asset=Xray-linux-64.zip
             archive="/tmp/$asset"
