@@ -254,8 +254,8 @@ fi
 selector_pick=blocked
 select_outbound selected 1 0 "" 1 || { printf 'not ok - user-domain selector did not offer blocked\n' >&2; exit 1; }
 assert_eq blocked "$selected" 'user-domain selector selected blocked'
-selector_has direct && selector_has blocked && selector_has proxy-us && selector_has proxy-jp || {
+if ! selector_has direct || ! selector_has blocked || ! selector_has proxy-us || ! selector_has proxy-jp; then
   printf 'not ok - user-domain selector changed the existing outbound choices\n' >&2; exit 1;
-}
+fi
 
 printf 'ok - per-inbound user outbound scope, priority, inheritance, blocked rules, identity lifecycle, rollback, and safe refusal pass\n'

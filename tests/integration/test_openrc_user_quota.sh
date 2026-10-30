@@ -13,6 +13,17 @@ cleanup_test() {
   rm -f "$unit" "/run/$name.pid"
   rm -rf "$TEST_ROOT"
 }
+openrc_diagnostics() {
+  printf 'OpenRC diagnostics for %s:\n' "$name" >&2
+  printf 'softlevel: ' >&2; cat /run/openrc/softlevel >&2 2>/dev/null || true
+  rc-status --servicelist >&2 2>&1 || true
+  rc-service "$name" status >&2 2>&1 || true
+  ls -la /run/openrc >&2 2>&1 || true
+  for log in "$TEST_ROOT/server.log" "$TEST_ROOT/error.log"; do
+    if [[ -f $log ]]; then printf '%s:\n' "$log" >&2; cat "$log" >&2; fi
+  done
+  if [[ -f /run/$name.pid ]]; then printf 'pidfile: ' >&2; cat "/run/$name.pid" >&2; fi
+}
 trap cleanup_test EXIT
 mkdir -p "$TEST_ROOT"/{config,state,lock}
 export XRAYCTL_TMP_DIR="$TEST_ROOT/state" XRAYCTL_CONFIG_DIR="$TEST_ROOT/config"
@@ -39,15 +50,16 @@ output_log="$TEST_ROOT/server.log"
 error_log="$TEST_ROOT/error.log"
 UNIT
 chmod 755 "$unit"
-rc-service "$name" start
+if ! rc-service "$name" start; then openrc_diagnostics; exit 1; fi
+[[ -f /run/$name.pid ]] || { openrc_diagnostics; exit 1; }
 pid_before=$(cat "/run/$name.pid")
 for _ in {1..50}; do
   if "$bin" api statsquery -s "127.0.0.1:$api" -t 1 -pattern 'user>>>' >/dev/null 2>&1; then break; fi
   sleep .1
 done
-traffic_user_collect_serialized
-traffic_user_reconcile
+if ! traffic_user_collect_serialized || ! traffic_user_reconcile; then openrc_diagnostics; exit 1; fi
+[[ -f /run/$name.pid ]] || { openrc_diagnostics; exit 1; }
 pid_after=$(cat "/run/$name.pid")
-[[ $pid_before != "$pid_after" ]]
+[[ $pid_before != "$pid_after" ]] || { openrc_diagnostics; exit 1; }
 jq -e --arg id "$id" '.routing.rules[0].user==[$id] and .routing.rules[0].outboundTag=="xrayctl-user-deny"' "$CONFIG_FILE" >/dev/null
 printf 'ok - OpenRC persists quota rule and restarts isolated real Xray service\n'

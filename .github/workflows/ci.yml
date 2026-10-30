@@ -82,6 +82,7 @@ jobs:
             export TERM=xterm XRAYCTL_TESTING=1
             mkdir -p /run/openrc
             touch /run/openrc/softlevel
+            openrc default
             version=v26.6.27
             asset=Xray-linux-64.zip
             archive="/tmp/$asset"
