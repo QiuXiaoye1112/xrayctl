@@ -25,6 +25,14 @@ xrayctl - Xray Linux 管理脚本
   xrayctl outbound list
   xrayctl outbound add
   xrayctl outbound assign <入站> <出站标签|direct>
+  xrayctl outbound inbound list
+  xrayctl outbound user list <入站>
+  xrayctl outbound user set <入站> <用户> <出站>
+  xrayctl outbound user unset <入站> <用户>
+  xrayctl outbound user rule list <入站> <用户>
+  xrayctl outbound user rule add <入站> <用户> <suffix|exact> <域名[,域名...]> <出站>
+  xrayctl outbound user rule delete <入站> <用户> <suffix|exact> <域名[,域名...]>
+  xrayctl outbound user restore <入站> <用户>
   xrayctl outbound delete <出站标签>
   xrayctl outbound rule list [入站]
   xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>

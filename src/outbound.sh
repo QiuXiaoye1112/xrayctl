@@ -296,7 +296,8 @@ def insert_rule($rules; $new):
       end
     ) | $i] | .[0] // null) as $priority |
   ([range(0; ($rules|length)) as $i |
-    select(($rules[$i].ruleTag // "") == ("xrayctl-outbound:"+$new.inbound)) | $i] | .[0] // null) as $default |
+    select((($rules[$i].ruleTag // "") == ("xrayctl-outbound:"+$new.inbound)) or
+      (((($rules[$i].ruleTag // "")|startswith("xrayctl-user-outbound:"))) and (($rules[$i].inboundTag // [])==[$new.inbound]))) | $i] | .[0] // null) as $default |
   ([range(0; ($rules|length)) as $i |
     select($rules[$i] | managed_for(.; $new.inbound)) | $i] | .[-1] // null) as $last |
   (if $priority != null then $priority
@@ -474,6 +475,24 @@ list_outbound_overview() {
   printf '\n'
 }
 
+list_inbound_outbound_status() {
+  ensure_config
+  heading "入站出站状态"
+  printf '入站\t默认出站\t公共域名规则\t用户数\n'
+  jq -r '
+    (.routing.rules // []) as $rules |
+    .inbounds[]? | select(.protocol=="vless" or .protocol=="socks" or .protocol=="http") |
+    .tag as $tag | .protocol as $protocol |
+    [$tag,
+     ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // "Xray 原生默认"),
+     ([$rules[]? | select(((.ruleTag // "")|startswith("xrayctl-domain:")) and (.inboundTag // [])==[$tag])] | length | tostring),
+     (if $protocol=="vless" then (.settings.clients // [] | length)
+      elif $protocol=="socks" and .settings.auth=="password" then ((.settings.accounts // .settings.users // []) | length)
+      elif $protocol=="http" then ((.settings.accounts // .settings.users // []) | length)
+      else 0 end | tostring)] | @tsv
+  ' "$CONFIG_FILE"
+}
+
 show_outbound_details() {
   ensure_config
   local tag=${1-} answer item
@@ -616,6 +635,319 @@ assign_outbound() {
     )' "$CONFIG_FILE" >"$tmp"
   state_apply_candidate_file "$tmp" apply_candidate || return
   info "入站 ${inbound} 已使用出站 ${outbound}。"
+}
+
+remove_inbound_default_outbound() {
+  ensure_runtime_dependencies outbound-inbound-unset; ensure_config
+  local inbound=${1-} rule_tag tmp
+  [[ -n $inbound ]] || select_inbound inbound '^(vless|socks|http)$' || return 1
+  inbound_exists "$inbound" || die "找不到入站：$inbound"
+  rule_tag="xrayctl-outbound:${inbound}"
+  tmp=$(temp_file) || return 1
+  jq --arg ruleTag "$rule_tag" '.routing.rules |= map(select((.ruleTag // "")!=$ruleTag))' "$CONFIG_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
+  state_apply_candidate_file "$tmp" apply_candidate || return 1
+  info "已取消入站 ${inbound} 的默认出站；未设置用户默认出站的用户将使用 Xray 原生默认出站。"
+}
+
+# User routing is stored in the same Xray routing.rules array as the inbound
+# rules. Keep these functions next to the existing domain rule implementation
+# so template reconciliation and outbound deletion can recognize the tags.
+_outbound_user_identity() {
+  local __var=$1 inbound=$2 label=$3 protocol resolved_identity identity_count
+  protocol=$(jq -r --arg inbound "$inbound" '.inbounds[]? | select(.tag==$inbound) | .protocol' "$CONFIG_FILE") || return 1
+  case $protocol in
+    vless)
+      resolved_identity=$(jq -r --arg inbound "$inbound" --arg label "$label" \
+        '.inbounds[]? | select(.tag==$inbound) | .settings.clients[]? | select((.xrayctlLabel // .email)==$label) | .email // empty' "$CONFIG_FILE") || return 1
+      [[ -n $resolved_identity ]] || { warn "该 VLESS 用户没有 Xray email 身份，无法安全添加用户路由。"; return 1; }
+      ;;
+    socks)
+      jq -e --arg inbound "$inbound" '.inbounds[]? | select(.tag==$inbound and .protocol=="socks" and .settings.auth=="password")' "$CONFIG_FILE" >/dev/null || { warn "无认证 SOCKS5 入站不支持用户路由。"; return 1; }
+      resolved_identity=$(jq -r --arg inbound "$inbound" --arg label "$label" '.inbounds[]? | select(.tag==$inbound) | (.settings.accounts // .settings.users // [])[]? | select(.user==$label) | .user' "$CONFIG_FILE") || return 1
+      ;;
+    http)
+      resolved_identity=$(jq -r --arg inbound "$inbound" --arg label "$label" '.inbounds[]? | select(.tag==$inbound) | (.settings.accounts // .settings.users // [])[]? | select(.user==$label) | .user' "$CONFIG_FILE") || return 1
+      ;;
+    *) warn "${protocol:-该协议} 入站不支持用户级出站规则。"; return 1;;
+  esac
+  [[ -n $resolved_identity ]] || { warn "找不到入站 ${inbound} 的用户 ${label}。"; return 1; }
+  identity_count=$(jq -r --arg inbound "$inbound" --arg identity "$resolved_identity" '
+    [.inbounds[]? | select(.tag==$inbound) |
+      if .protocol=="vless" then [.settings.clients[]? | select(.email==$identity)]
+      else [(.settings.accounts // .settings.users // [])[]? | select(.user==$identity)] end] | flatten | length
+  ' "$CONFIG_FILE") || return 1
+  [[ $identity_count == 1 ]] || { warn "该入站中的用户身份不唯一，拒绝创建可能同时匹配多个用户的规则。"; return 1; }
+  printf -v "$__var" '%s' "$resolved_identity"
+}
+
+_outbound_user_rules_safe() {
+  local inbound=$1
+  # Xray routing is first-match. Refuse to guess what an unowned rule means,
+  # and refuse managed rules whose current order would make user rules bypass
+  # quota/security rules or put the inbound fallback before public domains.
+  jq -e --arg inbound "$inbound" '
+    def tag: (.ruleTag // "");
+    def scoped:
+      ((.inboundTag|type)!="array" or ((.inboundTag|index($inbound))!=null));
+    def known_managed:
+      (((tag|startswith("xrayctl-user-limit:")) or (tag|startswith("xrayctl-user-outbound:")) or
+        (tag|startswith("xrayctl-user-domain:")) or (tag|startswith("xrayctl-domain:")) or
+        (tag==("xrayctl-outbound:"+$inbound))) and .inboundTag==[$inbound]) or
+      (tag|startswith("xrayctl-security:")) or
+      (.outboundTag=="blocked" and ((.ip // [])==["geoip:private"] or (.protocol // [])==["bittorrent"]));
+    def public_rule:
+      (tag|startswith("xrayctl-domain:")) and .inboundTag==[$inbound];
+    def inbound_fallback:
+      tag==("xrayctl-outbound:"+$inbound) and .inboundTag==[$inbound];
+    def protected_rule:
+      (((tag|startswith("xrayctl-user-limit:")) and .inboundTag==[$inbound]) or
+       (tag|startswith("xrayctl-security:")) or
+       (.outboundTag=="blocked" and ((.ip // [])==["geoip:private"] or (.protocol // [])==["bittorrent"])));
+    (.routing.rules // []) as $rules |
+    ([ $rules[] | select((known_managed|not) and scoped)]) as $unknown |
+    ([range(0;($rules|length)) as $i | select($rules[$i]|public_rule) | $i]) as $public |
+    ([range(0;($rules|length)) as $i | select($rules[$i]|inbound_fallback) | $i]) as $fallback |
+    ([range(0;($rules|length)) as $i | select($rules[$i]|protected_rule) | $i]) as $protected |
+    ([($public[0] // ($rules|length)),($fallback[0] // ($rules|length))] | min) as $boundary |
+    (($unknown|length)==0) and
+    (($public|length)==0 or ($fallback|length)==0 or all($public[]; . < $fallback[0])) and
+    all($protected[]; . < $boundary)
+  ' "$CONFIG_FILE" >/dev/null || {
+    warn "该入站存在无法安全调整的自定义路由或托管规则顺序；为保留现有语义，拒绝修改用户路由。"
+    return 1
+  }
+}
+
+_outbound_user_rebuild_rules() {
+  local input=$1 output=$2 inbound=$3
+  jq --arg inbound "$inbound" '
+    def xrayctl_domain_rule:
+      type=="object" and ((.ruleTag // "")|type)=="string" and ((.ruleTag // "")|startswith("xrayctl-domain:"));
+    def xrayctl_user_outbound_rule:
+      ((.ruleTag // "")|type)=="string" and ((.ruleTag // "")|startswith("xrayctl-user-outbound:"));
+    def xrayctl_user_domain_rule:
+      ((.ruleTag // "")|type)=="string" and ((.ruleTag // "")|startswith("xrayctl-user-domain:"));
+    def is_personal:
+      xrayctl_user_domain_rule and ((.inboundTag // [])==[$inbound]);
+    def is_managed_default:
+      xrayctl_user_outbound_rule and ((.inboundTag // [])==[$inbound]);
+    def is_public:
+      xrayctl_domain_rule and ((.inboundTag // [])==[$inbound]);
+    def is_inbound_default:
+      ((.ruleTag // "")==("xrayctl-outbound:"+$inbound));
+    def specificity:
+      (.domain[0] // "") as $d |
+      (if ($d|startswith("full:")) then $d[5:] elif ($d|startswith("domain:")) then $d[7:] else "" end) as $name |
+      [-(($name|split(".")|length)), (if ($d|startswith("full:")) then 0 else 1 end), $name];
+    .routing=(.routing // {domainStrategy:"IPIfNonMatch",rules:[]}) |
+    (.routing.rules // []) as $rules |
+    ([$rules[] | select(is_personal)] | sort_by(specificity)) as $personal |
+    ([$rules[] | select(is_managed_default)]) as $user_defaults |
+    [$rules[] | select((is_personal or is_managed_default)|not)] as $base |
+    # Keep the established public rules and inbound fallback in place. Put
+    # personal domains before public domains and user defaults after them.
+    ([$base[]] as $b |
+      ([range(0;($b|length)) as $i | select(($b[$i]|is_public) or ($b[$i]|is_inbound_default)) | $i] | .[0] // ($b|length)) as $public_at |
+      ([range(0;($b|length)) as $i | select($b[$i]|is_inbound_default) | $i] | .[0] // ($b|length)) as $default_at |
+      [$b[0:$public_at][]] + $personal + [$b[$public_at:$default_at][]] + $user_defaults + [$b[$default_at:][]]
+    ) as $ordered |
+    .routing.rules=$ordered
+  ' "$input" >"$output"
+}
+
+_outbound_user_commit_if_changed() {
+  local candidate=$1 message=$2 current_json candidate_json
+  current_json=$(jq -cS . "$CONFIG_FILE") || { rm -f "$candidate"; return 1; }
+  candidate_json=$(jq -cS . "$candidate") || { rm -f "$candidate"; return 1; }
+  if [[ $current_json == "$candidate_json" ]]; then
+    rm -f "$candidate"
+    info "$message"
+    return 0
+  fi
+  state_apply_candidate_file "$candidate" apply_candidate
+}
+
+outbound_user_default_set() {
+  ensure_runtime_dependencies outbound-user-set; ensure_config
+  local inbound=${1-} label=${2-} outbound=${3-} identity id existing_count current_outbound candidate tmp
+  [[ -n $inbound && -n $label ]] || die "用法：xrayctl outbound user set <入站> <用户> <出站>"
+  inbound_exists "$inbound" || die "找不到入站：$inbound"
+  inbound_require_supported_configuration "$inbound"
+  client_label_exists "$inbound" "$label" || die "找不到入站 ${inbound} 的用户 ${label}。"
+  _outbound_user_identity identity "$inbound" "$label" || return 1
+  [[ -n $outbound ]] || select_outbound outbound 1 1 || return 1
+  outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
+  id=$(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and .inboundTag==[$inbound] and .user==[$identity]) | .ruleTag[22:]] | .[0] // empty
+  ' "$CONFIG_FILE")
+  existing_count=$(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and .inboundTag==[$inbound] and .user==[$identity])] | length
+  ' "$CONFIG_FILE")
+  current_outbound=$(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+      [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and .inboundTag==[$inbound] and .user==[$identity]) | .outboundTag][0] // empty
+    ' "$CONFIG_FILE")
+  if [[ -n $id && $existing_count == 1 && $current_outbound == "$outbound" ]]; then
+    info "${inbound} / ${label} 的默认出站已是 ${outbound}。"
+    return 0
+  fi
+  _outbound_user_rules_safe "$inbound" || return 1
+  [[ -n $id ]] || id=$(random_hex 12)
+  candidate=$(temp_file) || return 1
+  jq --arg inbound "$inbound" --arg identity "$identity" --arg outbound "$outbound" \
+    --arg ruleTag "xrayctl-user-outbound:${id}" '
+    .routing=(.routing // {domainStrategy:"IPIfNonMatch",rules:[]}) |
+    .routing.rules=([.routing.rules[]? | select((((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and .inboundTag==[$inbound] and .user==[$identity])|not)] +
+      [{type:"field",inboundTag:[$inbound],user:[$identity],outboundTag:$outbound,ruleTag:$ruleTag}])
+  ' "$CONFIG_FILE" >"$candidate" || { rm -f "$candidate"; return 1; }
+  tmp=$(temp_file) || { rm -f "$candidate"; return 1; }
+  _outbound_user_rebuild_rules "$candidate" "$tmp" "$inbound" || { rm -f "$candidate" "$tmp"; return 1; }
+  rm -f "$candidate"
+  _outbound_user_commit_if_changed "$tmp" "${inbound} / ${label} 的默认出站已是 ${outbound}。" || return 1
+  info "已设置 ${inbound} / ${label} 的默认出站为 ${outbound}。"
+}
+
+outbound_user_list() {
+  ensure_config
+  local inbound=${1-} label identity default
+  [[ -n $inbound ]] || die "用法：xrayctl outbound user list <入站>"
+  inbound_exists "$inbound" || die "找不到入站：$inbound"
+  printf '入站：%s | 入站默认：%s\n' "$inbound" "$(jq -r --arg tag "$inbound" '[.routing.rules[]?|select(.ruleTag==("xrayctl-outbound:"+$tag))|.outboundTag][0] // "Xray 原生默认"' "$CONFIG_FILE")"
+  while IFS= read -r label; do
+    [[ -n $label ]] || continue
+    _outbound_user_identity identity "$inbound" "$label" || continue
+    default=$(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+      [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and .inboundTag==[$inbound] and .user==[$identity]) | .outboundTag][0] // empty
+    ' "$CONFIG_FILE")
+    printf '%s\t%s\t%s\t%s\n' "$label" "${default:-继承入站}" "$([[ -z $default ]] && printf 是 || printf 否)" \
+      "$(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+        [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and .inboundTag==[$inbound] and .user==[$identity])] | length
+      ' "$CONFIG_FILE")"
+  done < <(jq -r --arg inbound "$inbound" '
+    .inbounds[]? | select(.tag==$inbound) |
+    if .protocol=="vless" then .settings.clients[]? | (.xrayctlLabel // .email // empty)
+    elif .protocol=="socks" and .settings.auth=="password" then (.settings.accounts // .settings.users // [])[]? | .user
+    elif .protocol=="http" then (.settings.accounts // .settings.users // [])[]? | .user else empty end
+  ' "$CONFIG_FILE")
+}
+
+outbound_user_default_unset() {
+  ensure_runtime_dependencies outbound-user-unset; ensure_config
+  local inbound=${1-} label=${2-} identity tmp
+  [[ -n $inbound && -n $label ]] || die "用法：xrayctl outbound user unset <入站> <用户>"
+  inbound_exists "$inbound" || die "找不到入站：$inbound"
+  client_label_exists "$inbound" "$label" || die "找不到入站 ${inbound} 的用户 ${label}。"
+  _outbound_user_identity identity "$inbound" "$label" || return 1
+  tmp=$(temp_file) || return 1
+  jq --arg inbound "$inbound" --arg identity "$identity" '
+    .routing.rules |= map(select(((((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and .inboundTag==[$inbound] and .user==[$identity])|not)))
+  ' "$CONFIG_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
+  _outbound_user_commit_if_changed "$tmp" "${inbound} / ${label} 没有独立默认出站。" || return 1
+  info "已取消 ${inbound} / ${label} 的独立默认出站。"
+}
+
+outbound_user_domain_add() {
+  ensure_runtime_dependencies outbound-user-rule-add; ensure_config
+  local inbound=${1-} label=${2-} match=${3-} domains_input=${4-} outbound=${5-}
+  local identity normalized domain domains_json existing rule_tag rule rules_json='[]' candidate tmp
+  local -a domains=()
+  [[ -n $inbound && -n $label && -n $match && -n $domains_input && -n $outbound ]] || die "用法：xrayctl outbound user rule add <入站> <用户> <suffix|exact> <域名[,域名...]> <出站>"
+  case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
+  inbound_exists "$inbound" || die "找不到入站：$inbound"
+  inbound_require_supported_configuration "$inbound"
+  client_label_exists "$inbound" "$label" || die "找不到入站 ${inbound} 的用户 ${label}。"
+  _outbound_user_identity identity "$inbound" "$label" || return 1
+  outbound_exists "$outbound" || [[ $outbound == direct || $outbound == blocked ]] || die "找不到出站：$outbound"
+  normalized=$(_normalize_domain_list "$domains_input") || die "域名格式无效。"
+  while IFS= read -r domain; do [[ -n $domain ]] && domains+=("$domain"); done <<<"$normalized"
+  domains_json=$(printf '%s\n' "${domains[@]}" | jq -Rsc 'split("\n")|map(select(length>0))|unique') || return 1
+  existing=$(jq -r --arg inbound "$inbound" --arg identity "$identity" --arg match "$match" --argjson domains "$domains_json" '
+    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and .inboundTag==[$inbound] and .user==[$identity]) | .domain[0] as $d |
+      select(any($domains[]; $d==((if $match=="suffix" then "domain:" else "full:" end)+.))) |
+      if $match=="suffix" then $d[7:] else $d[5:] end] | unique | join(",")
+  ' "$CONFIG_FILE") || return 1
+  [[ -z $existing ]] || { warn "已跳过该用户已有规则：${existing}"; }
+  for domain in "${domains[@]}"; do
+    [[ ,$existing, != *,${domain},* ]] || continue
+    while :; do
+      rule_tag="xrayctl-user-domain:$(random_hex 12)"
+      if ! jq -e --arg ruleTag "$rule_tag" --argjson rules "$rules_json" \
+        '([.routing.rules[]?, $rules[]] | any(.[]?; .ruleTag==$ruleTag))' "$CONFIG_FILE" >/dev/null 2>&1; then break; fi
+    done
+    rule=$(jq -n --arg inbound "$inbound" --arg identity "$identity" --arg match "$match" \
+      --arg domain "$domain" --arg outbound "$outbound" --arg ruleTag "$rule_tag" '
+      {type:"field",inboundTag:[$inbound],user:[$identity],
+       domain:(if $match=="suffix" then ["domain:"+$domain] else ["full:"+$domain] end),
+       outboundTag:$outbound,ruleTag:$ruleTag}') || return 1
+    rules_json=$(jq -n -c --argjson rules "$rules_json" --argjson rule "$rule" '$rules+[$rule]') || return 1
+  done
+  [[ $rules_json != '[]' ]] || { info "没有需要添加的新域名规则。"; return 0; }
+  _outbound_user_rules_safe "$inbound" || return 1
+  candidate=$(temp_file) || return 1
+  jq --argjson rules "$rules_json" '.routing=(.routing // {rules:[]}) | .routing.rules += $rules' \
+    "$CONFIG_FILE" >"$candidate" || { rm -f "$candidate"; return 1; }
+  tmp=$(temp_file) || { rm -f "$candidate"; return 1; }
+  _outbound_user_rebuild_rules "$candidate" "$tmp" "$inbound" || { rm -f "$candidate" "$tmp"; return 1; }
+  rm -f "$candidate"
+  _outbound_user_commit_if_changed "$tmp" "${inbound} / ${label} 的域名规则没有变化。" >/dev/null || return 1
+  info "已更新 ${inbound} / ${label} 的专属域名分流。"
+}
+
+outbound_user_domain_list() {
+  local inbound=${1-} label=${2-} identity
+  ensure_config
+  [[ -n $inbound && -n $label ]] || die "用法：xrayctl outbound user rule list <入站> <用户>"
+  _outbound_user_identity identity "$inbound" "$label" || return 1
+  jq -r --arg inbound "$inbound" --arg identity "$identity" '
+    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and .inboundTag==[$inbound] and .user==[$identity]) |
+      [(.domain[0] // ""),(.outboundTag // ""),(.ruleTag // "")]][] | @tsv
+  ' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r domain outbound rule_tag; do
+        case $domain in full:*) domain=${domain#full:}; printf '精确域名 %s → %s [%s]\n' "$domain" "$outbound" "$rule_tag";;
+          domain:*) domain=${domain#domain:}; printf '域名及子域名 %s → %s [%s]\n' "$domain" "$outbound" "$rule_tag";; esac
+      done
+}
+
+outbound_user_domain_delete() {
+  ensure_runtime_dependencies outbound-user-rule-delete; ensure_config
+  local inbound=${1-} label=${2-} match=${3-} domains_input=${4-} identity normalized domain domains_json tmp
+  [[ -n $inbound && -n $label && -n $match && -n $domains_input ]] || die "用法：xrayctl outbound user rule delete <入站> <用户> <suffix|exact> <域名[,域名...]>"
+  case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
+  _outbound_user_identity identity "$inbound" "$label" || return 1
+  normalized=$(_normalize_domain_list "$domains_input") || die "域名格式无效。"
+  domains_json=$(printf '%s\n' "$normalized" | jq -Rsc 'split("\n")|map(select(length>0))|unique') || return 1
+  tmp=$(temp_file) || return 1
+  jq --arg inbound "$inbound" --arg identity "$identity" --arg match "$match" --argjson domains "$domains_json" '
+    .routing.rules |= map(. as $rule | select((
+      ((.ruleTag // "")|startswith("xrayctl-user-domain:")) and .inboundTag==[$inbound] and .user==[$identity] and
+      any($domains[]; . as $domain | $rule.domain[0]==((if $match=="suffix" then "domain:" else "full:" end)+$domain))
+    )|not))
+  ' "$CONFIG_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
+  _outbound_user_commit_if_changed "$tmp" "${inbound} / ${label} 的域名规则已更新。" || return 1
+  info "已删除 ${inbound} / ${label} 指定类型的匹配域名规则。"
+}
+
+outbound_user_restore() {
+  ensure_runtime_dependencies outbound-user-restore; ensure_config
+  local inbound=${1-} label=${2-} identity count defaults rules tmp
+  [[ -n $inbound && -n $label ]] || die "用法：xrayctl outbound user restore <入站> <用户>"
+  client_label_exists "$inbound" "$label" || die "找不到入站 ${inbound} 的用户 ${label}。"
+  _outbound_user_identity identity "$inbound" "$label" || return 1
+  defaults=$(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and .inboundTag==[$inbound] and .user==[$identity]) | .outboundTag] | unique | join(",")
+  ' "$CONFIG_FILE")
+  rules=$(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and .inboundTag==[$inbound] and .user==[$identity]) |
+      if (.domain[0]|startswith("full:")) then .domain[0][5:] else .domain[0][7:] end] | unique | join(",")
+  ' "$CONFIG_FILE")
+  printf '即将删除用户 %s 的独立默认出站：%s\n' "$label" "${defaults:-无}"
+  printf '即将删除用户 %s 的专属域名规则：%s\n' "$label" "${rules:-无}"
+  confirm "恢复继承入站规则？" N || return 0
+  tmp=$(temp_file) || return 1
+  jq --arg inbound "$inbound" --arg identity "$identity" '
+    .routing.rules |= map(select((((((.ruleTag // "")|startswith("xrayctl-user-outbound:")) or ((.ruleTag // "")|startswith("xrayctl-user-domain:"))) and .inboundTag==[$inbound] and .user==[$identity])|not)))
+  ' "$CONFIG_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
+  _outbound_user_commit_if_changed "$tmp" "${inbound} / ${label} 已继承入站规则。" || return 1
+  info "${inbound} / ${label} 已恢复继承入站路由。"
 }
 
 _normalize_domain_input() {
@@ -810,7 +1142,8 @@ add_domain_rule() {
       select(\$rules[\$i] | (if \$match==\"exact\" then managed_suffix else lower_priority_suffix end)) |
       \$i] | .[0] // null) as \$priority_index |
     ([range(0; (\$rules|length)) as \$i |
-      select((\$rules[\$i].ruleTag // \"\") == (\"xrayctl-outbound:\"+\$inbound)) |
+      select(((\$rules[\$i].ruleTag // \"\") == (\"xrayctl-outbound:\"+\$inbound)) or
+        (((\$rules[\$i].ruleTag // \"\")|startswith(\"xrayctl-user-outbound:\")) and ((\$rules[\$i].inboundTag // [])==[\$inbound]))) |
       \$i] | .[0] // null) as \$default_index |
     ([range(0; (\$rules|length)) as \$i |
       select(\$rules[\$i] | managed_for_inbound) |
@@ -1020,7 +1353,7 @@ _meta_template_remove_outbound_bindings() {
 
 delete_outbound() {
   ensure_runtime_dependencies outbound-delete; ensure_config; ensure_meta
-  local tag=${1-} tmp default_refs domain_refs custom_refs binding_refs meta_candidate=""
+  local tag=${1-} tmp default_refs domain_refs user_default_refs user_domain_refs custom_refs binding_refs meta_candidate=""
   [[ -n $tag ]] || select_outbound tag 0 0 || return
   outbound_exists "$tag" || die "找不到出站：$tag"
   [[ $tag != direct && $tag != blocked ]] || { warn "${tag} 出站不能删除。"; return 0; }
@@ -1031,21 +1364,25 @@ delete_outbound() {
   domain_refs=$(jq -r --arg tag "$tag" '
     [.routing.rules[]? |
       select(.outboundTag==$tag and (.ruleTag|type)=="string" and (.ruleTag|startswith("xrayctl-domain:")))] | length' "$CONFIG_FILE")
+  user_default_refs=$(jq -r --arg tag "$tag" '[.routing.rules[]? | select(.outboundTag==$tag and ((.ruleTag // "")|startswith("xrayctl-user-outbound:")))] | length' "$CONFIG_FILE")
+  user_domain_refs=$(jq -r --arg tag "$tag" '[.routing.rules[]? | select(.outboundTag==$tag and ((.ruleTag // "")|startswith("xrayctl-user-domain:")))] | length' "$CONFIG_FILE")
   custom_refs=$(jq -r --arg tag "$tag" '
     [.routing.rules[]? |
       select(.outboundTag==$tag) |
       select(
         ((.ruleTag|type)!="string") or
         (((.ruleTag|startswith("xrayctl-outbound:"))|not) and
-         ((.ruleTag|startswith("xrayctl-domain:"))|not))
+         ((.ruleTag|startswith("xrayctl-domain:"))|not) and
+         ((.ruleTag|startswith("xrayctl-user-outbound:"))|not) and
+         ((.ruleTag|startswith("xrayctl-user-domain:"))|not))
       )] | length' "$CONFIG_FILE")
   binding_refs=$(jq -r --arg tag "$tag" '
     [.domainTemplates.bindings[]? | select(.outbound==$tag)] | length' "$META_FILE")
   if ((custom_refs > 0)); then
     die "该出站仍被自定义路由规则引用，请先在完整配置中处理。"
   fi
-  if ((default_refs > 0 || domain_refs > 0 || binding_refs > 0)); then
-    warn "出站 ${tag} 仍被使用"
+  if ((default_refs > 0 || domain_refs > 0 || user_default_refs > 0 || user_domain_refs > 0 || binding_refs > 0)); then
+    warn "出站 ${tag} 仍被引用：入站默认 ${default_refs}，入站域名 ${domain_refs}，用户默认 ${user_default_refs}，用户域名 ${user_domain_refs}，模板绑定 ${binding_refs}。"
     confirm "继续删除出站 ${tag}？" N || return 0
   else
     confirm "删除出站 ${tag}？" N || return 0

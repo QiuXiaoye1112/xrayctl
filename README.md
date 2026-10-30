@@ -58,8 +58,11 @@ Xray Linux 管理脚本
 │  ├─ 全部分享链接（输出各入站用户的原始分享链接）
 │  └─ 删除入站（同时删除该入站内的全部用户和关联规则）
 ├─ 出站管理
-│  ├─ 查看入站当前出站规则
-│  ├─ 选择入站并设置出站
+│  ├─ 入站出站管理
+│  │  ├─ 设置入站默认出站
+│  │  ├─ 管理入站公共域名分流
+│  │  └─ 按用户设置独立默认出站和域名分流，或恢复继承
+│  ├─ 域名模板库（保留原有模板操作）
 │  ├─ 添加 SOCKS5/HTTP 出站
 │  ├─ 查看手动添加的代理出站详情
 │  └─ 删除出站
@@ -122,6 +125,15 @@ xrayctl inbound delete TAG       # 删除入站
 xrayctl outbound list            # 查看入站与出站规则
 xrayctl outbound add             # 添加 SOCKS5/HTTP 出站
 xrayctl outbound assign TAG OUT  # 为入站选择出站或 direct
+xrayctl outbound inbound list    # 查看入站默认、公共规则和用户数
+xrayctl outbound inbound unset TAG # 取消入站默认，回到 Xray 原生默认
+xrayctl outbound user list TAG   # 查看该入站的用户出站配置
+xrayctl outbound user set TAG USER OUT # 设置用户默认出站
+xrayctl outbound user unset TAG USER # 仅取消用户默认，保留域名规则
+xrayctl outbound user rule list TAG USER
+xrayctl outbound user rule add TAG USER suffix|exact DOMAIN[,DOMAIN...] OUT
+xrayctl outbound user rule delete TAG USER suffix|exact DOMAIN[,DOMAIN...]
+xrayctl outbound user restore TAG USER # 清除用户专属规则并恢复继承
 xrayctl outbound delete OUT      # 删除出站
 xrayctl client add TAG           # 添加用户
 xrayctl client rename TAG OLD NEW
@@ -179,6 +191,7 @@ xrayctl help
 - xrayctl 新建 SOCKS5/HTTP 入站会强制设置账号密码。旧配置或手工配置中的无认证 SOCKS5/HTTP 只能依赖入站级统计，不能识别并限制单个用户。
 - 新建 VLESS、SOCKS5、HTTP 入站均默认监听 `0.0.0.0`；仅供本机使用时可手动填写 `127.0.0.1`。
 - SOCKS5/HTTP 出站本身不加密，只应连接可信代理；HTTP 出站仅支持 TCP。
+- 路由先按流量额度封禁和内置安全规则处理，再匹配用户域名、入站公共域名、用户默认和入站默认；未设置默认时继承下一层。HTTP 出站不支持 UDP，相关请求不会改走 direct。
 - 用户管理页和代理出站详情会直接显示 UUID 或密码，请避免在录屏、截图和共享终端中泄露。
 - 分享链接、配置和手动备份含有 UUID 或密码，应按密钥材料保护。
 - 流量统计依赖 nftables 或 iptables，并会创建独立计数/阻断规则；云厂商安全组仍需在控制台单独管理。

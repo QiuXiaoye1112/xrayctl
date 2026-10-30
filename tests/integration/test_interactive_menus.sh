@@ -89,8 +89,9 @@ bbr_state_summary() { printf enabled; }
 show_main_summary() { :; }
 show_main_inbounds() { :; }
 
-domain_rule_menu() { record domain_rule_menu; }
-for spec in '1 assign_outbound' '2 domain_rule_menu' '3 add_outbound' '4 show_outbound_details' '5 delete_outbound'; do
+inbound_outbound_menu() { record inbound_outbound_menu; }
+template_library_menu() { record template_library_menu; }
+for spec in '1 inbound_outbound_menu' '2 template_library_menu' '3 add_outbound' '4 show_outbound_details' '5 delete_outbound'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route outbound_menu "$choice" "$action"
 done
 for spec in '1 add_client node' '2 rename_client node' '3 rotate_client_credential node' '4 delete_client node'; do
@@ -106,7 +107,14 @@ exercise_menu_route inbound_menu 2 'manage_inbound_menu node'
 # shellcheck source=../../src/menu.sh
 source "${REPO_ROOT}/src/menu.sh"
 
-jq -n '{inbounds:[{tag:"node",protocol:"vless"}],outbounds:[{tag:"direct",protocol:"freedom"}],routing:{rules:[]}}' >"$CONFIG_FILE"
+jq -n '{inbounds:[{tag:"node",protocol:"vless",settings:{clients:[{email:"alice",id:"11111111-1111-4111-8111-111111111111"}]}}],outbounds:[{tag:"direct",protocol:"freedom"}],routing:{rules:[]}}' >"$CONFIG_FILE"
+: >"$EVENT_LOG"; set_inputs 1 0; inbound_outbound_menu >/dev/null
+assert_recorded 'assign_outbound node '
+: >"$EVENT_LOG"; set_inputs 3 1 1 0; inbound_outbound_menu >/dev/null
+assert_recorded 'outbound_user_default_set node alice '
+select_outbound() { printf -v "$1" '%s' direct; }
+: >"$EVENT_LOG"; set_inputs 3 1 3 2 1 example.com 0 0; inbound_outbound_menu >/dev/null
+assert_recorded 'outbound_user_domain_add node alice suffix example.com direct'
 : >"$EVENT_LOG"; set_inputs 1 2 0 0; domain_rule_menu >/dev/null
 assert_recorded 'add_domain_rule node    --prompt'
 : >"$EVENT_LOG"; set_inputs 1 3 0 0; domain_rule_menu >/dev/null

@@ -4,14 +4,157 @@ outbound_menu() {
     clear_screen
     heading "出站管理"
     list_outbound_overview
-    printf '\n1) 设置入站默认出站\n2) 域名分流\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 查看出站详情\n5) 删除出站\n0) 返回\n'
+    printf '\n1) 入站出站管理\n2) 域名模板库\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 查看出站详情\n5) 删除出站\n0) 返回\n'
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
-      1) run_menu_action assign_outbound; pause;; 2) domain_rule_menu;;
+      1) inbound_outbound_menu;;
+      2) template_library_menu;;
       3) run_menu_action add_outbound; pause;; 4) run_menu_action show_outbound_details; pause;;
       5) run_menu_action delete_outbound; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
+  done
+}
+
+_outbound_inbound_tags() {
+  jq -r '.inbounds[] | select(.protocol|test("^(vless|socks|http)$")) | .tag' "$CONFIG_FILE"
+}
+
+_outbound_user_labels() {
+  jq -r --arg inbound "$1" '
+    .inbounds[]? | select(.tag==$inbound) |
+    if .protocol=="vless" then .settings.clients[]? | (.xrayctlLabel // .email // empty)
+    elif .protocol=="socks" and .settings.auth=="password" then (.settings.accounts // .settings.users // [])[]? | .user
+    elif .protocol=="http" then (.settings.accounts // .settings.users // [])[]? | .user
+    else empty end
+  ' "$CONFIG_FILE"
+}
+
+_outbound_inbound_default() {
+  jq -r --arg inbound "$1" '[.routing.rules[]? | select(.ruleTag==("xrayctl-outbound:"+$inbound)) | .outboundTag][0] // "Xray 原生默认"' "$CONFIG_FILE"
+}
+
+_outbound_user_default() {
+  local inbound=$1 identity=$2
+  jq -r --arg inbound "$inbound" --arg identity "$identity" '
+    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and .inboundTag==[$inbound] and .user==[$identity]) | .outboundTag][0] // empty
+  ' "$CONFIG_FILE"
+}
+
+_outbound_user_domain_count() {
+  jq -r --arg inbound "$1" --arg identity "$2" '
+    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and .inboundTag==[$inbound] and .user==[$identity])] | length
+  ' "$CONFIG_FILE"
+}
+
+user_domain_rule_menu() {
+  local inbound=$1 label=$2 choice match domains outbound
+  while true; do
+    clear_screen
+    heading "用户域名分流 · ${label}"
+    outbound_user_domain_list "$inbound" "$label" || return 1
+    printf '\n1) 查看规则\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
+    case $choice in
+      1) pause;;
+      2)
+        choose match '匹配方式' '域名及所有子域名' '仅精确域名' || continue
+        [[ $match == 1 ]] && match=suffix || match=exact
+        prompt_value domains '域名（多个请用英文逗号分隔）' || continue
+        select_outbound outbound 1 || continue
+        run_menu_action outbound_user_domain_add "$inbound" "$label" "$match" "$domains" "$outbound"; pause
+        ;;
+      3)
+        choose match '删除匹配方式' '域名及所有子域名' '仅精确域名' || continue
+        [[ $match == 1 ]] && match=suffix || match=exact
+        prompt_value domains '要删除的域名（多个请用英文逗号分隔）' || continue
+        run_menu_action outbound_user_domain_delete "$inbound" "$label" "$match" "$domains"; pause
+        ;;
+      0) return;; *) warn '无效选项。'; pause;;
+    esac
+  done
+}
+
+user_outbound_detail_menu() {
+  local inbound=$1 label=$2 choice identity default
+  while true; do
+    clear_screen
+    _outbound_user_identity identity "$inbound" "$label" || return 1
+    default=$(_outbound_user_default "$inbound" "$identity")
+    heading "用户出站管理 · ${label}"
+    printf '用户：%s\n当前默认出站：%s\n入站默认出站：%s\n继承入站出站：%s\n独立域名规则：%s 条\n\n' \
+      "$label" "${default:-继承入站}" "$(_outbound_inbound_default "$inbound")" \
+      "$([[ -z $default ]] && printf 是 || printf 否)" "$(_outbound_user_domain_count "$inbound" "$identity")"
+    printf '1) 设置默认出站\n2) 取消独立默认出站\n3) 管理域名分流\n4) 恢复继承入站规则\n0) 返回\n'
+    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
+    case $choice in
+      1) run_menu_action outbound_user_default_set "$inbound" "$label" ""; pause;;
+      2) run_menu_action outbound_user_default_unset "$inbound" "$label"; pause;;
+      3) user_domain_rule_menu "$inbound" "$label";;
+      4) run_menu_action outbound_user_restore "$inbound" "$label"; pause;;
+      0) return;; *) warn '无效选项。'; pause;;
+    esac
+  done
+}
+
+inbound_user_outbound_menu() {
+  local inbound=$1 label choice identity default
+  local -a labels=()
+  mapfile -t labels < <(_outbound_user_labels "$inbound")
+  while true; do
+    clear_screen
+    heading "用户出站管理 · ${inbound}"
+    if ((${#labels[@]}==0)); then info '该入站没有可识别的认证用户。'; pause; return 0; fi
+    for label in "${labels[@]}"; do
+      _outbound_user_identity identity "$inbound" "$label" || continue
+      default=$(_outbound_user_default "$inbound" "$identity")
+      printf '用户：%s | 默认出站：%s | 独立域名规则：%s 条\n' \
+        "$label" "${default:-继承入站}" "$(_outbound_user_domain_count "$inbound" "$identity")"
+    done
+    choose choice '选择用户' "${labels[@]}" || return 0
+    user_outbound_detail_menu "$inbound" "${labels[$((choice-1))]}"
+  done
+}
+
+inbound_outbound_detail_menu() {
+  local inbound=$1 choice
+  while inbound_exists "$inbound"; do
+    clear_screen
+    heading "入站出站管理 · ${inbound}"
+    printf '入站默认出站：%s\n公共域名分流规则：%s 条\n用户数量：%s\n\n' \
+      "$(_outbound_inbound_default "$inbound")" "$(domain_rule_inbound_count "$inbound")" \
+      "$(jq -r --arg inbound "$inbound" '[.inbounds[]|select(.tag==$inbound)|(.settings.clients // .settings.accounts // .settings.users // [])[]?]|length' "$CONFIG_FILE")"
+    printf '1) 设置入站默认出站\n2) 入站域名分流\n3) 用户出站管理\n0) 返回\n'
+    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
+    case $choice in
+      1) run_menu_action assign_outbound "$inbound" ""; pause;;
+      2) domain_rule_detail_menu "$inbound";;
+      3) inbound_user_outbound_menu "$inbound";;
+      0) return;; *) warn '无效选项。'; pause;;
+    esac
+  done
+}
+
+inbound_outbound_menu() {
+  ensure_config
+  local -a tags=()
+  local inbound choice
+  mapfile -t tags < <(_outbound_inbound_tags)
+  ((${#tags[@]})) || { info '还没有可管理的入站。'; pause; return 0; }
+  if ((${#tags[@]}==1)); then
+    inbound_outbound_detail_menu "${tags[0]}"
+    return
+  fi
+  while true; do
+    clear_screen
+    heading '选择入站'
+    for inbound in "${tags[@]}"; do
+      printf '%s | 默认出站：%s | 公共域名分流：%s 条 | 用户：%s\n' \
+        "$inbound" "$(_outbound_inbound_default "$inbound")" "$(domain_rule_inbound_count "$inbound")" \
+        "$(jq -r --arg inbound "$inbound" '[.inbounds[]|select(.tag==$inbound)|(.settings.clients // .settings.accounts // .settings.users // [])[]?]|length' "$CONFIG_FILE")"
+    done
+    choose choice '选择入站' "${tags[@]}" || return 0
+    inbound_outbound_detail_menu "${tags[$((choice-1))]}"
   done
 }
 
@@ -658,6 +801,14 @@ xrayctl - Xray Linux 管理脚本
   xrayctl outbound list
   xrayctl outbound add
   xrayctl outbound assign <入站> <出站标签|direct>
+  xrayctl outbound inbound list
+  xrayctl outbound user list <入站>
+  xrayctl outbound user set <入站> <用户> <出站>
+  xrayctl outbound user unset <入站> <用户>
+  xrayctl outbound user rule list <入站> <用户>
+  xrayctl outbound user rule add <入站> <用户> <suffix|exact> <域名[,域名...]> <出站>
+  xrayctl outbound user rule delete <入站> <用户> <suffix|exact> <域名[,域名...]>
+  xrayctl outbound user restore <入站> <用户>
   xrayctl outbound delete <出站标签>
   xrayctl outbound rule list [入站]
   xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>
@@ -753,6 +904,31 @@ dispatch() {
       case ${1:-list} in
         list) list_outbound_overview;; add) add_outbound;; assign|set) assign_outbound "${2-}" "${3-}";;
         delete|remove) delete_outbound "${2-}";;
+        inbound)
+          case ${2:-list} in
+            list) list_inbound_outbound_status;;
+            set) assign_outbound "${3-}" "${4-}";;
+            unset|remove) remove_inbound_default_outbound "${3-}";;
+            *) die "未知 outbound inbound 子命令：${2}";;
+          esac
+          ;;
+        user)
+          case ${2:-list} in
+            list) outbound_user_list "${3-}";;
+            set) outbound_user_default_set "${3-}" "${4-}" "${5-}";;
+            unset) outbound_user_default_unset "${3-}" "${4-}";;
+            restore|inherit) outbound_user_restore "${3-}" "${4-}";;
+            rule)
+              case ${3:-list} in
+                list) outbound_user_domain_list "${4-}" "${5-}";;
+                add) outbound_user_domain_add "${4-}" "${5-}" "${6-}" "${7-}" "${8-}";;
+                delete|remove) outbound_user_domain_delete "${4-}" "${5-}" "${6-}" "${7-}";;
+                *) die "未知 outbound user rule 子命令：${3}";;
+              esac
+              ;;
+            *) die "未知 outbound user 子命令：${2}";;
+          esac
+          ;;
         rule)
           case ${2:-list} in
             list) list_domain_rules "${3-}";;
