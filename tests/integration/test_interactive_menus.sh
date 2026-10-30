@@ -112,9 +112,12 @@ jq -n '{inbounds:[{tag:"node",protocol:"vless",settings:{clients:[{email:"alice"
 assert_recorded 'assign_outbound node '
 : >"$EVENT_LOG"; set_inputs 3 1 1 0; inbound_outbound_menu >/dev/null
 assert_recorded 'outbound_user_default_set node alice '
-select_outbound() { printf -v "$1" '%s' direct; }
+select_outbound() {
+  local destination=$1 include_blocked=${5:-0}
+  if ((include_blocked)); then printf -v "$destination" '%s' blocked; else printf -v "$destination" '%s' direct; fi
+}
 : >"$EVENT_LOG"; set_inputs 3 1 3 2 1 example.com 0 0; inbound_outbound_menu >/dev/null
-assert_recorded 'outbound_user_domain_add node alice suffix example.com direct'
+assert_recorded 'outbound_user_domain_add node alice suffix example.com blocked'
 : >"$EVENT_LOG"; set_inputs 1 2 0 0; domain_rule_menu >/dev/null
 assert_recorded 'add_domain_rule node    --prompt'
 : >"$EVENT_LOG"; set_inputs 1 3 0 0; domain_rule_menu >/dev/null

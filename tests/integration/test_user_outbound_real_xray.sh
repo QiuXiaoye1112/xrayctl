@@ -102,10 +102,10 @@ write_config() {
         {tag:"proxy-us",protocol:"http",settings:{address:"127.0.0.1",port:$us}},
         {tag:"proxy-jp",protocol:"http",settings:{address:"127.0.0.1",port:$jp}}
       ],
-      routing:{domainStrategy:"IPIfNonMatch",rules:
-        (if $quota then [{type:"field",ruleTag:"xrayctl-user-limit:bob",inboundTag:["socks-in"],user:["bob"],outboundTag:"blocked"}] else [] end) +
-        [
+      routing:{domainStrategy:"IPIfNonMatch",rules:(
+        (if $quota then [{type:"field",ruleTag:"xrayctl-user-limit:bob",inboundTag:["socks-in"],user:["bob"],outboundTag:"blocked"}] else [] end) + [
           {type:"field",ruleTag:"xrayctl-user-domain:alice-google",inboundTag:["socks-in"],user:["alice"],domain:["full:google.test"],outboundTag:"proxy-jp"},
+          {type:"field",ruleTag:"xrayctl-user-domain:alice-blocked",inboundTag:["socks-in"],user:["alice"],domain:["full:blocked.test"],outboundTag:"blocked"},
           {type:"field",ruleTag:"xrayctl-domain:public-google",inboundTag:["socks-in"],domain:["full:google.test"],outboundTag:"direct"},
           {type:"field",ruleTag:"xrayctl-user-outbound:alice",inboundTag:["socks-in"],user:["alice"],outboundTag:"proxy-us"},
           {type:"field",ruleTag:"xrayctl-user-outbound:bob",inboundTag:["socks-in"],user:["bob"],outboundTag:"proxy-jp"},
@@ -116,7 +116,7 @@ write_config() {
           {type:"field",ruleTag:"xrayctl-outbound:socks-in-udp",inboundTag:["socks-in"],network:["udp"],outboundTag:"udp-direct"},
           {type:"field",ruleTag:"xrayctl-outbound:http-in",inboundTag:["http-in"],outboundTag:"direct"},
           {type:"field",ruleTag:"xrayctl-outbound:vless-in",inboundTag:["vless-in"],outboundTag:"direct"}
-        ]}
+        ])}
     }
   ' >"$path"
 }
@@ -197,6 +197,11 @@ validate_config "$TEST_ROOT/vless-client.json"
 start_xray "$CONFIG"
 assert_eq proxy-jp "$(fetch_socks alice:alice-pass google)" 'personal domain rule selected its actual proxy'
 assert_eq direct "$(fetch_socks bob:bob-pass google)" 'public domain rule outranked user default'
+if fetch_socks alice:alice-pass blocked >/dev/null 2>&1; then
+  printf 'not ok - real user blocked-domain rule allowed its request\n' >&2
+  exit 1
+fi
+grep -Fq 'Hit route rule: [xrayctl-user-domain:alice-blocked] so taking detour [blocked]' "$TEST_ROOT/xray.log"
 assert_eq proxy-us "$(fetch_socks alice:alice-pass other)" 'alice default selected its actual proxy'
 assert_eq proxy-jp "$(fetch_socks bob:bob-pass other)" 'bob default selected its actual proxy'
 assert_eq direct "$(fetch_socks charlie:charlie-pass other)" 'unset user default inherited inbound default'
@@ -304,4 +309,4 @@ quota_route_log=$(tail -n "+$((quota_log_start + 1))" "$TEST_ROOT/xray.log")
   exit 1
 }
 stop_xray
-printf 'ok - real Xray matched VLESS email and authenticated SOCKS/HTTP identities, enforced quota priority, and failed closed for HTTP-routed SOCKS UDP\n'
+printf 'ok - real Xray matched VLESS and authenticated users, enforced quota and personal-domain blocks, and failed closed for HTTP-routed SOCKS UDP\n'

@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="b4f6f2ed0139"
+readonly XRAYCTL_BUILD_COMMIT="b0e1e107edb2"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -5700,9 +5700,10 @@ add_outbound() {
 }
 
 select_outbound() {
-  local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} __ipvar=${4-} candidate_tag answer local_tag
+  local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} __ipvar=${4-} include_blocked=${5:-0} candidate_tag answer local_tag
   local tags=() local_ips=() local_ip_tags=() local_raw_ips=() proxy_tags=() local_tags=()
   ((include_direct == 0)) || tags+=("direct")
+  ((include_blocked == 0)) || tags+=("blocked")
   while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || proxy_tags+=("$candidate_tag"); done < <(
     jq -r '.outbounds[]?|select((.protocol=="socks" or .protocol=="http") and .tag!="direct" and .tag!="blocked")|.tag' "$CONFIG_FILE"
   )
@@ -7586,7 +7587,7 @@ user_domain_rule_menu() {
         choose match '匹配方式' '域名及所有子域名' '仅精确域名' || continue
         [[ $match == 1 ]] && match=suffix || match=exact
         prompt_value domains '域名（多个请用英文逗号分隔）' || continue
-        select_outbound outbound 1 || continue
+        select_outbound outbound 1 1 "" 1 || continue
         run_menu_action outbound_user_domain_add "$inbound" "$label" "$match" "$domains" "$outbound"; pause
         ;;
       3)

@@ -61,7 +61,7 @@ user_domain_rule_menu() {
         choose match '匹配方式' '域名及所有子域名' '仅精确域名' || continue
         [[ $match == 1 ]] && match=suffix || match=exact
         prompt_value domains '域名（多个请用英文逗号分隔）' || continue
-        select_outbound outbound 1 || continue
+        select_outbound outbound 1 1 "" 1 || continue
         run_menu_action outbound_user_domain_add "$inbound" "$label" "$match" "$domains" "$outbound"; pause
         ;;
       3)

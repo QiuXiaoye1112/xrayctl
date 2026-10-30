@@ -109,6 +109,10 @@ dispatch outbound user rule add in-a bob exact cli.example.com direct >/dev/null
 cli_rules=$(dispatch outbound user rule list in-a bob)
 [[ $cli_rules == *'cli.example.com'* ]] || { printf 'not ok - user rule list CLI arguments were misrouted\n' >&2; exit 1; }
 dispatch outbound user rule delete in-a bob exact cli.example.com >/dev/null
+dispatch outbound user rule add in-a bob exact blocked.example.com blocked >/dev/null
+cli_rules=$(dispatch outbound user rule list in-a bob)
+[[ $cli_rules == *'blocked.example.com'* && $cli_rules == *'→ blocked'* ]] || { printf 'not ok - CLI did not accept a blocked user-domain route\n' >&2; exit 1; }
+dispatch outbound user rule delete in-a bob exact blocked.example.com >/dev/null
 dispatch outbound user set in-a bob proxy-us >/dev/null
 assert_eq 1 "$(jq '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-outbound:"))|select(.inboundTag==["in-a"] and .user==["xrayctl-user-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] and .outboundTag=="proxy-us")]|length' "$XRAYCTL_CONFIG_FILE")" 'user default set CLI arguments were misrouted'
 dispatch outbound user unset in-a bob >/dev/null
@@ -221,4 +225,37 @@ if outbound_user_domain_add renamed-a alice-renamed exact unsafe.example.com dir
 fi
 assert_eq "$before" "$(jq -S . "$XRAYCTL_CONFIG_FILE")" 'unsafe domain change left custom config untouched'
 
-printf 'ok - per-inbound user outbound scope, priority, inheritance, identity lifecycle, rollback, and safe refusal pass\n'
+selector_options=()
+selector_pick=direct
+choose() {
+  local destination=$1 index=1 option
+  shift 2
+  selector_options=("$@")
+  for option in "${selector_options[@]}"; do
+    if [[ $option == "$selector_pick" ]]; then printf -v "$destination" '%s' "$index"; return 0; fi
+    index=$((index + 1))
+  done
+  return 1
+}
+detect_local_ips() { printf 'Loopback Test\t192.0.2.10\tlo\n'; }
+selector_has() {
+  local expected=$1 option
+  for option in "${selector_options[@]}"; do [[ $option == "$expected" ]] && return 0; done
+  return 1
+}
+select_outbound selected 1 1 "" || { printf 'not ok - normal outbound selection failed\n' >&2; exit 1; }
+assert_eq direct "$selected" 'normal selector selected the requested outbound'
+for expected in direct proxy-us proxy-jp 'Loopback'; do
+  selector_has "$expected" || { printf 'not ok - normal selector omitted %s\n' "$expected" >&2; exit 1; }
+done
+if selector_has blocked; then
+  printf 'not ok - ordinary outbound selector exposed blocked\n' >&2; exit 1
+fi
+selector_pick=blocked
+select_outbound selected 1 0 "" 1 || { printf 'not ok - user-domain selector did not offer blocked\n' >&2; exit 1; }
+assert_eq blocked "$selected" 'user-domain selector selected blocked'
+selector_has direct && selector_has blocked && selector_has proxy-us && selector_has proxy-jp || {
+  printf 'not ok - user-domain selector changed the existing outbound choices\n' >&2; exit 1;
+}
+
+printf 'ok - per-inbound user outbound scope, priority, inheritance, blocked rules, identity lifecycle, rollback, and safe refusal pass\n'

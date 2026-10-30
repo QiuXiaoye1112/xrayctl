@@ -555,9 +555,10 @@ add_outbound() {
 }
 
 select_outbound() {
-  local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} __ipvar=${4-} candidate_tag answer local_tag
+  local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} __ipvar=${4-} include_blocked=${5:-0} candidate_tag answer local_tag
   local tags=() local_ips=() local_ip_tags=() local_raw_ips=() proxy_tags=() local_tags=()
   ((include_direct == 0)) || tags+=("direct")
+  ((include_blocked == 0)) || tags+=("blocked")
   while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || proxy_tags+=("$candidate_tag"); done < <(
     jq -r '.outbounds[]?|select((.protocol=="socks" or .protocol=="http") and .tag!="direct" and .tag!="blocked")|.tag' "$CONFIG_FILE"
   )
