@@ -4,6 +4,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 bin=${XRAYCTL_REAL_XRAY_BIN:-}
 if [[ -z $bin ]]; then printf 'ok - real user quota test skipped (set XRAYCTL_REAL_XRAY_BIN)\n'; exit 0; fi
 for cmd in jq curl nc; do command -v "$cmd" >/dev/null || { printf 'not ok - missing %s\n' "$cmd" >&2; exit 1; }; done
+source "$root/tests/helpers/netcat.sh"
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-user-quota.XXXXXX")
 server_pid='' client_pid='' listener_pid=''
 cleanup_test() {
@@ -80,6 +81,9 @@ start_test_client
 ensure_config() { :; }
 setup_runtime_access() { :; }
 traffic_timer_install() { :; }
+# This integration exercises Xray's StatsService and routing. Packet firewall
+# behavior is covered separately; keep the test portable to non-Linux hosts.
+traffic_runtime_ensure() { :; }
 service_is_active() { [[ -n $server_pid ]] && kill -0 "$server_pid" 2>/dev/null; }
 traffic_user_core_epoch() { service_is_active || return 1; printf 'test:%s' "$server_pid"; }
 restart_service() { kill "$server_pid"; wait "$server_pid" || true; server_pid=''; start_test_server; }
@@ -94,7 +98,7 @@ else
 fi
 confirm() { return 0; }
 XRAYCTL_MANAGEMENT_LOCK_HELD=1
-respond() { printf 'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello' | nc -l 127.0.0.1 "$target" >/dev/null & listener_pid=$!; sleep .2; }
+respond() { printf 'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello' | test_nc_listen_loopback "$target" >/dev/null & listener_pid=$!; sleep .2; }
 fetch() { curl -fsS --noproxy '' --max-time "${XRAYCTL_TEST_CURL_TIMEOUT:-20}" --socks5-hostname "127.0.0.1:$1" "http://127.0.0.1:$target/"; }
 fetch_blocked() { XRAYCTL_TEST_CURL_TIMEOUT=4 fetch "$1"; }
 traffic_user_limit_set a alice 0.00000001 1 00:00

@@ -165,7 +165,7 @@ cp "$tmp/before-unlimited-display" "$TRAFFIC_FILE"
 jq '.inbounds += [{tag:"c",protocol:"socks",settings:{accounts:[]}}]' "$CONFIG_FILE" >"$tmp/with-socks"
 cp "$tmp/with-socks" "$CONFIG_FILE"
 user_display=$(traffic_users_show)
-[[ $user_display == *'c'* && $user_display == *'此入站暂不支持按用户统计'* && $user_display != *'socks'* ]]
+[[ $user_display == *'c'* && $user_display == *'此入站没有可统计的认证账号'* && $user_display != *'socks'* ]]
 state_commit() { cp "$1" "$CONFIG_FILE"; }
 jq '.routing.rules += [{type:"field",user:["regexp:^new"],outboundTag:"direct"}] | .inbounds[0].settings.clients += [{email:"new-user",id:"123e4567-e89b-12d3-a456-426614174003"}]' "$CONFIG_FILE" >"$tmp/new-candidate"
 state_apply_candidate_file "$tmp/new-candidate" apply_candidate

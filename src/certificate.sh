@@ -532,7 +532,7 @@ cloudflare_credentials_menu() {
       cf_credentials_summary
       printf '\n1) 配置 Cloudflare 凭据\n0) 返回\n'
     fi
-    read -r -p "请选择: " choice || { cancel_input; return 0; }
+    read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action save_cloudflare_credentials; pause;;
       2) if load_cloudflare_credentials; then
@@ -1102,13 +1102,13 @@ manage_inbound_certificate_menu() {
     heading "证书管理 · ${tag}"
     printf '证书: %s\n私钥: %s\nSNI: %s\n\n' "$current_cert" "$current_key" "$current_sni"
     printf '1) 更换托管证书\n2) 使用证书文件\n0) 返回入站\n'
-    read -r -p "请选择: " choice || { cancel_input; return 0; }
+    read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1)
         if select_managed_certificate identifier; then
           cert="${CERT_DIR}/${identifier}.crt"; key="${CERT_DIR}/${identifier}.key"
           info "使用托管证书：${identifier}"
-          prompt_certificate_server_name sni "$cert" || continue
+          prompt_certificate_server_name sni "$cert" || { pause; continue; }
           run_menu_action update_tls_inbound_certificate "$tag" "$cert" "$key" "$sni"
           pause
         else
@@ -1117,7 +1117,7 @@ manage_inbound_certificate_menu() {
         ;;
       2)
         prompt_certificate_files cert key "$current_cert" "$current_key" || continue
-        prompt_certificate_server_name sni "$cert" || continue
+        prompt_certificate_server_name sni "$cert" || { pause; continue; }
         run_menu_action update_tls_inbound_certificate "$tag" "$cert" "$key" "$sni"
         pause
         ;;

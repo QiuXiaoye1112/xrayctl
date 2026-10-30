@@ -7,6 +7,7 @@ if [[ -z $bin ]]; then
   exit 0
 fi
 for cmd in jq curl nc; do command -v "$cmd" >/dev/null || { printf 'not ok - missing %s\n' "$cmd" >&2; exit 1; }; done
+source "$root/tests/helpers/netcat.sh"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-user-test.XXXXXX")
 server_pid='' client_pid='' listener_pid=''
 cleanup() {
@@ -31,7 +32,7 @@ for _ in {1..30}; do
   sleep .1
 done
 respond() {
-  printf 'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello' | nc -l 127.0.0.1 "$target" >/dev/null & listener_pid=$!
+  printf 'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello' | test_nc_listen_loopback "$target" >/dev/null & listener_pid=$!
   sleep .2
 }
 fetch() { curl -fsS --noproxy '' --max-time 3 --socks5-hostname "127.0.0.1:$1" "http://127.0.0.1:$target/"; }

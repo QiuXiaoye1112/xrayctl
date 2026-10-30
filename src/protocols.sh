@@ -42,37 +42,29 @@ protocol_build_vless() {
 
 protocol_build_socks() {
   local __out=$1 tag=$2 listen=$3 port=$4 username=$5 password=$6 result
-  if [[ -n $username ]]; then
-    result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-      --arg user "$username" --arg pass "$password" \
-      '{tag:$tag,listen:$listen,port:$port,protocol:"socks",settings:{
-        auth:"password",
-        accounts:[{user:$user,pass:$pass}],
-        users:[{user:$user,pass:$pass}],
-        udp:true,
-        ip:"0.0.0.0"
-      }}')
-  else
-    result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-      '{tag:$tag,listen:$listen,port:$port,protocol:"socks",settings:{auth:"noauth",udp:true,ip:"0.0.0.0"}}')
-  fi
+  [[ -n $username && -n $password ]] || { warn "SOCKS5 入站必须设置用户名和密码。"; return 1; }
+  result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
+    --arg user "$username" --arg pass "$password" \
+    '{tag:$tag,listen:$listen,port:$port,protocol:"socks",settings:{
+      auth:"password",
+      accounts:[{user:$user,pass:$pass}],
+      users:[{user:$user,pass:$pass}],
+      udp:true,
+      ip:"0.0.0.0"
+    }}')
   printf -v "$__out" '%s' "$result"
 }
 
 protocol_build_http() {
   local __out=$1 tag=$2 listen=$3 port=$4 username=$5 password=$6 result
-  if [[ -n $username ]]; then
-    result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-      --arg user "$username" --arg pass "$password" \
-      '{tag:$tag,listen:$listen,port:$port,protocol:"http",settings:{
-        accounts:[{user:$user,pass:$pass}],
-        users:[{user:$user,pass:$pass}],
-        allowTransparent:false
-      }}')
-  else
-    result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-      '{tag:$tag,listen:$listen,port:$port,protocol:"http",settings:{allowTransparent:false}}')
-  fi
+  [[ -n $username && -n $password ]] || { warn "HTTP 入站必须设置用户名和密码。"; return 1; }
+  result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
+    --arg user "$username" --arg pass "$password" \
+    '{tag:$tag,listen:$listen,port:$port,protocol:"http",settings:{
+      accounts:[{user:$user,pass:$pass}],
+      users:[{user:$user,pass:$pass}],
+      allowTransparent:false
+    }}')
   printf -v "$__out" '%s' "$result"
 }
 
@@ -117,8 +109,12 @@ build_inbound() {
       protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$email" "$stream"
       ;;
     socks|http)
-      prompt_optional_value username "用户名（留空表示无认证）" || return 1
-      if [[ -n $username ]]; then prompt_secret password "密码" "$(random_password)" || return 1; fi
+      while true; do
+        prompt_validated_value username "用户名" "" validate_email_label "用户名无效，请重新输入。" || return 1
+        if ! client_account_identity_exists_globally "$username"; then break; fi
+        warn "此用户名已存在"
+      done
+      prompt_secret password "密码" || return 1
       protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$username" "$password"
       ;;
   esac

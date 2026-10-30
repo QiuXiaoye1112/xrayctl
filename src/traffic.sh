@@ -17,7 +17,39 @@ traffic_user_managed_config() {
 }
 
 traffic_user_has_clients() {
-  [[ -r $CONFIG_FILE ]] && jq -e '[.inbounds[]? | select(.protocol=="vless") | .settings.clients[]?] | length>0' "$CONFIG_FILE" >/dev/null 2>&1
+  [[ -r $CONFIG_FILE ]] && jq -e '[.inbounds[]? | select(
+    (.protocol=="vless" and ((.settings.clients // [])|length)>0) or
+    (.protocol=="socks" and .settings.auth=="password" and ((.settings.accounts // .settings.users // [])|length)>0) or
+    (.protocol=="http" and ((.settings.accounts // .settings.users // [])|length)>0)
+  )] | length>0' "$CONFIG_FILE" >/dev/null 2>&1
+}
+
+# Xray StatsService uses the email field for every authenticated inbound user.
+# VLESS has a private xrayctl-generated email; HTTP/SOCKS expose their actual
+# account username as that email. The same name on two accounts is ambiguous
+# because the core aggregates both counters globally.
+traffic_user_inventory_json() {
+  local file=${1:-$CONFIG_FILE}
+  jq -c '
+    [ .inbounds[]? as $inbound |
+      if $inbound.protocol=="vless" then
+        $inbound.settings.clients[]? |
+        select(.xrayctlLabel != null and (.email|type)=="string") |
+        {tag:$inbound.tag,id:.email,label:.xrayctlLabel,protocol:"vless"}
+      elif $inbound.protocol=="socks" and $inbound.settings.auth=="password" then
+        ($inbound.settings.accounts // $inbound.settings.users // [])[]? |
+        select((.user|type)=="string" and (.user|length)>0 and (.pass|type)=="string" and (.pass|length)>0) |
+        {tag:$inbound.tag,id:.user,label:.user,protocol:"socks"}
+      elif $inbound.protocol=="http" then
+        ($inbound.settings.accounts // $inbound.settings.users // [])[]? |
+        select((.user|type)=="string" and (.user|length)>0 and (.pass|type)=="string" and (.pass|length)>0) |
+        {tag:$inbound.tag,id:.user,label:.user,protocol:"http"}
+      else empty end
+    ] as $clients |
+    [$clients[] as $client | $client + {
+      ambiguous:(([$clients[] | select(.id==$client.id)]|length)>1)
+    }]
+  ' "$file"
 }
 
 # The core aggregates user counters by email across all inbounds. Keep the
@@ -127,6 +159,15 @@ traffic_user_prepare_config() {
   api_tag=$(jq -r '.api.tag // "xrayctl-user-stats"' "$input") || return 1
   identities=$(temp_file) || return 1
   traffic_user_prepare_identities "$input" "$identities" || { rm -f "$identities"; warn "用户统计标识或用户名称冲突。"; return 1; }
+  if ! jq -e '
+    [.inbounds[]? | select(.protocol=="socks" or .protocol=="http") |
+      .settings.accounts // .settings.users // [] | .[]? | .user] as $users |
+    ([$users[] | select(type!="string" or length==0 or length>128 or (test("[\\r\\n\\t]") or contains(">>>")))] | length)==0
+  ' "$identities" >/dev/null; then
+    rm -f "$identities"
+    warn "HTTP/SOCKS 用户名包含 StatsService 无法安全解析的字符；请先重命名账号。"
+    return 1
+  fi
   jq --arg address "$address" --arg apiTag "$api_tag" '
     .stats=(.stats // {}) |
     .api=(.api // {}) | .api.tag=$apiTag | .api.listen=$address |
@@ -206,10 +247,8 @@ traffic_user_update_samples() {
   local samples=$1 epoch=$2 now period_start inventory active_tags rolled tmp
   now=$(traffic_now)
   period_start=$(traffic_period_start "$now") || return 1
-  inventory=$(jq -c '[.inbounds[]? | select(.protocol=="vless") | .tag as $tag | .settings.clients[]? |
-    select(.xrayctlLabel != null and (.email|type)=="string") |
-    {tag:$tag,id:.email,label:.xrayctlLabel}]' "$CONFIG_FILE") || return 1
-  active_tags=$(jq -c '[.inbounds[]? | select(.protocol=="vless") | .tag]' "$CONFIG_FILE") || return 1
+  inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
+  active_tags=$(jq -c '[.inbounds[]? | select(.protocol=="vless" or .protocol=="socks" or .protocol=="http") | .tag]' "$CONFIG_FILE") || return 1
   rolled=$(traffic_user_rolled_limits_json "$now") || return 1
   tmp=$(temp_file) || return 1
   jq --argjson samples "$samples" --argjson inventory "$inventory" --argjson activeTags "$active_tags" --argjson rolled "$rolled" --arg epoch "$epoch" --arg now "$now" --arg periodStart "$period_start" '
@@ -219,7 +258,7 @@ traffic_user_update_samples() {
     # A manually renamed inbound can be recognized by the stable, globally
     # unique identity. Move its user state before calculating deltas.
     reduce $inventory[] as $client (. ;
-      if .inbounds[$client.tag].users[$client.id] != null then . else
+      if $client.ambiguous or .inbounds[$client.tag].users[$client.id] != null then . else
         [.inbounds | to_entries[] | select(.key != $client.tag and .value.users[$client.id] != null) | .key] as $oldTags |
         if ($oldTags|length)==1 then
           .inbounds[$client.tag].users[$client.id]=.inbounds[$oldTags[0]].users[$client.id] |
@@ -238,17 +277,26 @@ traffic_user_update_samples() {
       .inbounds[$client.tag].users[$client.id] = ((.inbounds[$client.tag].users[$client.id] // {}) + {label:$client.label}) |
       .inbounds[$client.tag].users[$client.id] |= (. as $user |
         ($samples[$client.id] // {}) as $sample |
+        if $client.ambiguous then
+          .samplingBlocked=true |
+          if $sample.uplink != null or $sample.downlink != null then
+            .last={epoch:$epoch,uplink:($sample.uplink // ($user.last.uplink // 0)),downlink:($sample.downlink // ($user.last.downlink // 0))}
+          else . end
+        else
         (($user.last.epoch // "") == $epoch) as $same |
+        ($user.samplingBlocked == true) as $blocked |
         (if $same then ($user.last.uplink // 0) else 0 end) as $oldUp |
         (if $same then ($user.last.downlink // 0) else 0 end) as $oldDown |
-        (if $sample.uplink == null then 0 elif $sample.uplink >= $oldUp then $sample.uplink-$oldUp else $sample.uplink end) as $up |
-        (if $sample.downlink == null then 0 elif $sample.downlink >= $oldDown then $sample.downlink-$oldDown else $sample.downlink end) as $down |
+        (if $blocked or $sample.uplink == null then 0 elif $same and $sample.uplink >= $oldUp then $sample.uplink-$oldUp else $sample.uplink end) as $up |
+        (if $blocked or $sample.downlink == null then 0 elif $same and $sample.downlink >= $oldDown then $sample.downlink-$oldDown else $sample.downlink end) as $down |
         .uplinkBytes=((.uplinkBytes // 0)+$up) | .downlinkBytes=((.downlinkBytes // 0)+$down) |
         .cycles=((.cycles // {}) | with_entries(select(.key==$periodStart))) |
         .cycles[$periodStart]=((.cycles[$periodStart] // 0)+2*$up+2*$down) |
         if .limit.enabled==true then .limit.usedBytes=((.limit.usedBytes // 0)+2*$up+2*$down) else . end |
         .accountingMultiplier=2 |
-        .last={epoch:$epoch,uplink:($sample.uplink // $oldUp),downlink:($sample.downlink // $oldDown)}
+        .last={epoch:$epoch,uplink:($sample.uplink // $oldUp),downlink:($sample.downlink // $oldDown)} |
+        del(.samplingBlocked)
+        end
       )
     ) | .userLastCollectedAt=$now | .userCoreEpoch=$epoch
   ' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
@@ -257,19 +305,22 @@ traffic_user_update_samples() {
 }
 
 traffic_user_collect_locked() {
-  local address before after samples
+  local address before after samples inventory
   address=$(jq -r 'if .xrayctlUserStats.enabled==true then (.api.listen // "") else "" end' "$CONFIG_FILE") || return 1
   [[ -n $address ]] || return 0
-  if ! jq -e --slurpfile traffic "$TRAFFIC_FILE" '
+  inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
+  if ! jq -e --slurpfile traffic "$TRAFFIC_FILE" --argjson inventory "$inventory" '
     $traffic[0] as $state |
     [.. | objects | .email? | select(type=="string") | ascii_downcase] as $all |
     [.inbounds[]? | select(.protocol=="vless") | .tag as $tag | .settings.clients[]? | . as $client |
       ((.xrayctlLabel|type)=="string" and (.xrayctlLabel|length)>0 and (.email|type)=="string" and (.email|test("^xrayctl-user-[0-9a-f]{32}$")) and
         (.email | ascii_downcase | . as $id | [$all[] | select(.==$id)] | length==1) and
         ($state.inbounds[$tag].users[($client.email // "" | tostring)] != null or
-          ([($state.inbounds[$tag].users // {}) | to_entries[] | select(.value.label==$client.xrayctlLabel)] | length==0)))] | all
+          ([($state.inbounds[$tag].users // {}) | to_entries[] | select(.value.label==$client.xrayctlLabel)] | length==0)))] | all and
+    ([$inventory[] | select(.protocol=="socks" or .protocol=="http") |
+      select((.id|type)!="string" or (.id|length)==0 or (.id|length)>128 or (.id|test("[\\r\\n\\t]") or contains(">>>")))] | length)==0
   ' "$CONFIG_FILE" >/dev/null; then
-    warn "用户配置包含未登记或重复的统计标识，本次用户采集已跳过。"
+    warn "用户配置包含未登记或无效的统计标识，本次用户采集已跳过。"
     return 1
   fi
   before=$(traffic_user_core_epoch) || { warn "无法确定 Xray 进程身份，用户流量采集已跳过。"; return 1; }
@@ -310,6 +361,22 @@ traffic_user_forget_client() {
   return "$rc"
 }
 
+traffic_user_rename_client_record_locked() {
+  local tag=$1 old_id=$2 new_id=$3 tmp rc=0
+  [[ -f $TRAFFIC_FILE && -n $old_id && -n $new_id ]] || return 0
+  [[ $old_id != "$new_id" ]] || return 0
+  tmp=$(temp_file) || return 1
+  jq --arg tag "$tag" --arg old "$old_id" --arg new "$new_id" '
+    if .inbounds[$tag].users[$old] != null then
+      .inbounds[$tag].users[$new]=(.inbounds[$tag].users[$old] + {label:$new}) |
+      del(.inbounds[$tag].users[$old])
+    else . end
+  ' "$TRAFFIC_FILE" >"$tmp" || rc=1
+  if ((rc==0)); then traffic_write_file "$tmp" || rc=1; fi
+  rm -f "$tmp"
+  return "$rc"
+}
+
 # If an administrator edits a managed client's email directly, recover its
 # stable accounting identity from the existing per-inbound record when the
 # label identifies exactly one record. Never guess when the match is unclear.
@@ -333,7 +400,7 @@ traffic_user_recover_identities() {
 # back. User rules are before all existing routes; inbound firewall rules remain
 # independent and are never changed here.
 traffic_user_reconcile_locked() {
-  local candidate prepared recovered address rc=0 TRAFFIC_USER_RECONCILE_COMMIT=1
+  local candidate prepared recovered address inventory rc=0 TRAFFIC_USER_RECONCILE_COMMIT=1
   traffic_user_managed_config || return 0
   [[ -f $TRAFFIC_FILE ]] || return 0
   traffic_lock_acquire || return 1
@@ -352,10 +419,10 @@ traffic_user_reconcile_locked() {
   if ! traffic_user_recover_identities "$CONFIG_FILE" "$recovered" || ! traffic_user_prepare_config "$recovered" "$prepared" "$address"; then
     rm -f "$candidate" "$prepared" "$recovered"; traffic_lock_release; return 1
   fi
-  jq --slurpfile state "$TRAFFIC_FILE" '
+  inventory=$(traffic_user_inventory_json "$prepared") || { rm -f "$candidate" "$prepared" "$recovered"; traffic_lock_release; return 1; }
+  jq --slurpfile state "$TRAFFIC_FILE" --argjson inventory "$inventory" '
     $state[0] as $s |
-    [ .inbounds[]? | select(.protocol=="vless") | .tag as $tag | .settings.clients[]? |
-      select(.xrayctlLabel != null and (.email|type)=="string") | .email as $id |
+    [ $inventory[] | select(.ambiguous|not) | .tag as $tag | .id as $id |
       $s.inbounds[$tag].users[$id].limit as $limit |
       select($limit.enabled==true and ($limit.quotaBytes // 0)>0 and ($limit.usedBytes // 0)>=($limit.quotaBytes // 0)) |
       {type:"field",ruleTag:("xrayctl-user-limit:"+$id),inboundTag:[$tag],user:[$id],outboundTag:"xrayctl-user-deny"}
@@ -451,17 +518,41 @@ traffic_user_ensure_configured() {
 }
 
 traffic_user_select() {
-  local __tag=$1 __label=$2 picked_tag=${3-} picked_label=${4-}
-  [[ -n $picked_tag ]] || select_inbound picked_tag '^vless$' || return 1
-  jq -e --arg tag "$picked_tag" '[.inbounds[]? | select(.tag==$tag and .protocol=="vless")] | length==1' "$CONFIG_FILE" >/dev/null || { warn "请选择 VLESS 入站。"; return 1; }
+  local __tag=$1 __label=$2 picked_tag=${3-} picked_label=${4-} protocol inventory
+  [[ -n $picked_tag ]] || select_inbound picked_tag '^(vless|socks|http)$' || return 1
+  protocol=$(jq -r --arg tag "$picked_tag" '.inbounds[]? | select(.tag==$tag) | .protocol' "$CONFIG_FILE") || return 1
+  case $protocol in
+    vless) ;;
+    socks)
+      jq -e --arg tag "$picked_tag" '.inbounds[]? | select(.tag==$tag and .protocol=="socks" and .settings.auth=="password" and ((.settings.accounts // .settings.users // [])|length)>0)' "$CONFIG_FILE" >/dev/null || { warn "该 SOCKS5 入站没有已启用的用户名密码账号。"; return 1; }
+      ;;
+    http)
+      jq -e --arg tag "$picked_tag" '.inbounds[]? | select(.tag==$tag and .protocol=="http" and ((.settings.accounts // .settings.users // [])|length)>0)' "$CONFIG_FILE" >/dev/null || { warn "该 HTTP 入站没有已配置的认证账号。"; return 1; }
+      ;;
+    *) warn "该协议不支持按账号统计。"; return 1 ;;
+  esac
   [[ -n $picked_label ]] || select_client picked_label "$picked_tag" || return 1
   client_label_exists "$picked_tag" "$picked_label" || { warn "找不到用户：${picked_label}"; return 1; }
+  inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
+  if jq -e --arg tag "$picked_tag" --arg label "$picked_label" 'any(.[]; .tag==$tag and .label==$label and .ambiguous)' <<<"$inventory" >/dev/null; then
+    warn "账号名称在多个入站重复，Xray 汇总同名账号流量，无法安全设置独立额度；请先重命名其中一个账号。"
+    return 1
+  fi
   printf -v "$__tag" '%s' "$picked_tag"
   printf -v "$__label" '%s' "$picked_label"
 }
 
 traffic_user_id() {
-  jq -r --arg tag "$1" --arg label "$2" '.inbounds[] | select(.tag==$tag and .protocol=="vless") | .settings.clients[]? | select((.xrayctlLabel // .email)==$label) | .email' "$CONFIG_FILE"
+  jq -r --arg tag "$1" --arg label "$2" '
+    .inbounds[]? | select(.tag==$tag) |
+    if .protocol=="vless" then
+      .settings.clients[]? | select((.xrayctlLabel // .email)==$label) | .email
+    elif .protocol=="socks" and .settings.auth=="password" then
+      (.settings.accounts // .settings.users // [])[]? | select(.user==$label) | .user
+    elif .protocol=="http" then
+      (.settings.accounts // .settings.users // [])[]? | select(.user==$label) | .user
+    else empty end
+  ' "$CONFIG_FILE"
 }
 
 traffic_user_limit_set() {
@@ -563,15 +654,16 @@ traffic_user_reset() {
 }
 
 traffic_users_show() {
-  local filter=${1-} tag protocol id label used quota start end enabled status period_start current_bytes current_tag="" user_state
+  local filter=${1-} tag protocol id label used quota start end enabled status ambiguous period_start current_bytes current_tag="" user_state inventory
   heading '流量限制'
   if [[ ! -r $CONFIG_FILE || ! -r $TRAFFIC_FILE ]]; then
     info "用户流量统计尚未配置。"
     return 0
   fi
   IFS=$'\t' read -r period_start _ < <(traffic_period_bounds "$(traffic_now)")
+  inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
   traffic_user_managed_config && user_state='已配置' || user_state='未配置'
-  while IFS=$'\t' read -r tag protocol id label current_bytes used quota start end enabled; do
+  while IFS=$'\t' read -r tag protocol id label current_bytes used quota start end enabled ambiguous; do
     [[ -n $tag ]] || continue
     if [[ $tag != "$current_tag" ]]; then
       printf '\n%s\n' "$tag"
@@ -581,32 +673,45 @@ traffic_users_show() {
       printf '%s\n' '---------------------------------------------------------------'
       current_tag=$tag
     fi
-    if [[ $protocol != vless ]]; then
-      printf '   此入站暂不支持按用户统计\n'
+    if [[ -z $id || $id == '-' ]]; then
+      if [[ $protocol == socks || $protocol == http ]]; then printf '   此入站没有可统计的认证账号\n'; else printf '   此入站暂不支持按用户统计\n'; fi
       continue
     fi
-    [[ -n $id ]] || continue
     if [[ $enabled == true && $quota =~ ^[0-9]+$ && $quota -gt 0 ]]; then
-      if ((used >= quota)); then status='超额'; else status='正常'; fi
-      current_bytes=$used
+      if [[ $ambiguous == true ]]; then status='冲突'; current_bytes='统计冲突';
+      elif ((used >= quota)); then status='超额'; current_bytes=$used
+      else status='正常'; current_bytes=$used; fi
       quota=$(traffic_format_bytes "$quota")
     else
       quota='∞'
-      status='正常'
+      if [[ $ambiguous == true ]]; then status='冲突'; current_bytes='统计冲突'; else status='正常'; fi
     fi
-    if [[ $user_state == '已配置' ]]; then used=$(traffic_format_bytes "$current_bytes"); else used='未统计'; fi
+    if [[ $ambiguous == true ]]; then used='统计冲突'
+    elif [[ $user_state == '已配置' ]]; then used=$(traffic_format_bytes "$current_bytes")
+    else used='未统计'; fi
     print_table_cell_clipped "$label" 20; printf ' | '
     print_table_cell_clipped "$used / $quota" 30; printf ' | '
     print_table_cell "$status" 6; printf '\n'
-  done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --arg periodStart "$period_start" --arg filter "$filter" '
+  done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --argjson inventory "$inventory" --arg periodStart "$period_start" --arg filter "$filter" '
     $state[0] as $s | .inbounds[]? | select($filter=="" or .tag==$filter) | .tag as $tag | .protocol as $protocol |
     if $protocol=="vless" then
-      if ((.settings.clients // [])|length)==0 then [$tag,$protocol,"","",0,0,0,"-","-",false] | @tsv
+      if ((.settings.clients // [])|length)==0 then [$tag,$protocol,"-","-",0,0,0,"-","-",false,false] | @tsv
       else .settings.clients[] | .email as $id | ($s.inbounds[$tag].users[$id] // {}) as $u |
         [$tag,$protocol,$id,(.xrayctlLabel // .email // ""),($u.cycles[$periodStart] // 0),
-          ($u.limit.usedBytes // 0),($u.limit.quotaBytes // 0),($u.limit.cycleStart // "-"),($u.limit.cycleEnd // "-"),($u.limit.enabled // false)] | @tsv
+          ($u.limit.usedBytes // 0),($u.limit.quotaBytes // 0),($u.limit.cycleStart // "-"),($u.limit.cycleEnd // "-"),($u.limit.enabled // false),
+          ([$inventory[] | select(.tag==$tag and .id==$id) | .ambiguous] | any)] | @tsv
       end
-    else [$tag,$protocol,"","",0,0,0,"-","-",false] | @tsv end
+    elif $protocol=="socks" and .settings.auth=="password" then
+      if ((.settings.accounts // .settings.users // [])|length)==0 then [$tag,$protocol,"-","-",0,0,0,"-","-",false,false] | @tsv
+      else [(.settings.accounts // .settings.users // [])[]? | select((.user|type)=="string" and (.pass|type)=="string" and (.pass|length)>0)] | unique_by(.user)[] | .user as $id | ($s.inbounds[$tag].users[$id] // {}) as $u |
+        [$tag,$protocol,$id,$id,($u.cycles[$periodStart] // 0),($u.limit.usedBytes // 0),($u.limit.quotaBytes // 0),($u.limit.cycleStart // "-"),($u.limit.cycleEnd // "-"),($u.limit.enabled // false),
+          ([$inventory[] | select(.tag==$tag and .id==$id) | .ambiguous] | any)] | @tsv end
+    elif $protocol=="http" then
+      if ((.settings.accounts // .settings.users // [])|length)==0 then [$tag,$protocol,"-","-",0,0,0,"-","-",false,false] | @tsv
+      else [(.settings.accounts // .settings.users // [])[]? | select((.user|type)=="string" and (.pass|type)=="string" and (.pass|length)>0)] | unique_by(.user)[] | .user as $id | ($s.inbounds[$tag].users[$id] // {}) as $u |
+        [$tag,$protocol,$id,$id,($u.cycles[$periodStart] // 0),($u.limit.usedBytes // 0),($u.limit.quotaBytes // 0),($u.limit.cycleStart // "-"),($u.limit.cycleEnd // "-"),($u.limit.enabled // false),
+          ([$inventory[] | select(.tag==$tag and .id==$id) | .ambiguous] | any)] | @tsv end
+    else [$tag,$protocol,"-","-",0,0,0,"-","-",false,false] | @tsv end
   ' "$CONFIG_FILE")
   [[ -n $current_tag ]] || info "没有可显示的入站。"
 }

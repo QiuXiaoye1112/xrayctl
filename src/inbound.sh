@@ -348,6 +348,16 @@ client_label_exists() {
   fi
 }
 
+client_account_identity_exists_globally() {
+  local label=$1 except_tag=${2-} except_label=${3-}
+  [[ -r $CONFIG_FILE ]] || return 1
+  jq -e --arg label "$label" --arg exceptTag "$except_tag" --arg exceptLabel "$except_label" '
+    [.inbounds[]? as $inbound | select($inbound.protocol=="socks" or $inbound.protocol=="http") |
+      ($inbound.settings.accounts // $inbound.settings.users // [])[]? |
+      select(.user==$label and ($inbound.tag!=$exceptTag or .user!=$exceptLabel))] | length>0
+  ' "$CONFIG_FILE" >/dev/null
+}
+
 
 prompt_client_label() {
   local __var=$1 tag=$2 prompt=$3 default=${4-} current=${5-} protocol=${6-} label_candidate
@@ -356,7 +366,11 @@ prompt_client_label() {
     prompt_validated_value label_candidate "$prompt" "$default" validate_email_label "用户名称无效，请重新输入。" || return 1
     if [[ $label_candidate != "$current" ]]; then
       if client_label_exists "$tag" "$label_candidate"; then
-        warn "用户名称已存在，请重新输入。"
+        if [[ $protocol == socks || $protocol == http ]]; then warn "此用户名已存在"; else warn "用户名称已存在，请重新输入。"; fi
+        continue
+      fi
+      if [[ $protocol == socks || $protocol == http ]] && client_account_identity_exists_globally "$label_candidate" "$tag" "$current"; then
+        warn "此用户名已存在"
         continue
       fi
     fi
@@ -408,13 +422,15 @@ delete_client() {
   [[ $assume_yes == 1 ]] || confirm "从 ${tag} 删除用户 ${label}？" N || return 0
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
+    managed_id=$label
     count=$(jq --arg tag "$tag" --arg client_label "$label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || die "找不到用户：$label"
-    jq --arg tag "$tag" --arg client_label "$label" '
+    jq --arg tag "$tag" --arg client_label "$label" --arg id "$managed_id" '
       (.inbounds[]|select(.tag==$tag)|.settings) |= (
         ((.accounts // .users // [])|map(select(.user!=$client_label))) as $all |
         .accounts=$all | .users=$all
       ) |
+      if (.routing.rules|type)=="array" then .routing.rules |= map(select((.ruleTag // "") != ("xrayctl-user-limit:"+$id))) else . end |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else
     managed_id=$(jq -r --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select(.xrayctlLabel==$client_label)|.email // empty' "$CONFIG_FILE")
@@ -472,6 +488,7 @@ rename_client() {
     validate_email_label "$new_label" || die "新用户名称无效。"
     if [[ $new_label != "$old_label" ]]; then
       if client_label_exists "$tag" "$new_label"; then die "用户名称已存在。"; fi
+      if [[ $protocol == socks || $protocol == http ]] && client_account_identity_exists_globally "$new_label" "$tag" "$old_label"; then die "SOCKS5/HTTP 用户名必须在所有入站中唯一。"; fi
     fi
   fi
   tmp=$(temp_file)
@@ -483,13 +500,38 @@ rename_client() {
         ((.accounts // .users // [])|map(if .user==$old then .user=$new else . end)) as $all |
         .accounts=$all | .users=$all
       ) |
+      if (.routing.rules|type)=="array" then .routing.rules |= map(if (.ruleTag // "")==("xrayctl-user-limit:"+$old) then .ruleTag="xrayctl-user-limit:"+$new | .user=[$new] else . end) else . end |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else
     count=$(jq --arg tag "$tag" --arg client_label "$old_label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
     jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '(.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(if (.xrayctlLabel // .email)==$old then if .xrayctlLabel != null then .xrayctlLabel=$new else .email=$new end else . end)' "$CONFIG_FILE" >"$tmp"
   fi
-  state_apply_candidate_file "$tmp" apply_candidate || return
+  local lock_owned=0
+  if [[ $protocol == socks || $protocol == http ]]; then
+    if [[ -f $TRAFFIC_FILE && ${TRAFFIC_LOCK_HELD:-0} != 1 ]]; then
+      traffic_lock_acquire || { rm -f "$tmp"; return 1; }
+      lock_owned=1
+    fi
+    if [[ -f $TRAFFIC_FILE ]] && jq -e --arg old "$old_label" --arg new "$new_label" '$old!=$new and any(.inbounds[]?; .users[$new]!=null)' "$TRAFFIC_FILE" >/dev/null; then
+      ((lock_owned == 0)) || traffic_lock_release
+      rm -f "$tmp"
+      warn "目标用户名已有历史流量记录，无法安全合并；请先清理该旧账号记录。"
+      return 1
+    fi
+  fi
+  if ! state_apply_candidate_file "$tmp" apply_candidate; then
+    ((lock_owned == 0)) || traffic_lock_release
+    return 1
+  fi
+  if [[ ($protocol == socks || $protocol == http) && -f $TRAFFIC_FILE ]]; then
+    traffic_user_rename_client_record_locked "$tag" "$old_label" "$new_label" || {
+      ((lock_owned == 0)) || traffic_lock_release
+      warn "账号已重命名，但历史流量记录迁移失败，请检查 traffic.json。"
+      return 1
+    }
+  fi
+  ((lock_owned == 0)) || traffic_lock_release
   info "用户已重命名：${old_label} -> ${new_label}"
 }
 

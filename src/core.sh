@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
 readonly XRAYCTL_BUILD_COMMIT="${XRAYCTL_BUILD_COMMIT:-development}"
-readonly XRAY_CORE_PINNED_VERSION="26.3.27"
+readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 readonly XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download"
@@ -128,6 +128,11 @@ cancel_input() {
   XRAYCTL_INPUT_CANCELLED=1
   printf '\n'
   return 0
+}
+
+cancel_selection() {
+  cancel_input
+  pause
 }
 
 prompt_value() {
