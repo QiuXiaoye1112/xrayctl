@@ -161,7 +161,7 @@ select_inbound() {
     entries=$(jq -r --arg re "$protocols" '.inbounds[] | select(.protocol|test($re)) | .tag' "$CONFIG_FILE")
   else entries=$(jq -r '.inbounds[].tag' "$CONFIG_FILE"); fi
   count=$(grep -c . <<<"$entries" || true)
-  ((count > 0)) || { warn "没有可选入站。"; return 1; }
+  ((count > 0)) || { warn "没有可选入站。"; pause; return 1; }
   while IFS= read -r selected_tag; do [[ -z $selected_tag ]] || tags+=("$selected_tag"); done <<<"$entries"
   if ((count == 1)); then
     printf -v "$__var" '%s' "${tags[0]}"
@@ -334,7 +334,7 @@ select_client() {
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])[] | (.xrayctlLabel // .email)' "$CONFIG_FILE"
     )
   fi
-  ((${#labels[@]} > 0)) || { warn "该入站没有可选用户。"; return 1; }
+  ((${#labels[@]} > 0)) || { warn "该入站没有可选用户。"; pause; return 1; }
   choose answer "选择用户" "${labels[@]}" || return 1
   printf -v "$__var" '%s' "${labels[$((answer-1))]}"
 }

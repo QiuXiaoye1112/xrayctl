@@ -223,6 +223,10 @@ inbound_user_outbound_menu() {
   local -a labels=()
   mapfile -t labels < <(_outbound_user_labels "$inbound")
   if ((${#labels[@]}==0)); then info '该入站没有可识别的认证用户。'; pause; return 0; fi
+  if ((${#labels[@]}==1)); then
+    user_outbound_detail_menu "$inbound" "${labels[0]}"
+    return 0
+  fi
   choose choice '选择用户' "${labels[@]}" || return 0
   user_outbound_detail_menu "$inbound" "${labels[$((choice-1))]}"
 }
@@ -284,7 +288,7 @@ select_domain_template() {
   while IFS=$'\t' read -r template_name _ _; do
     [[ -n $template_name ]] && names+=("$template_name")
   done < <(list_domain_templates)
-  ((${#names[@]})) || { warn "还没有模板。"; return 1; }
+  ((${#names[@]})) || { warn "还没有模板。"; pause; return 1; }
   choose answer "选择模板" "${names[@]}" || return 1
   printf -v "$__var" '%s' "${names[$((answer-1))]}"
 }
@@ -353,7 +357,7 @@ template_manage_menu() {
     jq -r --arg name "$name" '.domainTemplates.templates[]? |
       select(.name==$name) | .suffix[]? // empty | "  "+.' "$META_FILE"
     printf '\n1) 添加域名\n2) 删除域名\n0) 返回\n'
-    read -r -p '请选择: ' choice || { cancel_selection; return 1; }
+    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1)
         choose type "域名类型" "精确域名" "域名及所有子域名" || continue
@@ -387,7 +391,7 @@ template_library_menu() {
       printf '%s) %-16s 精确 %s 个，子域名 %s 个\n' "$number" "$name" "$exact" "$suffix"
     done < <(list_domain_templates)
     printf '\n%s) 新建模板\n0) 返回\n' "$((number + 1))"
-    read -r -p '请选择: ' choice || { cancel_selection; return 1; }
+    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       0) return;;
       ''|*[!0-9]*) warn '无效选项。'; pause;;
@@ -658,7 +662,7 @@ traffic_user_menu() {
   local tag label choice current_bytes used quota enabled status id period_start record start end day clock index selected inventory conflict
   local -a user_labels=()
   ensure_config
-  select_inbound tag '^(vless|socks|http)$' || { pause; return 0; }
+  select_inbound tag '^(vless|socks|http)$' || return 0
   if ! jq -e --arg tag "$tag" '.inbounds[]? | select(.tag==$tag and (
     (.protocol=="vless" and ((.settings.clients // [])|length)>0) or
     (.protocol=="socks" and .settings.auth=="password" and ((.settings.accounts // .settings.users // [])|length)>0) or

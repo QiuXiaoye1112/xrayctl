@@ -331,7 +331,7 @@ select_outbound() {
     local_ips+=("$label")
     local_raw_ips+=("$ip")
   done < <(ensure_config 2>/dev/null || true; detect_local_ips 2>/dev/null)
-  ((${#tags[@]} > 0)) || { warn "没有可选出站。"; return 1; }
+  ((${#tags[@]} > 0)) || { warn "没有可选出站。"; pause; return 1; }
   # 只显示 direct、代理标签和本机 IP，不显示协议/地址括号说明。
   local display_labels=()
   for t in "${tags[@]}"; do

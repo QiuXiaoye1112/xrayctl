@@ -1040,7 +1040,7 @@ select_managed_certificate() {
     [[ -n $id ]] || continue
     [[ -r "${CERT_DIR}/${id}.crt" && -r "${CERT_DIR}/${id}.key" ]] && identifiers+=("$id")
   done < <(meta_cert_list)
-  ((${#identifiers[@]} > 0)) || { warn "没有可用的托管证书。"; return 1; }
+  ((${#identifiers[@]} > 0)) || { warn "没有可用的托管证书。"; pause; return 1; }
   if ((${#identifiers[@]} == 1)) && [[ $always_choose != 1 ]]; then
     printf -v "$__var" '%s' "${identifiers[0]}"
     return 0
@@ -1107,16 +1107,14 @@ manage_inbound_certificate_menu() {
         if select_managed_certificate identifier; then
           cert="${CERT_DIR}/${identifier}.crt"; key="${CERT_DIR}/${identifier}.key"
           info "使用托管证书：${identifier}"
-          prompt_certificate_server_name sni "$cert" || { pause; continue; }
+          prompt_certificate_server_name sni "$cert" || continue
           run_menu_action update_tls_inbound_certificate "$tag" "$cert" "$key" "$sni"
-          pause
-        else
           pause
         fi
         ;;
       2)
         prompt_certificate_files cert key "$current_cert" "$current_key" || continue
-        prompt_certificate_server_name sni "$cert" || { pause; continue; }
+        prompt_certificate_server_name sni "$cert" || continue
         run_menu_action update_tls_inbound_certificate "$tag" "$cert" "$key" "$sni"
         pause
         ;;

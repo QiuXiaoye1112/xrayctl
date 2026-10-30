@@ -111,7 +111,7 @@ command_exists() { command -v "$1" >/dev/null 2>&1; }
 is_linux() { [[ $(uname -s) == "Linux" ]]; }
 
 pause() {
-  [[ -t 0 ]] || return "$action_status"
+  [[ -t 0 ]] || return 0
   read -r -p "按回车键继续..." _ || true
 }
 
@@ -127,7 +127,7 @@ confirm() {
 cancel_input() {
   XRAYCTL_INPUT_CANCELLED=1
   printf '\n'
-  return "$action_status"
+  return 0
 }
 
 cancel_selection() {
@@ -146,7 +146,7 @@ prompt_value() {
       if [[ -z $input_value ]]; then warn "此项不能为空，请重新输入。"; continue; fi
     fi
     printf -v "$__var" '%s' "$input_value"
-    return "$action_status"
+    return 0
   done
 }
 
@@ -190,7 +190,7 @@ choose() {
     read -r -p "请选择 [1-${#options[@]}]: " selected_value || { cancel_selection; return 1; }
     if [[ $selected_value =~ ^[0-9]+$ ]] && (( selected_value >= 1 && selected_value <= ${#options[@]} )); then
       printf -v "$__var" '%s' "$selected_value"
-      return "$action_status"
+      return 0
     fi
     warn "无效选项。"
   done
@@ -221,7 +221,7 @@ prompt_validated_value() {
   local __var=$1 prompt=$2 default=$3 validator=$4 invalid_message=$5 validated_candidate
   while true; do
     prompt_value validated_candidate "$prompt" "$default" || return 1
-    if "$validator" "$validated_candidate"; then printf -v "$__var" '%s' "$validated_candidate"; return "$action_status"; fi
+    if "$validator" "$validated_candidate"; then printf -v "$__var" '%s' "$validated_candidate"; return 0; fi
     warn "$invalid_message"
   done
 }
