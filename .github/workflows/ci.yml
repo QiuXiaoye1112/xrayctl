@@ -96,5 +96,8 @@ jobs:
             recorded_commit=$(sed -n "s/^readonly XRAYCTL_BUILD_COMMIT=\"\\([^\"]*\\)\"/\\1/p" dist/xrayctl | head -1)
             XRAYCTL_BUILD_COMMIT="$recorded_commit" bash scripts/build.sh
             sh -n alpine/install.sh
-            XRAYCTL_REAL_XRAY_BIN="$xray_dir/xray" XRAYCTL_TEST_OPENRC=1 bash tests/run.sh
+            bash tests/run.sh
+            XRAYCTL_REAL_XRAY_BIN="$xray_dir/xray" bash tests/integration/test_real_xray.sh
+            XRAYCTL_REAL_XRAY_BIN="$xray_dir/xray" bash tests/integration/test_user_outbound_real_xray.sh
+            XRAYCTL_REAL_XRAY_BIN="$xray_dir/xray" XRAYCTL_TEST_OPENRC=1 bash tests/integration/test_openrc_user_quota.sh
           '
