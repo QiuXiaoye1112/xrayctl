@@ -133,7 +133,7 @@ install -m 600 "$candidate" "$TRAFFIC_FILE"; rm -f "$candidate"
 delete_inbound vless-node 1 >/dev/null
 assert_eq 0 "$(jq '.inbounds|length' "$CONFIG_FILE")" "inbound delete failed"
 assert_eq null "$(jq -r '.inbounds["vless-node"]' "$META_FILE")" "inbound metadata delete failed"
-assert_eq null "$(jq -r '.inbounds["vless-node"].limit' "$TRAFFIC_FILE")" "inbound quota survived delete"
+assert_eq null "$(jq -r '.inbounds["vless-node"].limit' "$TRAFFIC_FILE")" "legacy inbound quota state survived delete"
 assert_eq 0 "$(jq '[.routing.rules[]?|select(.ruleTag=="xrayctl-outbound:vless-node")]|length' "$CONFIG_FILE")" \
   "inbound delete left routing state"
 

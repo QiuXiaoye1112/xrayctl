@@ -127,17 +127,39 @@ done
 cloudflare_credentials_menu() { record cloudflare_credentials_menu; }
 exercise_menu_route certificate_menu 5 cloudflare_credentials_menu
 
-for spec in '1 toggle_service_running' '2 service_action restart' '3 toggle_service_startup' '4 show_logs 100'; do
+for spec in '1 toggle_service_running' '2 service_action restart' '3 toggle_service_startup' '4 show_logs 100' '6 manage_bbr'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route service_menu "$choice" "$action"
 done
-for spec in '1 inbound_menu' '2 outbound_menu' '3 certificate_menu' '4 traffic_menu' '6 service_menu'; do
+traffic_limit_menu() { record traffic_limit_menu; }
+for spec in '1 inbound_menu' '2 outbound_menu' '3 certificate_menu' '4 traffic_limit_menu' '5 traffic_menu' '6 service_menu'; do
   choice=${spec%% *}; action=${spec#* }
   eval "$action() { record $action; }"
   exercise_menu_route main_menu "$choice" "$action"
 done
-exercise_menu_route main_menu 5 'manage_bbr'
 # Uninstall now has one cleanup path and takes no legacy purge-level argument.
 exercise_menu_route main_menu 7 'uninstall_xray'
+
+traffic_is_enabled() { return 0; }
+traffic_collect() { record traffic_collect; }
+traffic_users_show() { record "traffic_users_show ${1-}"; }
+traffic_user_menu() { record traffic_user_menu; }
+# Restore the real menu functions after main-menu routing stubs.
+# shellcheck source=../../src/menu.sh
+source "${REPO_ROOT}/src/menu.sh"
+traffic_user_menu() { record traffic_user_menu; }
+exercise_menu_route traffic_limit_menu 2 traffic_user_menu
+: >"$EVENT_LOG"; set_inputs 0; traffic_limit_menu >"$TEST_ROOT/traffic-limit-menu.txt"
+if rg -q '入站额度' "$TEST_ROOT/traffic-limit-menu.txt"; then fail 'user flow limit menu still exposes inbound quota controls'; fi
+if rg -q '开启流量限制|关闭流量限制|3\)' "$TEST_ROOT/traffic-limit-menu.txt"; then fail 'user flow limit menu still exposes a global toggle'; fi
+
+traffic_show() { :; }
+traffic_clear_tag_records() { record traffic_clear_tag_records; }
+traffic_clear_all_records() { record traffic_clear_all_records; }
+traffic_disable() { record traffic_disable; }
+traffic_period_set() { record traffic_period_set; }
+for spec in '1 traffic_collect' '2 traffic_clear_tag_records' '3 traffic_clear_all_records' '4 traffic_disable' '5 traffic_period_set'; do
+  choice=${spec%% *}; action=${spec#* }; exercise_menu_route traffic_menu "$choice" "$action"
+done
 
 prompt_renamed_inbound_tag() { printf -v "$1" '%s' "$2"; }
 for spec in '1 rename_inbound node node' '2 modify_inbound_basic node' '3 modify_inbound_transport node'; do

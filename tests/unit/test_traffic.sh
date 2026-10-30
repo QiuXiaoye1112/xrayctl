@@ -59,18 +59,19 @@ range_start=old; range_end=old
 traffic_prompt_range range_start range_end <<< $'\n\n'
 [[ $range_start == 2026-08-01 && $range_end == 2026-08-24 ]]
 
-# Existing 0.5 traffic files gain the quota switch in the disabled state.
+# Legacy traffic files retain aggregate statistics while inbound quota fields
+# are discarded; per-user quota state lives in each inbound's users object.
 printf '%s\n' '{"schema":1,"enabled":false,"backend":"","lastCollectedAt":"","inbounds":{}}' >"$TRAFFIC_FILE"
 traffic_init_file
-jq -e '.limitsEnabled==false' "$TRAFFIC_FILE" >/dev/null
+jq -e '(has("limitsEnabled")|not)' "$TRAFFIC_FILE" >/dev/null
 
 # Existing client-side totals are converted once, including quota usage.
 tmp=$(temp_file)
-jq '.periodsSeeded=true | .inbounds.vless={protocol:"vless",port:17225,daily:{"2026-08-24":100},cycles:{"2026-08-01 00:00:00":100},limit:{quotaBytes:1000,usedBytes:30}}' "$TRAFFIC_FILE" >"$tmp"
+jq '.periodsSeeded=true | .inbounds.vless={protocol:"vless",port:17225,daily:{"2026-08-24":100},cycles:{"2026-08-01 00:00:00":100},limit:{quotaBytes:1000,usedBytes:30},users:{"email-id":{label:"alice",limit:{enabled:true,quotaBytes:1000,usedBytes:30}}}}' "$TRAFFIC_FILE" >"$tmp"
 install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
 traffic_sync_inventory
 traffic_sync_inventory
-jq -e '.accountingMultiplier==2 and .inbounds.vless.daily["2026-08-24"]==200 and .inbounds.vless.cycles["2026-08-01 00:00:00"]==200 and .inbounds.vless.limit.usedBytes==60 and .inbounds.vless.limit.quotaBytes==1000' "$TRAFFIC_FILE" >/dev/null
+jq -e '.accountingMultiplier==2 and .inbounds.vless.daily["2026-08-24"]==200 and .inbounds.vless.cycles["2026-08-01 00:00:00"]==200 and .inbounds.vless.limit==null and .inbounds.vless.users["email-id"].limit.usedBytes==30 and (has("limitsEnabled")|not)' "$TRAFFIC_FILE" >/dev/null
 tmp=$(temp_file); traffic_default_json >"$tmp"
 install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
 
@@ -85,7 +86,7 @@ traffic_collect
 [[ $RESTORE_CALLS == 1 ]]
 jq -e '
   .enabled==true and
-  .limitsEnabled==false and
+  (has("limitsEnabled")|not) and
   .accountingMultiplier==2 and
   .inbounds.vless.daily["2026-08-24"]==2147483648 and
   .inbounds.socks.daily["2026-08-24"]==4096 and
@@ -163,10 +164,6 @@ jq -e '.inbounds.socks==null' "$TRAFFIC_FILE" >/dev/null
 
 [[ $(traffic_format_bytes 0) == '0 B' ]]
 [[ $(traffic_format_bytes 1024) == '1.00 KB' ]]
-[[ $(traffic_format_percent 0 107374182400) == '0.00%' ]]
-[[ $(traffic_format_percent 1 107374182400) == '<0.01%' ]]
-[[ $(traffic_format_cycle '2026-08-24 11:10:16' '2026-09-24 11:10:16') == '2026-08-24 11:10 → 09-24 11:10' ]]
-[[ $(traffic_format_cycle '2026-12-24 11:10:16' '2027-01-24 11:10:16') == '2026-12-24 11:10 → 2027-01-24 11:10' ]]
 
 # Backups include the retained traffic file and restore it atomically with the
 # rest of xrayctl state.
@@ -187,145 +184,6 @@ restore_backup "$archive" >/dev/null
 jq -e '.inbounds["vless-new"].daily["2026-08-24"]==2147483648' "$TRAFFIC_FILE" >/dev/null
 BASH
 
-# Monthly limits start at the exact creation time, retain that anchor when the
-# quota changes, block only at the quota, and roll over at the next timestamp.
-XRAYCTL_TESTING=1 \
-XRAYCTL_TRAFFIC_BACKEND=nft \
-XRAYCTL_TRAFFIC_TODAY=2026-08-07 \
-XRAYCTL_TRAFFIC_NOW='2026-08-07 18:00:00' \
-XRAYCTL_CONFIG_DIR="$TMP/limits/cfg" \
-XRAYCTL_CONFIG_FILE="$TMP/limits/cfg/config.json" \
-XRAYCTL_META_FILE="$TMP/limits/meta.json" \
-XRAYCTL_TRAFFIC_FILE="$TMP/limits/traffic.json" \
-XRAYCTL_CERT_DIR="$TMP/limits/cfg/certs" \
-XRAYCTL_LOG_DIR="$TMP/limits/log" \
-XRAYCTL_LOCK_FILE="$TMP/limits/lock" \
-bash <<'BASH_LIMITS'
-set -Eeuo pipefail
-source ./xrayctl.sh
-write_default_config
-tmp=$(temp_file)
-jq '.inbounds=[{"protocol":"vless","tag":"vless","listen":"0.0.0.0","port":17225,"settings":{"clients":[]}}]' "$CONFIG_FILE" >"$tmp"
-mv -f "$tmp" "$CONFIG_FILE"
-traffic_set_backend nft
-traffic_set_enabled true
-traffic_sync_inventory
-! traffic_limits_are_enabled
-MOCK_COUNTERS=""
-traffic_read_counters() { printf '%s' "$MOCK_COUNTERS"; }
-traffic_rules_restore() { :; }
-traffic_limits_enable >/dev/null
-traffic_limits_are_enabled
-traffic_limits_disable >/dev/null
-! traffic_limits_are_enabled
-traffic_limits_enable >/dev/null
-traffic_limit_set vless 1 7 >/dev/null
-jq -e '
-  .limitsEnabled==true and
-  .inbounds.vless.limit.quotaBytes==1073741824 and
-  .inbounds.vless.limit.usedBytes==0 and
-  .inbounds.vless.limit.cycleStart=="2026-08-07 18:00:00" and
-  .inbounds.vless.limit.cycleEnd=="2026-09-07 18:00:00"
-' "$TRAFFIC_FILE" >/dev/null
-output=$(traffic_limits_show)
-grep -Fq '功能：已启用  ·  已设置：1  ·  已禁用：0' <<<"$output"
-grep -Fq '流量  0 B / 1.00 GB  (0.00%)' <<<"$output"
-grep -Fq '周期  2026-08-07 18:00 → 09-07 18:00' <<<"$output"
-
-MOCK_COUNTERS=$'vless\t268435456\n'
-traffic_collect
-! traffic_limit_is_blocked vless
-MOCK_COUNTERS=$'vless\t268435456\n'
-traffic_collect
-traffic_limit_is_blocked vless
-output=$(traffic_limits_show)
-grep -Fq '已设置：1  ·  已禁用：1' <<<"$output"
-grep -Fq '100.00%' <<<"$output"
-grep -Fq '已禁用' <<<"$output"
-output=$(traffic_show)
-grep -Fq '流量限制：已启用' <<<"$output"
-! grep -Fq '已禁用入站' <<<"$output"
-MOCK_COUNTERS=""
-traffic_limits_disable >/dev/null
-! traffic_limits_are_enabled
-! traffic_limit_is_blocked vless
-jq -e '.inbounds.vless.limit.usedBytes==1073741824' "$TRAFFIC_FILE" >/dev/null
-traffic_limits_enable >/dev/null
-traffic_limit_is_blocked vless
-! traffic_disable 2>/dev/null
-traffic_is_enabled
-
-# Changing only the quota must not restart the billing cycle.
-XRAYCTL_TRAFFIC_NOW='2026-08-20 12:34:56'
-XRAYCTL_TRAFFIC_TODAY=2026-08-20
-MOCK_COUNTERS=""
-traffic_limit_set vless 2 7 >/dev/null
-jq -e '
-  .inbounds.vless.limit.quotaBytes==2147483648 and
-  .inbounds.vless.limit.usedBytes==1073741824 and
-  .inbounds.vless.limit.cycleStart=="2026-08-07 18:00:00" and
-  .inbounds.vless.limit.cycleEnd=="2026-09-07 18:00:00"
-' "$TRAFFIC_FILE" >/dev/null
-
-XRAYCTL_TRAFFIC_NOW='2026-09-07 17:59:59'
-XRAYCTL_TRAFFIC_TODAY=2026-09-07
-traffic_sync_inventory
-jq -e '.inbounds.vless.limit.usedBytes==1073741824' "$TRAFFIC_FILE" >/dev/null
-XRAYCTL_TRAFFIC_NOW='2026-09-07 18:00:00'
-traffic_sync_inventory
-jq -e '
-  .inbounds.vless.limit.usedBytes==0 and
-  .inbounds.vless.limit.cycleStart=="2026-09-07 18:00:00" and
-  .inbounds.vless.limit.cycleEnd=="2026-10-07 18:00:00"
-' "$TRAFFIC_FILE" >/dev/null
-# Explicit minute precision applies on creation and when changing the schedule.
-XRAYCTL_TRAFFIC_NOW='2026-09-08 12:34:56'
-XRAYCTL_TRAFFIC_TODAY=2026-09-08
-traffic_limit_set vless 2 15 08:21 >/dev/null
-jq -e '.inbounds.vless.limit.anchorTime=="08:21:00" and
-  .inbounds.vless.limit.cycleEnd=="2026-09-15 08:21:00" and
-  .inbounds.vless.limit.cycleStart=="2026-09-07 18:00:00"' "$TRAFFIC_FILE" >/dev/null
-MOCK_COUNTERS=$'vless\t100\n'
-traffic_collect
-MOCK_COUNTERS=""
-traffic_limit_set vless 3 15 09:48 >/dev/null
-jq -e '.inbounds.vless.limit.anchorTime=="09:48:00" and
-  .inbounds.vless.limit.cycleEnd=="2026-09-15 09:48:00" and
-  .inbounds.vless.limit.usedBytes==200' "$TRAFFIC_FILE" >/dev/null
-before=$(cat "$TRAFFIC_FILE")
-for invalid in 24:00 12:60 8:21 08:21:30 nope; do
-  if traffic_limit_set vless 3 15 "$invalid" >/dev/null 2>&1; then exit 1; fi
-  [[ $(cat "$TRAFFIC_FILE") == "$before" ]]
-done
-# The creation path exposes both prompts, retries invalid times, and accepts
-# zero-padded days without emitting invalid JSON numbers.
-traffic_remove_limit_data vless
-traffic_limit_set vless <<<'4
-08
-25:00
-08:48' >/dev/null 2>&1
-jq -e '.inbounds.vless.limit.resetDay==8 and
-  .inbounds.vless.limit.anchorTime=="08:48:00" and
-  .inbounds.vless.limit.cycleEnd=="2026-10-08 08:48:00"' "$TRAFFIC_FILE" >/dev/null
-# Modifying through the interactive path must also read the time.
-traffic_limit_set vless <<<'5
-15
-18:30' >/dev/null
-jq -e '.inbounds.vless.limit.anchorTime=="18:30:00" and
-  .inbounds.vless.limit.cycleEnd=="2026-09-15 18:30:00"' "$TRAFFIC_FILE" >/dev/null
-# Exact minute boundary restores exhausted quotas, not a second earlier.
-tmp=$(temp_file)
-jq '.inbounds.vless.limit.usedBytes=.inbounds.vless.limit.quotaBytes' "$TRAFFIC_FILE" >"$tmp"
-mv -f "$tmp" "$TRAFFIC_FILE"
-XRAYCTL_TRAFFIC_NOW='2026-09-15 18:29:59'
-traffic_sync_inventory
-traffic_limit_is_blocked vless
-XRAYCTL_TRAFFIC_NOW='2026-09-15 18:30:00'
-traffic_sync_inventory
-if traffic_limit_is_blocked vless; then exit 1; fi
-jq -e '.inbounds.vless.limit.usedBytes==0 and
-  .inbounds.vless.limit.cycleEnd=="2026-10-15 18:30:00"' "$TRAFFIC_FILE" >/dev/null
-BASH_LIMITS
 
 # nft JSON snapshots are grouped by inbound tag across upload/download rules.
 XRAYCTL_TESTING=1 \
@@ -417,9 +275,8 @@ jq '.inbounds=[{"protocol":"vless","tag":"vless","listen":"0.0.0.0","port":17225
 mv -f "$tmp" "$CONFIG_FILE"
 traffic_init_file
 tmp=$(temp_file)
-jq '.enabled=true | .limitsEnabled=true | .backend="iptables" |
-  .inbounds.vless={protocol:"vless",port:17225,deleted:false,daily:{},limit:{enabled:true,quotaBytes:100,
-    anchorDay:24,anchorTime:"12:00:00",cycleStart:"2026-08-24 12:00:00",cycleEnd:"2026-09-24 12:00:00",usedBytes:100}}' \
+jq '.enabled=true | .backend="iptables" |
+  .inbounds.vless={protocol:"vless",port:17225,deleted:false,daily:{}}' \
   "$TRAFFIC_FILE" >"$tmp"
 install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
 
@@ -443,9 +300,10 @@ rows=$(traffic_read_iptables_counters)
 
 IPTABLES_MODE=write
 traffic_restore_iptables_rules
-drop_line=$(grep -nF -- '--comment xrayctl-traffic:block:vless -j DROP' "$CASE_DIR/iptables-calls" | head -1 | cut -d: -f1)
 count_line=$(grep -nF -- '--comment xrayctl-traffic:count:vless -j RETURN' "$CASE_DIR/iptables-calls" | head -1 | cut -d: -f1)
-[[ -n $drop_line && -n $count_line && $drop_line -lt $count_line ]]
+[[ -n $count_line ]]
+! grep -Fq -- 'xrayctl-traffic:block:' "$CASE_DIR/iptables-calls"
+! grep -Fq -- ' -j DROP' "$CASE_DIR/iptables-calls"
 BASH_IPTABLES
 
 # Rule generation covers ordinary TCP and SOCKS TCP+UDP, and the
@@ -479,7 +337,7 @@ jq '.inbounds=[
 traffic_set_backend nft
 traffic_init_file
 tmp=$(temp_file)
-jq '.limitsEnabled=true | .inbounds.vless={protocol:"vless",port:17225,deleted:false,daily:{},limit:{enabled:true,quotaBytes:100,anchorDay:24,anchorTime:"12:00:00",cycleStart:"2026-08-24 12:00:00",cycleEnd:"2026-09-24 12:00:00",usedBytes:100}}' "$TRAFFIC_FILE" >"$tmp"
+jq '.inbounds.vless={protocol:"vless",port:17225,deleted:false,daily:{}}' "$TRAFFIC_FILE" >"$tmp"
 install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
 
 nft() {
@@ -487,13 +345,12 @@ nft() {
   local IFS=' '; printf '%s\n' "$*" >>"$CASE_DIR/nft-calls"
 }
 traffic_rules_restore
-grep -Fq 'add rule inet xrayctl_traffic input tcp dport 17225 drop comment "xrayctl-traffic:block:vless"' "$CASE_DIR/nft-calls"
-grep -Fq 'add rule inet xrayctl_traffic output tcp sport 17225 drop comment "xrayctl-traffic:block:vless"' "$CASE_DIR/nft-calls"
 grep -Fq 'add rule inet xrayctl_traffic input tcp dport 17225 counter comment "xrayctl-traffic:count:vless"' "$CASE_DIR/nft-calls"
 grep -Fq 'add rule inet xrayctl_traffic input tcp dport 5000 counter comment "xrayctl-traffic:count:socks"' "$CASE_DIR/nft-calls"
 grep -Fq 'add rule inet xrayctl_traffic input udp dport 5000 counter comment "xrayctl-traffic:count:socks"' "$CASE_DIR/nft-calls"
 grep -Fq 'add rule inet xrayctl_traffic input tcp dport 24443 counter comment "xrayctl-traffic:count:http"' "$CASE_DIR/nft-calls"
-! grep -Fq 'xrayctl-traffic:block:socks' "$CASE_DIR/nft-calls"
+! grep -Fq 'xrayctl-traffic:block:' "$CASE_DIR/nft-calls"
+! grep -Fq ' drop ' "$CASE_DIR/nft-calls"
 ! grep -Fq 'udp dport 17225' "$CASE_DIR/nft-calls"
 
 platform_init_system() { printf systemd; }
@@ -509,18 +366,15 @@ traffic_timer_remove
 [[ ! -e $TRAFFIC_SYSTEMD_SERVICE && ! -e $TRAFFIC_SYSTEMD_TIMER ]]
 BASH_RUNTIME
 
-# Returning from either quota-menu state is a successful navigation action;
-# it must not bubble the preceding boolean probe's status up to traffic_menu.
+# Returning from the user-quota menu is a successful navigation action.
 XRAYCTL_TESTING=1 bash <<'BASH_MENU_RETURN'
 set -Eeuo pipefail
 source ./xrayctl.sh
 clear_screen() { :; }
 traffic_is_enabled() { return 0; }
 traffic_collect() { :; }
-traffic_limits_show() { :; }
-traffic_limits_are_enabled() { return 1; }
-traffic_limit_menu <<<"0" >/dev/null
-traffic_limits_are_enabled() { return 0; }
+traffic_users_show() { :; }
+traffic_user_menu() { :; }
 traffic_limit_menu <<<"0" >/dev/null
 BASH_MENU_RETURN
 
@@ -546,14 +400,14 @@ jq '.inbounds=[{"protocol":"vless","tag":"vless","listen":"0.0.0.0","port":17225
 mv -f "$tmp" "$CONFIG_FILE"
 traffic_init_file
 tmp=$(temp_file)
-jq '.inbounds.vless={protocol:"vless",port:17225,deleted:false,daily:{"2026-08-21":100,"2026-08-22":200,"2026-08-24":300},limit:{enabled:true,quotaBytes:1000,resetDay:7,anchorDay:7,anchorTime:"09:00:00",cycleStart:"2026-08-07 09:00:00",cycleEnd:"2026-09-07 09:00:00",usedBytes:600}}' "$TRAFFIC_FILE" >"$tmp"
+jq '.inbounds.vless={protocol:"vless",port:17225,deleted:false,daily:{"2026-08-21":100,"2026-08-22":200,"2026-08-24":300}}' "$TRAFFIC_FILE" >"$tmp"
 install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
 traffic_period_set 22 18:30 >/dev/null
 ! traffic_period_set 22 18:30:15 2>/dev/null
 [[ $(traffic_period_start '2026-08-22 18:29:59') == '2026-07-22 18:30:00' ]]
 [[ $(traffic_period_start '2026-08-22 18:30:00') == '2026-08-22 18:30:00' ]]
 [[ $(traffic_period_bounds '2026-08-24 12:00:00') == $'2026-08-22 18:30:00\t2026-09-22 18:30:00' ]]
-jq -e '.inbounds.vless.cycles["2026-08-22 18:30:00"]==500 and .inbounds.vless.limit.anchorDay==7 and .inbounds.vless.limit.usedBytes==600' "$TRAFFIC_FILE" >/dev/null
+jq -e '.inbounds.vless.cycles["2026-08-22 18:30:00"]==500 and .inbounds.vless.limit==null' "$TRAFFIC_FILE" >/dev/null
 output=$(traffic_show)
 grep -Fq '统计范围：2026-08-22 18:30:00 ～ 2026-09-22 18:30:00' <<<"$output"
 grep -Fq '全部入站：500 B' <<<"$output"
@@ -561,15 +415,12 @@ MOCK_COUNTERS=$'vless\t50'
 traffic_read_counters() { printf '%s\n' "$MOCK_COUNTERS"; }
 traffic_rules_restore() { :; }
 traffic_set_enabled true
-tmp=$(temp_file)
-jq '.inbounds.vless.limit.cycleStart="2026-09-07 09:00:00" | .inbounds.vless.limit.cycleEnd="2026-10-07 09:00:00" | .inbounds.vless.limit.usedBytes=600' "$TRAFFIC_FILE" >"$tmp"
-install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
 XRAYCTL_TRAFFIC_NOW='2026-09-22 18:29:59'
 XRAYCTL_TRAFFIC_TODAY=2026-09-22
 traffic_collect
 XRAYCTL_TRAFFIC_NOW='2026-09-22 18:30:00'
 traffic_collect
-jq -e '.inbounds.vless.cycles["2026-08-22 18:30:00"]==null and .inbounds.vless.cycles["2026-09-22 18:30:00"]==100 and .inbounds.vless.daily["2026-09-22"]==100 and (.inbounds.vless.daily|length)==1 and .inbounds.vless.limit.usedBytes==800' "$TRAFFIC_FILE" >/dev/null
+jq -e '.inbounds.vless.cycles["2026-08-22 18:30:00"]==null and .inbounds.vless.cycles["2026-09-22 18:30:00"]==100 and .inbounds.vless.daily["2026-09-22"]==100 and (.inbounds.vless.daily|length)==1 and .inbounds.vless.limit==null' "$TRAFFIC_FILE" >/dev/null
 [[ $(traffic_period_start '2026-02-28 23:59:59') == '2026-02-22 18:30:00' ]]
 traffic_period_set 31 00:00 >/dev/null
 [[ $(traffic_period_bounds '2026-02-28 23:59:59') == $'2026-02-28 00:00:00\t2026-03-31 00:00:00' ]]
@@ -652,8 +503,8 @@ traffic_collect
 jq -e '.totals.cycles=={"2026-09-22 18:30:00":100} and .totals.daily=={"2026-09-22":100}' "$TRAFFIC_FILE" >/dev/null
 BASH_AGGREGATE
 
-# Clearing a deleted inbound removes its entire retained record, even when
-# its old quota is enabled. Live SOCKS inbounds keep their quota settings.
+# Clearing a deleted inbound removes its entire retained record. Legacy
+# inbound quotas are discarded during schema migration; user limits remain.
 XRAYCTL_TESTING=1 \
 XRAYCTL_TRAFFIC_NOW='2026-08-24 12:00:00' \
 XRAYCTL_CONFIG_DIR="$TMP/clear-deleted/cfg" \
@@ -674,16 +525,15 @@ confirm() { return 0; }
 traffic_read_counters() { :; }
 traffic_rules_restore() { :; }
 for collecting in false true; do
-  for limited in false true; do
     traffic_default_json >"$TRAFFIC_FILE"
     tmp=$(temp_file)
-    jq --argjson collecting "$collecting" --argjson limited "$limited" '
+    jq --argjson collecting "$collecting" '
       .enabled=$collecting | .accountingMultiplier=2 | .periodsSeeded=true |
       del(.totals) |
       .inbounds={
         removed:{protocol:"vless",port:15078,deleted:true,
           daily:{"2026-08-24":100},cycles:{"2026-08-01 00:00:00":100},
-          limit:{enabled:$limited,quotaBytes:1000,usedBytes:100}},
+          limit:{enabled:true,quotaBytes:1000,usedBytes:100}},
         empty:{protocol:"vless",port:15079,deleted:true,daily:{},cycles:{},
           limit:{enabled:true,quotaBytes:1000,usedBytes:0}},
         socks:{protocol:"socks",port:26399,deleted:false,
@@ -702,8 +552,6 @@ for collecting in false true; do
     jq -e '.inbounds.removed==null and .totals.cycles["2026-08-01 00:00:00"]==300' "$TRAFFIC_FILE" >/dev/null
     [[ $(jq -S .inbounds.socks "$TRAFFIC_FILE") == "$live_before" ]]
     [[ $(jq -S .totals "$TRAFFIC_FILE") == "$totals_before" ]]
-    traffic_clear_tag_records empty >/dev/null
-    traffic_sync_inventory
     jq -e '.inbounds.empty==null' "$TRAFFIC_FILE" >/dev/null
     output=$(traffic_show)
     ! grep -Fq removed <<<"$output"
@@ -711,11 +559,8 @@ for collecting in false true; do
     traffic_clear_tag_records socks >/dev/null
     traffic_sync_inventory
     jq -e '.inbounds.socks.deleted==false and .inbounds.socks.daily=={} and
-      .inbounds.socks.cycles=={} and .inbounds.socks.limit.usedBytes==0' "$TRAFFIC_FILE" >/dev/null
-    [[ $(jq -S '.inbounds.socks.limit | del(.usedBytes)' "$TRAFFIC_FILE") == \
-       "$(jq -S '.limit | del(.usedBytes)' <<<"$live_before")" ]]
+      .inbounds.socks.cycles=={} and .inbounds.socks.limit==null' "$TRAFFIC_FILE" >/dev/null
     [[ $(jq -S .totals "$TRAFFIC_FILE") == "$totals_before" ]]
-  done
 done
 BASH_CLEAR_DELETED
 

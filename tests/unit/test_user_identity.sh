@@ -46,10 +46,10 @@ cp "$tmp/output" "$CONFIG_FILE"
   [[ $tag == a && $label == alice ]]
 )
 cat > "$TRAFFIC_FILE" <<'JSON'
-{"schema":1,"accountingMultiplier":2,"enabled":true,"backend":"iptables","inbounds":{"a":{"protocol":"vless","port":443,"daily":{"2026-02-01":123},"limit":{"enabled":true,"quotaBytes":1000,"usedBytes":345,"anchorDay":15,"anchorTime":"12:00:00","cycleStart":"2026-02-15 12:00:00","cycleEnd":"2026-03-15 12:00:00"}}}}
+{"schema":1,"accountingMultiplier":2,"enabled":true,"limitsEnabled":true,"backend":"iptables","inbounds":{"a":{"protocol":"vless","port":443,"daily":{"2026-02-01":123},"limit":{"enabled":true,"quotaBytes":1000,"usedBytes":345,"anchorDay":15,"anchorTime":"12:00:00","cycleStart":"2026-02-15 12:00:00","cycleEnd":"2026-03-15 12:00:00"},"users":{"legacy-user":{"label":"alice","limit":{"enabled":true,"quotaBytes":500,"usedBytes":20}}}}}}
 JSON
 traffic_init_file
-jq -e '.inbounds.a.daily["2026-02-01"]==123 and .inbounds.a.limit.usedBytes==345 and .inbounds.a.limit.cycleStart=="2026-02-15 12:00:00" and .inbounds.a.limit.cycleEnd=="2026-03-15 12:00:00"' "$TRAFFIC_FILE" >/dev/null
+jq -e '.inbounds.a.daily["2026-02-01"]==123 and .inbounds.a.limit==null and .inbounds.a.users["legacy-user"].limit.usedBytes==20 and (has("limitsEnabled")|not)' "$TRAFFIC_FILE" >/dev/null
 traffic_default_json > "$TRAFFIC_FILE"
 (
   platform_init_system() { printf 'systemd\n'; }
@@ -114,8 +114,58 @@ jq -e --arg a "$id_a" --arg b "$id_b" '.inbounds.a.users[$a].limit.usedBytes==0 
 traffic_user_prepare_config "$tmp/input" "$CONFIG_FILE" '127.0.0.1:32401'
 id_a=$(jq -r '.inbounds[0].settings.clients[0].email' "$CONFIG_FILE")
 id_b=$(jq -r '.inbounds[1].settings.clients[0].email' "$CONFIG_FILE")
-jq --arg a "$id_a" '.enabled=true | .limitsEnabled=true | .inbounds.a.users[$a]={label:"alice",limit:{enabled:true,quotaBytes:10,usedBytes:10}}' "$TRAFFIC_FILE" >"$tmp/state"
+jq --arg a "$id_a" '.enabled=true | .inbounds.a.users[$a]={label:"alice",cycles:{"2026-02-01 00:00:00":10},limit:{enabled:true,quotaBytes:10,usedBytes:10,anchorDay:15,anchorTime:"00:00:00",cycleStart:"2026-01-15 00:00:00",cycleEnd:"2026-02-15 00:00:00"}}' "$TRAFFIC_FILE" >"$tmp/state"
 cp "$tmp/state" "$TRAFFIC_FILE"
+user_display=$(traffic_users_show)
+[[ $user_display == *'流量限制'* ]]
+[[ $user_display == *'alice'* && $user_display == *'10 B / 10 B'* && $user_display == *'超额'* ]]
+[[ $user_display != *'剩余'* && $user_display != *'入站：'* && $user_display != *'流量统计：'* && $user_display != *'用户统计：'* && $user_display != *'仍有入站总额度生效'* ]]
+(
+  ensure_config() { :; }
+  select_inbound() { printf -v "$1" '%s' a; }
+  traffic_user_managed_config() { return 0; }
+  clear_screen() { :; }
+  pause() { :; }
+  run_menu_action() { printf '%s\t%s\t%s\n' "$1" "${2-}" "${3-}" >>"$tmp/menu-actions"; }
+  printf '1\n0\n' >"$tmp/menu-input"
+  traffic_user_menu <"$tmp/menu-input" >"$tmp/user-menu"
+  grep -Fq '1) 设置/修改额度' "$tmp/user-menu"
+  grep -Fq '2) 重置用户流量' "$tmp/user-menu"
+  grep -Fq '3) 取消用户额度' "$tmp/user-menu"
+  grep -Fq '流量：10 B / 10 B' "$tmp/user-menu"
+  grep -Fq '重置：每月 15 日 00:00' "$tmp/user-menu"
+  grep -Fq '周期：1月15日 00:00 ～ 2月15日 00:00' "$tmp/user-menu"
+  grep -Fq '状态：超额' "$tmp/user-menu"
+  grep -Fq $'traffic_user_limit_set\ta\talice' "$tmp/menu-actions"
+  jq '.inbounds[0].settings.clients += [{email:"second-id",xrayctlLabel:"bob"}]' "$CONFIG_FILE" >"$tmp/menu-config"
+  check_multi_user_menu() {
+    : >"$tmp/menu-actions"
+    printf '1\n2\n0\n' >"$tmp/menu-input"
+    CONFIG_FILE="$tmp/menu-config" traffic_user_menu <"$tmp/menu-input" >"$tmp/user-menu"
+  grep -Fxq '用户：alice' "$tmp/user-menu"
+  grep -Fxq '用户：bob' "$tmp/user-menu"
+  grep -Fq '1) alice' "$tmp/user-menu"
+  grep -Fq '2) bob' "$tmp/user-menu"
+  grep -Fq '重置周期：无' "$tmp/user-menu"
+  grep -Fq $'traffic_user_limit_set\ta\tbob' "$tmp/menu-actions"
+  : >"$tmp/menu-actions"
+  printf '2\n' >"$tmp/menu-input"
+  CONFIG_FILE="$tmp/menu-config" traffic_user_menu <"$tmp/menu-input" >"$tmp/user-menu"
+  [[ $(grep -Fc '用户：alice' "$tmp/user-menu") == 1 ]]
+    [[ ! -s $tmp/menu-actions ]]
+  }
+  check_multi_user_menu
+)
+cp "$TRAFFIC_FILE" "$tmp/before-unlimited-display"
+jq --arg a "$id_a" 'del(.inbounds.a.users[$a].limit)' "$TRAFFIC_FILE" >"$tmp/unlimited-display"
+cp "$tmp/unlimited-display" "$TRAFFIC_FILE"
+unlimited_display=$(traffic_users_show)
+[[ $unlimited_display == *'10 B / ∞'* ]]
+cp "$tmp/before-unlimited-display" "$TRAFFIC_FILE"
+jq '.inbounds += [{tag:"c",protocol:"socks",settings:{accounts:[]}}]' "$CONFIG_FILE" >"$tmp/with-socks"
+cp "$tmp/with-socks" "$CONFIG_FILE"
+user_display=$(traffic_users_show)
+[[ $user_display == *'c'* && $user_display == *'此入站暂不支持按用户统计'* && $user_display != *'socks'* ]]
 state_commit() { cp "$1" "$CONFIG_FILE"; }
 jq '.routing.rules += [{type:"field",user:["regexp:^new"],outboundTag:"direct"}] | .inbounds[0].settings.clients += [{email:"new-user",id:"123e4567-e89b-12d3-a456-426614174003"}]' "$CONFIG_FILE" >"$tmp/new-candidate"
 state_apply_candidate_file "$tmp/new-candidate" apply_candidate
@@ -132,7 +182,7 @@ cp "$TRAFFIC_FILE" "$tmp/before-limit-edit"
   traffic_user_reconcile() { :; }
   confirm() { return 0; }
   traffic_user_limit_set a alice 100 15 18:30
-  jq -e --arg id "$id_a" '.inbounds.a.users[$id].limit.usedBytes==10 and .inbounds.a.users[$id].limit.anchorDay==15 and .inbounds.a.users[$id].limit.anchorTime=="18:30:00"' "$TRAFFIC_FILE" >/dev/null
+  jq -e --arg id "$id_a" '(has("limitsEnabled")|not) and .inbounds.a.users[$id].limit.usedBytes==10 and .inbounds.a.users[$id].limit.anchorDay==15 and .inbounds.a.users[$id].limit.anchorTime=="18:30:00"' "$TRAFFIC_FILE" >/dev/null
   traffic_user_limit_remove a alice
   jq -e --arg id "$id_a" '.inbounds.a.users[$id].limit==null and .inbounds.a.users[$id].label=="alice"' "$TRAFFIC_FILE" >/dev/null
 )

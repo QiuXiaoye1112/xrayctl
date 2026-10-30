@@ -48,6 +48,10 @@ assert_eq 4 "$width" "UTF-8 table width for labels is incorrect"
 )
 
 assert_eq '标签    ' "$(print_table_cell '标签' 8)" "table cell padding is incorrect"
+infinity_width=''
+display_width infinity_width '0 B / ∞'
+assert_eq 7 "$infinity_width" "infinity symbol should occupy one column"
+assert_eq '0 B / ∞ ' "$(print_table_cell '0 B / ∞' 8)" "infinity cell padding is incorrect"
 assert_eq '子域名' "$(print_table_cell '子域名' 6)" "exact-width table cells should not gain padding"
 assert_eq '子域名' "$(print_table_cell_clipped '子域名' 6)" "exact-width UTF-8 cells should not be clipped"
 assert_eq 'abcdefghijklmnopqrstuvwx' \

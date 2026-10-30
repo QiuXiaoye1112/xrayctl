@@ -70,11 +70,10 @@ if rg -q 'unbound variable|命令在第|操作未完成' "$TMP/output"; then cat
 run_menu_action false >"$TMP/output" 2>&1
 rg -q '操作未完成' "$TMP/output"
 
-# Reproduce the quota-menu selector from the report with real shared helpers.
-traffic_set_enabled true
-traffic_set_limits_enabled true
+# Reproduce the user quota selector from the report with real shared helpers.
 traffic_collect() { :; }
-run_menu_action traffic_limit_set </dev/null >"$TMP/output" 2>&1
+traffic_user_enable() { :; }
+run_menu_action traffic_user_limit_set </dev/null >"$TMP/output" 2>&1
 if rg -q 'unbound variable|命令在第|操作未完成' "$TMP/output"; then cat "$TMP/output" >&2; exit 1; fi
 [[ $(cat "$CONFIG_FILE") == "$before" ]]
 printf 'input cancellation checks passed\n'

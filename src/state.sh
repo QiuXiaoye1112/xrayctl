@@ -455,7 +455,8 @@ state_commit() {
 
   ((traffic_locked == 0)) || traffic_lock_release
   _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
-  info "配置已应用。"
+  [[ ${XRAYCTL_QUIET_CONFIG_APPLIED:-0} == 1 ]] || info "配置已应用。"
+  return 0
 }
 
 apply_candidate() { state_commit "$1"; }

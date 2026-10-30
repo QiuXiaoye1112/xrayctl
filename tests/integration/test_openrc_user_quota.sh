@@ -28,7 +28,7 @@ jq --argjson port "$inbound" 'del(.api,.stats,.policy) | .inbounds[0].port=$port
 traffic_user_prepare_config "$TEST_ROOT/input.json" "$CONFIG_FILE" "127.0.0.1:$api"
 printf '%s\n' '{"schema":4,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' > "$META_FILE"
 id=$(jq -r '.inbounds[0].settings.clients[0].email' "$CONFIG_FILE")
-traffic_default_json | jq --arg id "$id" '.enabled=true | .limitsEnabled=true | .inbounds.a={daily:{},users:{($id):{label:"alice",limit:{enabled:true,quotaBytes:1,usedBytes:1,anchorDay:1,anchorTime:"00:00:00",cycleStart:"2026-01-01 00:00:00",cycleEnd:"2099-01-01 00:00:00"}}}}' > "$TRAFFIC_FILE"
+traffic_default_json | jq --arg id "$id" '.enabled=true | .inbounds.a={daily:{},users:{($id):{label:"alice",limit:{enabled:true,quotaBytes:1,usedBytes:1,anchorDay:1,anchorTime:"00:00:00",cycleStart:"2026-01-01 00:00:00",cycleEnd:"2099-01-01 00:00:00"}}}}' > "$TRAFFIC_FILE"
 cat >"$unit" <<UNIT
 #!/sbin/openrc-run
 command="$bin"

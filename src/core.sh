@@ -225,6 +225,11 @@ display_width() {
   local __var=$1 value=$2 char code computed_width=0 i
   local LC_ALL=C
   for ((i=0; i<${#value}; i++)); do
+    # The infinity symbol occupies one terminal column, unlike CJK text.
+    if [[ ${value:i:3} == $'\xe2\x88\x9e' ]]; then
+      ((computed_width+=1, i+=2))
+      continue
+    fi
     char=${value:i:1}
     printf -v code '%d' "'$char"
     ((code < 0)) && ((code+=256))

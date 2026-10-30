@@ -60,7 +60,7 @@ if [[ ${XRAYCTL_TEST_REALITY:-0} == 1 ]]; then
   mv "$TEST_ROOT/reality-client.json" "$TEST_ROOT/client.json"
 fi
 printf '%s\n' '{"schema":4,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' > "$META_FILE"
-traffic_default_json | jq '.enabled=true | .limitsEnabled=true' > "$TRAFFIC_FILE"
+traffic_default_json | jq '.enabled=true' > "$TRAFFIC_FILE"
 start_test_server() {
   "$bin" run -config "$CONFIG_FILE" >"$TEST_ROOT/server.log" 2>&1 & server_pid=$!
   for _ in {1..50}; do
@@ -118,44 +118,10 @@ if [[ ${XRAYCTL_TEST_DUPLICATE:-0} == 1 ]]; then
   traffic_user_collect_serialized
   jq -e --arg first "$id_a" --arg second "$id_other" '.inbounds.a.users[$first].limit.usedBytes>0 and .inbounds.b.users[$second].uplinkBytes>0 and .inbounds.b.users[$second].downlinkBytes>0' "$TRAFFIC_FILE" >/dev/null
 fi
-if [[ ${XRAYCTL_TEST_FIREWALL:-0} == 1 ]]; then
-  # The inbound and user limits are independent: resetting one cannot bypass
-  # an exhausted limit at the other level.
-  jq '.inbounds.a.limit={enabled:true,quotaBytes:1,usedBytes:1,anchorDay:1,resetDay:1,anchorTime:"00:00:00",cycleStart:"2026-01-01 00:00:00",cycleEnd:"2099-01-01 00:00:00"}' "$TRAFFIC_FILE" >"$TEST_ROOT/state"
-  cp "$TEST_ROOT/state" "$TRAFFIC_FILE"
-  traffic_rules_restore_serialized
-  respond
-  if fetch_blocked "$bob" >/dev/null 2>&1; then printf 'not ok - exhausted inbound was not blocked\n' >&2; exit 1; fi
-  restart_test_client
-  jq '.inbounds.a.limit.usedBytes=0' "$TRAFFIC_FILE" >"$TEST_ROOT/state"
-  cp "$TEST_ROOT/state" "$TRAFFIC_FILE"
-  traffic_rules_restore_serialized
-  if fetch_blocked "$alice" >/dev/null 2>&1; then printf 'not ok - inbound reset bypassed the user limit\n' >&2; exit 1; fi
-  restart_test_client
-  if [[ $(fetch "$bob") != hello ]]; then printf 'not ok - inbound reset did not restore Bob\n' >&2; exit 1; fi
-  wait "$listener_pid" || true; listener_pid=''
-  jq '.inbounds.a.limit.usedBytes=1' "$TRAFFIC_FILE" >"$TEST_ROOT/state"
-  cp "$TEST_ROOT/state" "$TRAFFIC_FILE"
-  traffic_rules_restore_serialized
-  respond
-  traffic_user_reset a alice
-  if fetch_blocked "$alice" >/dev/null 2>&1; then printf 'not ok - user reset bypassed the inbound limit\n' >&2; exit 1; fi
-  restart_test_client
-  jq '.inbounds.a.limit.usedBytes=0' "$TRAFFIC_FILE" >"$TEST_ROOT/state"
-  cp "$TEST_ROOT/state" "$TRAFFIC_FILE"
-  traffic_rules_restore_serialized
-  if [[ $(fetch "$alice") != hello ]]; then printf 'not ok - Alice could not connect after both resets\n' >&2; exit 1; fi
-  wait "$listener_pid" || true; listener_pid=''
-  # Remove the one-byte inbound quota used by this scenario before the next
-  # user-only checks; subsequent real traffic would legitimately exhaust it.
-  traffic_remove_limit_data a
-  traffic_rules_restore_serialized
-else
 traffic_user_reset a alice
 respond
 if [[ $(fetch "$alice") != hello ]]; then printf 'not ok - Alice could not connect after reset\n' >&2; exit 1; fi
 wait "$listener_pid" || true; listener_pid=''
-fi
 jq -e '[.routing.rules[] | select((.ruleTag // "")|startswith("xrayctl-user-limit:"))] | length==0' "$CONFIG_FILE" >/dev/null
 # The previous successful request must be charged without duplicating earlier
 # samples. If the API disappears while the user is blocked, inbound

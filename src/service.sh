@@ -329,16 +329,15 @@ install_quick_command() {
 }
 
 show_status() {
-  local traffic_state quota_state backend
+  local traffic_state backend
   heading "Xray 状态"
   if xray_installed; then "$XRAY_BIN" version | sed -n '1,2p'; else printf 'Xray: 未安装\n'; fi
   if service_exists; then platform_service_status 2>/dev/null | sed -n '1,12p' || true
   else printf '%s 服务: 未安装\n' "$(platform_init_system 2>/dev/null || printf unknown)"; fi
   [[ -f $CONFIG_FILE ]] && printf '入站数: %s\n配置: %s\n' "$(jq '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?')" "$CONFIG_FILE"
   if traffic_is_enabled; then traffic_state="运行中"; else traffic_state="已停止"; fi
-  if traffic_limits_are_enabled; then quota_state="已启用"; else quota_state="未启用"; fi
   backend=$(traffic_recorded_backend); backend=${backend:-未设置}
-  printf '流量统计: %s（%s）\n流量限制: %s（已设置 %s 个入站）\n' "$traffic_state" "$backend" "$quota_state" "$(traffic_limit_count)"
+  printf '流量统计: %s（%s）\n用户额度: 已设置 %s 个用户\n' "$traffic_state" "$backend" "$(traffic_user_limit_count)"
 }
 
 service_action() {

@@ -466,12 +466,13 @@ service_menu() {
     heading "服务管理"
     printf '状态: %s  |  开机自启: %s  |  Xray: %s\n\n' \
       "$(service_state_summary)" "$(startup_state_summary)" "$(xray_version_summary)"
-    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装 Xray\n0) 返回\n'
+    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装 Xray\n6) BBR启用/关闭\n0) 返回\n'
     read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action toggle_service_running; pause;; 2) run_menu_action service_action restart; pause;;
       3) run_menu_action toggle_service_startup; pause;; 4) run_menu_action show_logs 100; pause;;
       5) run_menu_action install_or_update_xray; pause;;
+      6) run_menu_action manage_bbr; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -492,21 +493,20 @@ traffic_menu() {
   while true; do
     clear_screen
     traffic_show || true
-    printf '\n1) 刷新\n2) 流量限制\n3) 清空指定入站记录\n4) 清空全部入站流量记录\n'
-    if traffic_is_enabled; then printf '5) 停止流量统计\n'; else printf '5) 开启流量统计\n'; fi
-    printf '6) 设置月度统计起点\n'
+    printf '\n1) 刷新\n2) 清空指定入站记录\n3) 清空全部入站流量记录\n'
+    if traffic_is_enabled; then printf '4) 停止流量统计\n'; else printf '4) 开启流量统计\n'; fi
+    printf '5) 设置月度统计起点\n'
     printf '0) 返回\n'
     read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action traffic_collect;;
-      2) traffic_limit_menu;;
-      3) run_menu_action traffic_clear_tag_records; pause;;
-      4) run_menu_action traffic_clear_all_records; pause;;
-      5)
+      2) run_menu_action traffic_clear_tag_records; pause;;
+      3) run_menu_action traffic_clear_all_records; pause;;
+      4)
         if traffic_is_enabled; then run_menu_action traffic_disable; else run_menu_action traffic_enable; fi
         pause
         ;;
-      6) run_menu_action traffic_period_set; pause;;
+      5) run_menu_action traffic_period_set; pause;;
       0) return;;
       *) warn "无效选项。"; pause;;
     esac
@@ -518,48 +518,80 @@ traffic_limit_menu() {
   while true; do
     if traffic_is_enabled; then run_menu_action traffic_collect || true; fi
     clear_screen
-    traffic_limits_show || true
-    if traffic_limits_are_enabled; then
-      printf '操作\n1) 刷新状态\n2) 设置/修改入站额度\n3) 取消入站额度\n4) 关闭流量限制\n5) 用户流量额度\n0) 返回\n'
-    else
-      printf '操作\n1) 启用流量限制\n0) 返回\n'
-    fi
+    traffic_users_show || true
+    printf '\n1) 刷新流量\n2) 管理用户额度\n0) 返回\n'
     read -r -p "请选择: " choice || { cancel_input; return 0; }
-    if traffic_limits_are_enabled; then
-      case $choice in
-        1) continue;;
-        2) run_menu_action traffic_limit_set; pause;;
-        3) run_menu_action traffic_limit_remove; pause;;
-        4) run_menu_action traffic_limits_disable; pause;;
-        5) traffic_user_menu;;
-        0) return 0;;
-        *) warn "无效选项。"; pause;;
-      esac
-    else
-      case $choice in
-        1) run_menu_action traffic_limits_enable; pause;;
-        0) return 0;;
-        *) warn "无效选项。"; pause;;
-      esac
-    fi
+    case $choice in
+      1) continue;;
+      2) traffic_user_menu;;
+      0) return 0;;
+      *) warn "无效选项。"; pause;;
+    esac
   done
 }
 
 traffic_user_menu() {
-  local choice
-  if ! run_menu_action traffic_user_enable; then pause; return; fi
+  local tag label choice current_bytes used quota enabled status id period_start record start end day clock index selected
+  local -a user_labels=()
+  ensure_config
+  select_inbound tag '^vless$' || { pause; return 0; }
+  if ! traffic_user_managed_config; then
+    run_menu_action traffic_user_enable
+    if ! traffic_user_managed_config; then pause; return 0; fi
+  fi
   while true; do
     clear_screen
-    traffic_users_show || true
-    printf '\n1) 查看/刷新用户流量\n2) 设置/修改用户额度\n3) 取消用户额度\n4) 重置指定用户流量\n0) 返回\n'
+    mapfile -t user_labels < <(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag and .protocol=="vless") | .settings.clients[]? | (.xrayctlLabel // .email // empty)' "$CONFIG_FILE")
+    if ((${#user_labels[@]} == 0)); then warn '该入站没有用户。'; pause; return 0; fi
+    IFS=$'\t' read -r period_start _ < <(traffic_period_bounds "$(traffic_now)")
+    heading "$tag"
+    for index in "${!user_labels[@]}"; do
+    label=${user_labels[$index]}
+    id=$(traffic_user_id "$tag" "$label")
+    record=$(jq -c --arg tag "$tag" --arg id "$id" '.inbounds[$tag].users[$id] // {}' "$TRAFFIC_FILE") || return 1
+    current_bytes=$(jq -r --arg periodStart "$period_start" '.cycles[$periodStart] // 0' <<<"$record")
+    enabled=$(jq -r '.limit.enabled // false' <<<"$record")
+    used=$(jq -r '.limit.usedBytes // 0' <<<"$record")
+    quota=$(jq -r '.limit.quotaBytes // 0' <<<"$record")
+    printf '用户：%s\n' "$label"
+    if [[ $enabled == true && $quota =~ ^[0-9]+$ ]] && ((quota > 0)); then
+      if ((used >= quota)); then status='超额'; else status='正常'; fi
+      start=$(jq -r '.limit.cycleStart // ""' <<<"$record")
+      end=$(jq -r '.limit.cycleEnd // ""' <<<"$record")
+      day=$(jq -r '.limit.anchorDay // .limit.resetDay // "-"' <<<"$record")
+      clock=$(jq -r '.limit.anchorTime // ""' <<<"$record")
+      printf '流量：%s / %s\n重置：每月 %s 日 %s\n' "$(traffic_format_bytes "$used")" "$(traffic_format_bytes "$quota")" "$day" "${clock:0:5}"
+      if traffic_validate_timestamp "$start" && traffic_validate_timestamp "$end"; then
+        printf '周期：%s月%s日 %s ～ %s月%s日 %s\n' "$((10#${start:5:2}))" "$((10#${start:8:2}))" "${start:11:5}" "$((10#${end:5:2}))" "$((10#${end:8:2}))" "${end:11:5}"
+      fi
+      printf '状态：%s\n' "$status"
+    else
+      printf '流量：%s / ∞\n重置周期：无\n状态：正常\n' "$(traffic_format_bytes "$current_bytes")"
+    fi
+    printf '\n'
+    done
+    printf '1) 设置/修改额度\n2) 重置用户流量\n3) 取消用户额度\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_input; return 0; }
+    case $choice in 0) return 0;; 1|2|3) ;; *) warn '无效选项。'; pause; continue;; esac
+    if ((${#user_labels[@]} == 1)); then
+      label=${user_labels[0]}
+    else
+      printf '\n选择用户\n'
+      for index in "${!user_labels[@]}"; do printf '  %s) %s\n' "$((index+1))" "${user_labels[$index]}"; done
+      while true; do
+        read -r -p '输入用户序号: ' selected || { cancel_input; pause; return 0; }
+        if [[ $selected =~ ^[0-9]+$ ]] && ((${#selected} <= 6)) && ((10#$selected >= 1 && 10#$selected <= ${#user_labels[@]})); then
+          label=${user_labels[$((10#$selected-1))]}
+          break
+        fi
+        warn '无效的用户序号。'
+      done
+      [[ -n $selected ]] || continue
+    fi
     case $choice in
-      1) run_menu_action traffic_collect || true;;
-      2) run_menu_action traffic_user_limit_set; pause;;
-      3) run_menu_action traffic_user_limit_remove; pause;;
-      4) run_menu_action traffic_user_reset; pause;;
-      0) return;;
-      *) warn '无效选项。'; pause;;
+      1) run_menu_action traffic_user_limit_set "$tag" "$label"; pause;;
+      2) run_menu_action traffic_user_reset "$tag" "$label"; pause;;
+      3) run_menu_action traffic_user_limit_remove "$tag" "$label"; pause;;
     esac
   done
 }
@@ -571,11 +603,11 @@ main_menu() {
     printf '%sXray Linux 管理脚本%s  v%s\n' "$C_BOLD$C_BLUE" "$C_RESET" "$XRAYCTL_VERSION"
     show_main_summary
     show_main_inbounds
-    printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 流量信息\n5) BBR启用/关闭\n6) 服务管理\n7) 卸载\n0) 退出\n'
+    printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 流量限制\n5) 流量信息\n6) 服务管理\n7) 卸载\n0) 退出\n'
     read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
-      1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_menu;;
-      5) run_menu_action manage_bbr; pause;; 6) service_menu;;
+      1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_limit_menu;;
+      5) traffic_menu;; 6) service_menu;;
       7) clear_screen; run_menu_action uninstall_xray; pause;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
@@ -595,9 +627,6 @@ xrayctl - Xray Linux 管理脚本
   xrayctl traffic [开始日期] [结束日期] 查看当前周期内按入站累计流量
   xrayctl traffic period [show|set <日期> <HH:MM>] 查看/设置统一月度统计起点
   xrayctl traffic enable|disable       开启/停止流量统计
-  xrayctl traffic limit show|enable|disable
-  xrayctl traffic limit set <标签> <GB> <重置日> [HH:MM]
-  xrayctl traffic limit remove <标签>
   xrayctl traffic user enable
   xrayctl traffic user show
   xrayctl traffic user set <入站> <用户> <GB> <重置日> [HH:MM]
@@ -673,16 +702,6 @@ dispatch() {
           ;;
         reset)
           if [[ ${2-} == --all ]]; then traffic_clear_all_records; else traffic_clear_tag_records "${2-}"; fi
-          ;;
-        limit)
-          case ${2:-show} in
-            show) traffic_limits_show;;
-            enable|start) traffic_limits_enable;;
-            disable|stop) traffic_limits_disable;;
-            set) traffic_limit_set "${3-}" "${4-}" "${5-}" "${6-}";;
-            remove|delete) traffic_limit_remove "${3-}";;
-            *) die "未知 traffic limit 子命令：${2}";;
-          esac
           ;;
         user)
           case ${2:-show} in

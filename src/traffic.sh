@@ -1,7 +1,7 @@
 # shellcheck shell=bash
-# Per-inbound rolling traffic accounting and optional monthly quotas. Linux
-# packet counters provide the samples; only the current display period is
-# retained while quota cycles keep their independent local timestamps.
+# Per-inbound rolling traffic accounting and per-user monthly quotas. Linux
+# packet counters provide inbound samples; only the current display period is
+# retained while each user's quota cycle keeps its independent local timestamp.
 
 TRAFFIC_NFT_TABLE="xrayctl_traffic"
 TRAFFIC_IPTABLES_IN_CHAIN="XRAYCTL_TRAFFIC_IN"
@@ -253,7 +253,7 @@ traffic_user_update_samples() {
 }
 
 traffic_user_collect_locked() {
-  local address before after samples previous
+  local address before after samples
   address=$(jq -r 'if .xrayctlUserStats.enabled==true then (.api.listen // "") else "" end' "$CONFIG_FILE") || return 1
   [[ -n $address ]] || return 0
   if ! jq -e --slurpfile traffic "$TRAFFIC_FILE" '
@@ -272,10 +272,6 @@ traffic_user_collect_locked() {
   samples=$(traffic_user_read_samples "$address") || { warn "Xray 用户统计 API 不可用，本次保留已有用户流量及限制。"; return 1; }
   after=$(traffic_user_core_epoch) || { warn "无法确认 Xray 进程身份，用户流量采集已跳过。"; return 1; }
   [[ $before == "$after" ]] || { warn "采集期间 Xray 已重启，本次用户流量采集已跳过。"; return 1; }
-  previous=$(jq -r '.userCoreEpoch // ""' "$TRAFFIC_FILE") || return 1
-  if [[ -n $previous && $previous != "$before" ]]; then
-    warn "Xray 已重启；重启前最后一次采集之后的用户流量无法追回。"
-  fi
   traffic_user_update_samples "$samples" "$before"
 }
 
@@ -338,7 +334,7 @@ traffic_user_reconcile_locked() {
   [[ -f $TRAFFIC_FILE ]] || return 0
   traffic_lock_acquire || return 1
   # Capture the latest counters before deriving the rules. A failed API read
-  # leaves the existing quota state untouched, so it cannot clear a ban.
+  # leaves the existing user quota state untouched, so it cannot clear a ban.
   traffic_user_collect_locked || true
   candidate=$(temp_file) || { traffic_lock_release; return 1; }
   prepared=$(temp_file) || { rm -f "$candidate"; traffic_lock_release; return 1; }
@@ -357,7 +353,7 @@ traffic_user_reconcile_locked() {
     [ .inbounds[]? | select(.protocol=="vless") | .tag as $tag | .settings.clients[]? |
       select(.xrayctlLabel != null and (.email|type)=="string") | .email as $id |
       $s.inbounds[$tag].users[$id].limit as $limit |
-      select($s.limitsEnabled==true and $limit.enabled==true and ($limit.quotaBytes // 0)>0 and ($limit.usedBytes // 0)>=($limit.quotaBytes // 0)) |
+      select($limit.enabled==true and ($limit.quotaBytes // 0)>0 and ($limit.usedBytes // 0)>=($limit.quotaBytes // 0)) |
       {type:"field",ruleTag:("xrayctl-user-limit:"+$id),inboundTag:[$tag],user:[$id],outboundTag:"xrayctl-user-deny"}
     ] as $rules |
     .routing=(.routing // {rules:[]}) |
@@ -462,7 +458,6 @@ traffic_user_limit_set() {
   local tag=${1-} label=${2-} quota_gb=${3-} reset_day=${4-} reset_time=${5-}
   local id quota now existing old_day old_time anchor_time cycle_end tmp rc=0 interactive=0
   traffic_user_require_manager
-  traffic_limits_are_enabled || { warn "请先启用流量限制。"; return 1; }
   traffic_user_enable || return 1
   traffic_user_select tag label "$tag" "$label" || return 0
   id=$(traffic_user_id "$tag" "$label")
@@ -558,30 +553,49 @@ traffic_user_reset() {
 }
 
 traffic_users_show() {
-  local tag label id used quota remaining start end enabled status percentage period_start period_end current_bytes current_tag=""
+  local filter=${1-} tag protocol id label used quota start end enabled status period_start current_bytes current_tag="" user_state
   [[ -r $CONFIG_FILE && -r $TRAFFIC_FILE ]] || { warn "用户流量统计尚未配置。"; return 1; }
-  traffic_user_managed_config || { warn "请先运行 xrayctl traffic user enable 配置用户流量统计。"; return 1; }
-  IFS=$'\t' read -r period_start period_end < <(traffic_period_bounds "$(traffic_now)")
-  heading '用户流量额度'
-  while IFS=$'\t' read -r tag id label current_bytes used quota start end enabled; do
-    [[ -n $tag && -n $id ]] || continue
-    if [[ $tag != "$current_tag" ]]; then printf '\n入站: %s\n' "$tag"; current_tag=$tag; fi
-    if [[ $enabled == true && $quota =~ ^[0-9]+$ && $quota -gt 0 ]]; then
-      remaining=$((quota > used ? quota-used : 0))
-      if ((used >= quota)); then status='超额'; else status='正常'; fi
-      traffic_limits_are_enabled || status='限制已关闭'
-      percentage=$(traffic_format_percent "$used" "$quota")
-      printf '  %s | 已用 %s / %s | 剩余 %s | %s | %s\n    周期: %s 至 %s\n' "$label" "$(traffic_format_bytes "$used")" "$(traffic_format_bytes "$quota")" "$(traffic_format_bytes "$remaining")" "$percentage" "$status" "$start" "$end"
-    else
-      printf '  %s | 已用 %s | 额度: 未限制\n    周期: %s 至 %s\n' "$label" "$(traffic_format_bytes "$current_bytes")" "$period_start" "$period_end"
+  IFS=$'\t' read -r period_start _ < <(traffic_period_bounds "$(traffic_now)")
+  traffic_user_managed_config && user_state='已配置' || user_state='未配置'
+  heading '流量限制'
+  while IFS=$'\t' read -r tag protocol id label current_bytes used quota start end enabled; do
+    [[ -n $tag ]] || continue
+    if [[ $tag != "$current_tag" ]]; then
+      printf '\n%s\n' "$tag"
+      print_table_cell '用户名称' 20; printf ' | '
+      print_table_cell '已用流量 / 月度额度' 30; printf ' | '
+      print_table_cell '状态' 6; printf '\n'
+      printf '%s\n' '---------------------------------------------------------------'
+      current_tag=$tag
     fi
-  done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --arg periodStart "$period_start" '
-    $state[0] as $s | .inbounds[]? | select(.protocol=="vless") | .tag as $tag |
-    .settings.clients[]? | .email as $id | ($s.inbounds[$tag].users[$id] // {}) as $u |
-    [$tag,$id,(.xrayctlLabel // .email // ""),($u.cycles[$periodStart] // 0),
-      ($u.limit.usedBytes // 0),($u.limit.quotaBytes // 0),($u.limit.cycleStart // "-"),($u.limit.cycleEnd // "-"),($u.limit.enabled // false)] | @tsv
+    if [[ $protocol != vless ]]; then
+      printf '   此入站暂不支持按用户统计\n'
+      continue
+    fi
+    [[ -n $id ]] || continue
+    if [[ $enabled == true && $quota =~ ^[0-9]+$ && $quota -gt 0 ]]; then
+      if ((used >= quota)); then status='超额'; else status='正常'; fi
+      current_bytes=$used
+      quota=$(traffic_format_bytes "$quota")
+    else
+      quota='∞'
+      status='正常'
+    fi
+    if [[ $user_state == '已配置' ]]; then used=$(traffic_format_bytes "$current_bytes"); else used='未统计'; fi
+    print_table_cell_clipped "$label" 20; printf ' | '
+    print_table_cell_clipped "$used / $quota" 30; printf ' | '
+    print_table_cell "$status" 6; printf '\n'
+  done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --arg periodStart "$period_start" --arg filter "$filter" '
+    $state[0] as $s | .inbounds[]? | select($filter=="" or .tag==$filter) | .tag as $tag | .protocol as $protocol |
+    if $protocol=="vless" then
+      if ((.settings.clients // [])|length)==0 then [$tag,$protocol,"","",0,0,0,"-","-",false] | @tsv
+      else .settings.clients[] | .email as $id | ($s.inbounds[$tag].users[$id] // {}) as $u |
+        [$tag,$protocol,$id,(.xrayctlLabel // .email // ""),($u.cycles[$periodStart] // 0),
+          ($u.limit.usedBytes // 0),($u.limit.quotaBytes // 0),($u.limit.cycleStart // "-"),($u.limit.cycleEnd // "-"),($u.limit.enabled // false)] | @tsv
+      end
+    else [$tag,$protocol,"","",0,0,0,"-","-",false] | @tsv end
   ' "$CONFIG_FILE")
-  [[ -n $current_tag ]] || info "没有 VLESS 用户。"
+  [[ -n $current_tag ]] || info "没有可显示的入站。"
 }
 
 traffic_require_root() {
@@ -723,7 +737,7 @@ traffic_period_bounds() {
 }
 
 traffic_default_json() {
-  printf '%s\n' '{"schema":1,"accountingMultiplier":2,"enabled":false,"limitsEnabled":false,"backend":"","lastCollectedAt":"","period":{"day":1,"time":"00:00:00"},"periodsSeeded":false,"inbounds":{}}'
+  printf '%s\n' '{"schema":1,"accountingMultiplier":2,"enabled":false,"backend":"","lastCollectedAt":"","period":{"day":1,"time":"00:00:00"},"periodsSeeded":false,"inbounds":{}}'
 }
 
 # Install a complete JSON file by rename in the same directory so readers
@@ -760,10 +774,15 @@ traffic_init_file_locked() {
     traffic_default_json >"$tmp" || { rm -f "$tmp"; return 1; }
     traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
-  elif ! jq -e '.schema==1 and (.enabled|type)=="boolean" and (.limitsEnabled|type)=="boolean" and (.backend|type)=="string" and (.lastCollectedAt|type)=="string" and (.period.day|type)=="number" and (.period.time|type)=="string" and (.periodsSeeded|type)=="boolean"' "$TRAFFIC_FILE" >/dev/null 2>&1; then
+  elif ! jq -e '.schema==1 and (.enabled|type)=="boolean" and (.backend|type)=="string" and (.lastCollectedAt|type)=="string" and (.period.day|type)=="number" and (.period.time|type)=="string" and (.periodsSeeded|type)=="boolean"' "$TRAFFIC_FILE" >/dev/null 2>&1; then
     tmp=$(temp_file)
-    jq '.schema=1 | .enabled=(.enabled==true) | .limitsEnabled=(.limitsEnabled==true) | .backend=(.backend // "") | .lastCollectedAt=(.lastCollectedAt // "") | .period=(.period // {day:1,time:"00:00:00"}) | .periodsSeeded=(.periodsSeeded==true) | .inbounds=(if (.inbounds|type)=="object" then .inbounds else {} end)' \
+    jq '.schema=1 | .enabled=(.enabled==true) | .backend=(.backend // "") | .lastCollectedAt=(.lastCollectedAt // "") | .period=(.period // {day:1,time:"00:00:00"}) | .periodsSeeded=(.periodsSeeded==true) | .inbounds=(if (.inbounds|type)=="object" then .inbounds else {} end) | del(.limitsEnabled) | .inbounds |= with_entries(del(.value.limit))' \
       "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
+    traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+  elif jq -e 'has("limitsEnabled") or any(.inbounds[]?; type=="object" and has("limit"))' "$TRAFFIC_FILE" >/dev/null 2>&1; then
+    tmp=$(temp_file)
+    jq 'del(.limitsEnabled) | .inbounds |= with_entries(del(.value.limit))' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
     traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
   fi
@@ -779,21 +798,6 @@ traffic_set_enabled() {
   traffic_lock_acquire || return 1
   tmp=$(temp_file)
   jq --argjson enabled "$enabled" '.enabled=$enabled' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
-  rm -f "$tmp"; traffic_lock_release
-  return "$rc"
-}
-
-traffic_limits_are_enabled() {
-  [[ -f $TRAFFIC_FILE ]] && jq -e '.limitsEnabled==true' "$TRAFFIC_FILE" >/dev/null 2>&1
-}
-
-traffic_set_limits_enabled() {
-  local enabled=$1 tmp rc=0
-  traffic_init_file
-  traffic_lock_acquire || return 1
-  tmp=$(temp_file)
-  jq --argjson enabled "$enabled" '.limitsEnabled=$enabled' "$TRAFFIC_FILE" >"$tmp" || rc=1
   if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
   return "$rc"
@@ -821,30 +825,6 @@ traffic_inventory_json() {
   else
     printf '{}\n'
   fi
-}
-
-traffic_rolled_limits_json() {
-  local now=$1 tag quota reset_day anchor_day anchor_time cycle_start cycle_end used next_limit_boundary
-  traffic_init_file
-  while IFS=$'\t' read -r tag quota anchor_day anchor_time cycle_start cycle_end used; do
-    [[ -n $tag ]] || continue
-    if ! traffic_validate_timestamp "$cycle_start" || ! traffic_validate_timestamp "$cycle_end"; then continue; fi
-    while traffic_iso_compare "$now" ge "$cycle_end"; do
-      cycle_start=$cycle_end
-      next_limit_boundary=$(traffic_limit_next_timestamp "$cycle_start" "$anchor_day" "$anchor_time") || break 2
-      cycle_end=$next_limit_boundary
-      used=0
-    done
-    reset_day=$anchor_day
-    jq -nc --arg key "$tag" --argjson quota "$quota" --argjson resetDay "$reset_day" --argjson anchorDay "$anchor_day" \
-      --arg anchorTime "$anchor_time" --arg cycleStart "$cycle_start" --arg cycleEnd "$cycle_end" --argjson used "$used" \
-      '{key:$key,value:{enabled:true,quotaBytes:$quota,resetDay:$resetDay,anchorDay:$anchorDay,anchorTime:$anchorTime,cycleStart:$cycleStart,cycleEnd:$cycleEnd,usedBytes:$used}}'
-  done < <(jq -r '
-    .inbounds | to_entries[]? | select(.value.limit.enabled==true) |
-    [.key,((.value.limit.quotaBytes // 0)|floor|tostring),((.value.limit.resetDay // .value.limit.anchorDay // 0)|floor|tostring),
-     (.value.limit.anchorTime // ""),(.value.limit.cycleStart // ""),(.value.limit.cycleEnd // ""),
-     ((.value.limit.usedBytes // 0)|floor|tostring)] | @tsv
-  ' "$TRAFFIC_FILE") | jq -s 'from_entries'
 }
 
 # Existing files contain daily totals only. Assign each old boundary day to
@@ -878,31 +858,26 @@ traffic_seed_periods() {
 }
 
 traffic_update_file() {
-  local samples=${1:-'{}'} mark_collected=${2:-1} today cutoff now period_start inventory limits tmp
+  local samples=${1:-'{}'} mark_collected=${2:-1} today cutoff now period_start inventory tmp
   traffic_init_file
   traffic_seed_periods || return 1
   today=$(traffic_today); cutoff=$(traffic_retention_start); now=$(traffic_now)
   period_start=$(traffic_period_start "$now") || return 1
   inventory=$(traffic_inventory_json)
-  limits=$(traffic_rolled_limits_json "$now")
   tmp=$(temp_file)
   jq --arg today "$today" --arg cutoff "$cutoff" --arg periodStart "$period_start" --arg now "$now" --argjson markCollected "$mark_collected" \
-     --argjson samples "$samples" --argjson inventory "$inventory" --argjson limits "$limits" '
+     --argjson samples "$samples" --argjson inventory "$inventory" '
     .inbounds=(.inbounds // {}) |
     reduce ($inventory|to_entries[]) as $item (.;
       .inbounds[$item.key]=((.inbounds[$item.key] // {daily:{}}) + $item.value + {deleted:false})
     ) |
     .inbounds |= with_entries(.value.deleted = ($inventory[.key] == null) | .value.disabled = ($inventory[.key].disabled // false)) |
-    reduce ($limits|to_entries[]) as $item (.;
-      if .inbounds[$item.key] then .inbounds[$item.key].limit=$item.value else . end
-    ) |
     # Legacy totals counted only the client-facing connection. Migrate once so
-    # stored history and used quota match the two-leg accounting convention.
+    # stored inbound history matches the two-leg accounting convention.
     if .accountingMultiplier == 2 then . else
       .inbounds |= with_entries(
         .value.daily=((.value.daily // {}) | with_entries(.value *= 2)) |
-        .value.cycles=((.value.cycles // {}) | with_entries(.value *= 2)) |
-        if .value.limit.usedBytes != null then .value.limit.usedBytes *= 2 else . end
+        .value.cycles=((.value.cycles // {}) | with_entries(.value *= 2))
       ) |
       .accountingMultiplier=2
     end |
@@ -927,12 +902,9 @@ traffic_update_file() {
       .totals.cycles[$periodStart]=((.totals.cycles[$periodStart] // 0) + ($item.value * 2)) |
       .inbounds[$item.key]=(.inbounds[$item.key] // {protocol:"unknown",port:0,deleted:($inventory[$item.key] == null),daily:{}}) |
       .inbounds[$item.key].daily[$today]=((.inbounds[$item.key].daily[$today] // 0) + ($item.value * 2)) |
-      .inbounds[$item.key].cycles[$periodStart]=((.inbounds[$item.key].cycles[$periodStart] // 0) + ($item.value * 2)) |
-      if .inbounds[$item.key].limit.enabled==true then
-        .inbounds[$item.key].limit.usedBytes=((.inbounds[$item.key].limit.usedBytes // 0) + ($item.value * 2))
-      else . end
+      .inbounds[$item.key].cycles[$periodStart]=((.inbounds[$item.key].cycles[$periodStart] // 0) + ($item.value * 2))
     ) |
-    .inbounds |= with_entries(select((.value.deleted != true) or ((.value.daily|length) > 0) or ((.value.cycles|length) > 0) or (.value.limit.enabled==true))) |
+    .inbounds |= with_entries(select((.value.deleted != true) or ((.value.daily|length) > 0) or ((.value.cycles|length) > 0) or ((.value.users // {})|length)>0)) |
     if $markCollected then .lastCollectedAt=$now else . end
   ' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
   traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
@@ -1121,17 +1093,8 @@ traffic_protocols_for_inbound() {
   case $1 in socks) printf '%s\n' tcp udp;; *) printf '%s\n' tcp;; esac
 }
 
-traffic_limit_is_blocked() {
-  local tag=$1
-  traffic_limits_are_enabled || return 1
-  jq -e --arg tag "$tag" '
-    .inbounds[$tag].limit.enabled==true and
-    ((.inbounds[$tag].limit.usedBytes // 0) >= (.inbounds[$tag].limit.quotaBytes // 0))
-  ' "$TRAFFIC_FILE" >/dev/null 2>&1
-}
-
 traffic_restore_nft_rules() {
-  local tag inbound_protocol port transport_protocol count_comment block_comment blocked count=0
+  local tag inbound_protocol port transport_protocol count_comment count=0
   command_exists nft || return 1
   traffic_clear_nft_rules || return 1
   nft add table inet "$TRAFFIC_NFT_TABLE" || return 1
@@ -1140,13 +1103,7 @@ traffic_restore_nft_rules() {
   while IFS=$'\t' read -r tag inbound_protocol port; do
     if [[ -z $tag ]] || ! validate_port "$port"; then continue; fi
     count_comment="\"xrayctl-traffic:count:${tag}\""
-    block_comment="\"xrayctl-traffic:block:${tag}\""
-    blocked=0; traffic_limit_is_blocked "$tag" && blocked=1
     while IFS= read -r transport_protocol; do
-      if ((blocked)); then
-        nft add rule inet "$TRAFFIC_NFT_TABLE" input "$transport_protocol" dport "$port" drop comment "$block_comment" || return 1
-        nft add rule inet "$TRAFFIC_NFT_TABLE" output "$transport_protocol" sport "$port" drop comment "$block_comment" || return 1
-      fi
       nft add rule inet "$TRAFFIC_NFT_TABLE" input "$transport_protocol" dport "$port" counter comment "$count_comment" || return 1
       nft add rule inet "$TRAFFIC_NFT_TABLE" output "$transport_protocol" sport "$port" counter comment "$count_comment" || return 1
       count=$((count + 1))
@@ -1156,7 +1113,7 @@ traffic_restore_nft_rules() {
 }
 
 traffic_restore_iptables_rules() {
-  local command tag inbound_protocol port transport_protocol blocked count=0
+  local command tag inbound_protocol port transport_protocol count=0
   traffic_clear_iptables_rules || return 1
   for command in iptables ip6tables; do
     command_exists "$command" || continue
@@ -1166,12 +1123,7 @@ traffic_restore_iptables_rules() {
     "$command" -t filter -C OUTPUT -j "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I OUTPUT 1 -j "$TRAFFIC_IPTABLES_OUT_CHAIN"
     while IFS=$'\t' read -r tag inbound_protocol port; do
       if [[ -z $tag ]] || ! validate_port "$port"; then continue; fi
-      blocked=0; traffic_limit_is_blocked "$tag" && blocked=1
       while IFS= read -r transport_protocol; do
-        if ((blocked)); then
-          "$command" -t filter -A "$TRAFFIC_IPTABLES_IN_CHAIN" -p "$transport_protocol" --dport "$port" -m comment --comment "xrayctl-traffic:block:${tag}" -j DROP || return 1
-          "$command" -t filter -A "$TRAFFIC_IPTABLES_OUT_CHAIN" -p "$transport_protocol" --sport "$port" -m comment --comment "xrayctl-traffic:block:${tag}" -j DROP || return 1
-        fi
         "$command" -t filter -A "$TRAFFIC_IPTABLES_IN_CHAIN" -p "$transport_protocol" --dport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
         "$command" -t filter -A "$TRAFFIC_IPTABLES_OUT_CHAIN" -p "$transport_protocol" --sport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
         count=$((count + 1))
@@ -1237,6 +1189,7 @@ traffic_collect() {
 traffic_rename_records() {
   local rc=0
   [[ -f $TRAFFIC_FILE ]] || return 0
+  traffic_init_file || return 1
   traffic_lock_acquire || return 1
   traffic_rename_records_locked "$1" "$2" || rc=1
   traffic_lock_release
@@ -1266,17 +1219,6 @@ traffic_rename_records_locked() {
   return "$rc"
 }
 
-traffic_remove_limit_data() {
-  local tag=$1 tmp rc=0
-  [[ -f $TRAFFIC_FILE ]] || return 0
-  traffic_lock_acquire || return 1
-  tmp=$(temp_file)
-  jq --arg tag "$tag" 'del(.inbounds[$tag].limit)' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
-  rm -f "$tmp"; traffic_lock_release
-  return "$rc"
-}
-
 traffic_after_config_change() {
   local old=${1-} new=${2-}
   [[ -f $TRAFFIC_FILE ]] || return 0
@@ -1286,12 +1228,7 @@ traffic_after_config_change() {
     traffic_rename_records "$old" "$new" || return 1
   fi
   if traffic_is_enabled; then traffic_collect || return 1; else traffic_sync_inventory || return 1; fi
-  if [[ -n $old && -n $new ]]; then
-    traffic_is_enabled && traffic_rules_restore_serialized
-  elif [[ -n $old ]]; then
-    traffic_remove_limit_data "$old" || return 1
-    traffic_user_forget_inbound "$old"
-  fi
+  if [[ -n $old && -z $new ]]; then traffic_user_forget_inbound "$old"; fi
 }
 
 traffic_format_bytes() {
@@ -1308,80 +1245,9 @@ traffic_range_total() {
   jq --arg start "$start" --arg finish "$finish" '[(.totals.daily // {}) | to_entries[] | select(.key >= $start and .key <= $finish) | .value] | add // 0' "$TRAFFIC_FILE"
 }
 
-traffic_limit_count() {
+traffic_user_limit_count() {
   [[ -f $TRAFFIC_FILE ]] || { printf '0'; return; }
-  jq '[.inbounds[]? | select(.limit.enabled==true)] | length' "$TRAFFIC_FILE" 2>/dev/null || printf '0'
-}
-
-traffic_exhausted_tags() {
-  traffic_limits_are_enabled || return 0
-  jq -r '
-    [.inbounds | to_entries[]? |
-      select(.value.deleted!=true and .value.limit.enabled==true and
-        ((.value.limit.usedBytes // 0) >= (.value.limit.quotaBytes // 0))) | .key] | join("、")
-  ' "$TRAFFIC_FILE" 2>/dev/null
-}
-
-traffic_limits_show() {
-  local rows tag quota used remaining rate status status_color cycle_start cycle_end cycle feature feature_color configured blocked limits_active=0
-  traffic_init_file; traffic_sync_inventory
-  if traffic_limits_are_enabled; then
-    feature="已启用"; feature_color=$C_GREEN; limits_active=1
-  else
-    feature="未启用"; feature_color=$C_YELLOW
-  fi
-  configured=$(traffic_limit_count)
-  if ((limits_active)); then
-    blocked=$(jq '[.inbounds[]? | select(.deleted!=true and .limit.enabled==true and
-      ((.limit.usedBytes // 0) >= (.limit.quotaBytes // 0)))] | length' "$TRAFFIC_FILE")
-  else
-    blocked=0
-  fi
-  heading "月度流量限制"
-  printf '功能：%s%s%s  ·  已设置：%s  ·  已禁用：%s\n\n' "$feature_color" "$feature" "$C_RESET" "$configured" "$blocked"
-  rows=$(jq -r '
-    .inbounds | to_entries | sort_by(.key)[] |
-    select(.value.deleted!=true and .value.limit.enabled==true) |
-    [.key,((.value.limit.quotaBytes // 0)|floor|tostring),
-     ((.value.limit.usedBytes // 0)|floor|tostring),
-     (.value.limit.cycleStart // ""),(.value.limit.cycleEnd // "")] | @tsv
-  ' "$TRAFFIC_FILE")
-  if [[ -z $rows ]]; then
-    info "还没有为入站设置流量额度。"
-    return 0
-  fi
-  while IFS=$'\t' read -r tag quota used cycle_start cycle_end; do
-    remaining=$((quota > used ? quota - used : 0))
-    rate=$(traffic_format_percent "$used" "$quota")
-    cycle=$(traffic_format_cycle "$cycle_start" "$cycle_end")
-    if ((limits_active == 0)); then status="未执行"; status_color=$C_YELLOW
-    elif ((used >= quota)); then status="已禁用"; status_color=$C_RED
-    else status="正常"; status_color=$C_GREEN; fi
-    printf '%s%s%s  [%s%s%s]\n' "$C_BOLD" "$tag" "$C_RESET" "$status_color" "$status" "$C_RESET"
-    printf '  流量  %s / %s  (%s)\n' "$(traffic_format_bytes "$used")" "$(traffic_format_bytes "$quota")" "$rate"
-    printf '  剩余  %s\n' "$(traffic_format_bytes "$remaining")"
-    printf '  周期  %s\n\n' "$cycle"
-  done <<<"$rows"
-}
-
-traffic_format_percent() {
-  local used=${1:-0} quota=${2:-0}
-  awk -v used="$used" -v quota="$quota" 'BEGIN {
-    if (quota<=0) {printf "-"; exit}
-    percent=(used/quota)*100
-    if (used>0 && percent<0.01) printf "<0.01%%"; else printf "%.2f%%", percent
-  }'
-}
-
-traffic_format_cycle() {
-  local start=${1-} end=${2-} start_min end_min
-  if ! traffic_validate_timestamp "$start" || ! traffic_validate_timestamp "$end"; then
-    printf '%s → %s' "$start" "$end"
-    return 0
-  fi
-  start_min=${start:0:16}; end_min=${end:0:16}
-  if [[ ${start:0:4} == "${end:0:4}" ]]; then end_min=${end:5:11}; fi
-  printf '%s → %s' "$start_min" "$end_min"
+  jq '[.inbounds[]?.users[]? | select(.limit.enabled==true)] | length' "$TRAFFIC_FILE" 2>/dev/null || printf '0'
 }
 
 traffic_limit_quota_bytes() {
@@ -1390,144 +1256,6 @@ traffic_limit_quota_bytes() {
   bytes=$(awk -v value="$value" 'BEGIN {printf "%.0f", value * 1073741824}')
   [[ $bytes =~ ^[0-9]+$ ]] && ((bytes > 0)) || return 1
   printf '%s' "$bytes"
-}
-
-traffic_limits_enable() {
-  traffic_require_root traffic-limits-enable; ensure_config
-  traffic_is_enabled || { warn "请先开启流量统计，再启用流量限制。"; return 1; }
-  traffic_limits_are_enabled && { info "流量限制已经启用。"; return 0; }
-  traffic_collect || return 1
-  traffic_set_limits_enabled true || return 1
-  if ! traffic_rules_restore_serialized; then
-    traffic_set_limits_enabled false || true
-    traffic_rules_restore_serialized || true
-    warn "流量限制启用失败，已恢复为关闭状态。"
-    return 1
-  fi
-  if ! traffic_user_reconcile; then
-    traffic_set_limits_enabled false || true
-    traffic_rules_restore_serialized || true
-    warn "用户额度规则启用失败，流量限制已恢复为关闭状态。"
-    return 1
-  fi
-  info "流量限制已启用；未设置额度的入站不会受到限制。"
-}
-
-traffic_limits_disable() {
-  traffic_require_root traffic-limits-disable
-  traffic_limits_are_enabled || { info "流量限制已经关闭。"; return 0; }
-  traffic_collect || true
-  traffic_set_limits_enabled false || return 1
-  if traffic_is_enabled; then
-    if ! traffic_rules_restore_serialized; then
-      traffic_set_limits_enabled true || true
-      traffic_rules_restore_serialized || true
-      warn "流量限制关闭失败，已恢复原状态。"
-      return 1
-    fi
-  else
-    traffic_rules_clear || return 1
-  fi
-  if ! traffic_user_reconcile; then
-    traffic_set_limits_enabled true || true
-    if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
-    warn "用户额度规则关闭失败，流量限制已恢复为开启状态。"
-    return 1
-  fi
-  info "流量限制已关闭，额度配置和周期累计值已保留。"
-}
-
-traffic_limit_set() {
-  local tag=${1-} quota_gb=${2-} reset_day=${3-} reset_time=${4-} quota now anchor_day anchor_time cycle_end tmp rc=0 existing
-  local interactive=0 default_day default_time old_day old_time schedule_changed=0
-  if [[ -z $quota_gb ]] || { [[ -z $reset_day ]] && [[ -t 0 ]]; }; then interactive=1; fi
-  traffic_require_root traffic-limit-set; ensure_config
-  traffic_is_enabled || { warn "请先开启流量统计。"; return 1; }
-  traffic_limits_are_enabled || { warn "请先启用流量限制功能。"; return 1; }
-  [[ -n $tag ]] || select_inbound tag || return 0
-  inbound_exists "$tag" || { warn "找不到入站：${tag}"; return 1; }
-  while [[ -z $quota_gb ]]; do
-    read -r -p "每月流量额度（GB）: " quota_gb || { cancel_input; return 0; }
-    quota=$(traffic_limit_quota_bytes "$quota_gb") || { warn "请输入大于 0 的数字，例如 100 或 100.5。"; quota_gb=""; }
-  done
-  quota=${quota:-$(traffic_limit_quota_bytes "$quota_gb")} || { warn "流量额度无效。"; return 1; }
-  traffic_collect || return 1
-  now=$(traffic_now)
-  existing=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.enabled==true' "$TRAFFIC_FILE")
-  default_day=$((10#${now:8:2})); default_time=${now:11:5}
-  if [[ $existing == true ]]; then
-    old_day=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.resetDay // .inbounds[$tag].limit.anchorDay' "$TRAFFIC_FILE")
-    old_time=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.anchorTime' "$TRAFFIC_FILE")
-    default_day=$old_day; default_time=${old_time:0:5}
-  fi
-  while [[ -z $reset_day && $interactive == 1 ]]; do
-    prompt_value reset_day "每月重置日期（1-31）" || return 0
-    if [[ ! $reset_day =~ ^[0-9]+$ ]] || ((10#$reset_day < 1 || 10#$reset_day > 31)); then
-      warn "重置日期无效，请输入 1 到 31。"; reset_day=""
-    fi
-  done
-  reset_day=${reset_day:-$default_day}
-  if ! [[ $reset_day =~ ^[0-9]+$ ]] || ((10#$reset_day < 1 || 10#$reset_day > 31)); then
-    warn "重置日期无效，请输入 1 到 31。"; return 1
-  fi
-  reset_day=$((10#$reset_day))
-  while [[ -z $reset_time && $interactive == 1 ]]; do
-    prompt_value reset_time "每月重置时间（HH:MM，服务器本地时间）" "$default_time" || return 0
-    if [[ ! $reset_time =~ ^[0-9]{2}:[0-9]{2}$ ]] || ! traffic_validate_timestamp "2026-01-01 ${reset_time}:00"; then
-      warn "重置时间无效，请输入 HH:MM，例如 18:30。"; reset_time=""
-    fi
-  done
-  if [[ -n $reset_time ]]; then
-    if [[ ! $reset_time =~ ^[0-9]{2}:[0-9]{2}$ ]] || ! traffic_validate_timestamp "2026-01-01 ${reset_time}:00"; then
-      warn "重置时间无效，请输入 HH:MM，例如 18:30。"; return 1
-    fi
-    anchor_time=${reset_time}:00
-  elif [[ $existing == true ]]; then
-    anchor_time=$old_time
-  else
-    anchor_time=${default_time}:00
-  fi
-  anchor_day=$reset_day
-  if [[ $existing == true && $reset_day == "$old_day" && $anchor_time == "$old_time" ]]; then
-    cycle_end=$(jq -r --arg tag "$tag" '.inbounds[$tag].limit.cycleEnd' "$TRAFFIC_FILE")
-  else
-    cycle_end=$(traffic_limit_first_cycle_end "$now" "$reset_day" "$anchor_time") || return 1
-    [[ $existing != true ]] || schedule_changed=1
-  fi
-  traffic_lock_acquire || return 1
-  tmp=$(temp_file)
-  jq --arg tag "$tag" --argjson quota "$quota" --arg now "$now" --argjson resetDay "$reset_day" --argjson anchorDay "$anchor_day" \
-    --arg anchorTime "$anchor_time" --arg cycleEnd "$cycle_end" '
-      if .inbounds[$tag].limit.enabled==true then
-        .inbounds[$tag].limit.quotaBytes=$quota | .inbounds[$tag].limit.resetDay=$resetDay | .inbounds[$tag].limit.anchorDay=$anchorDay | .inbounds[$tag].limit.anchorTime=$anchorTime | .inbounds[$tag].limit.cycleEnd=$cycleEnd
-      else
-        .inbounds[$tag].limit={enabled:true,quotaBytes:$quota,resetDay:$resetDay,anchorDay:$anchorDay,anchorTime:$anchorTime,
-          cycleStart:$now,cycleEnd:$cycleEnd,usedBytes:0}
-      end
-    ' "$TRAFFIC_FILE" >"$tmp" || rc=1
-  if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
-  rm -f "$tmp"; traffic_lock_release
-  ((rc == 0)) || return 1
-  traffic_rules_restore_serialized || { warn "额度已保存，但防火墙规则暂未同步，采集任务会自动重试。"; return 1; }
-  if ((schedule_changed)); then
-    info "已修改入站 ${tag} 的月度额度和重置时间：每月 ${reset_day} 日 ${anchor_time:0:5}；已用流量保持不变，下次重置：${cycle_end}。"
-  elif [[ $existing == true ]]; then
-    info "已修改入站 ${tag} 的月度额度；原周期起止时间和已用流量保持不变。"
-  else
-    info "已设置入站 ${tag} 的月度额度，当前周期：${now} ～ ${cycle_end}。"
-  fi
-}
-
-traffic_limit_remove() {
-  local tag=${1-}
-  traffic_require_root traffic-limit-remove; ensure_config
-  [[ -n $tag ]] || select_inbound tag || return 0
-  jq -e --arg tag "$tag" '.inbounds[$tag].limit.enabled==true' "$TRAFFIC_FILE" >/dev/null 2>&1 || { warn "入站 ${tag} 没有流量限制。"; return 1; }
-  confirm "取消入站 ${tag} 的流量限制并删除当前周期累计值？" N || return 0
-  traffic_collect || true
-  traffic_remove_limit_data "$tag" || return 1
-  if traffic_is_enabled; then traffic_rules_restore_serialized || true; fi
-  info "已取消入站 ${tag} 的流量限制。"
 }
 
 traffic_period_show() {
@@ -1574,7 +1302,7 @@ traffic_period_set() {
 }
 
 traffic_show() {
-  local start=${1-} end=${2-} period=false rows tag protocol port bytes deleted total status last limit_status display_order
+  local start=${1-} end=${2-} period=false rows tag protocol port bytes deleted total status last display_order
   if [[ -n $start && -z $end ]]; then end=$(traffic_today); fi
   if [[ -z $start && -z $end ]]; then
     traffic_init_file
@@ -1615,8 +1343,6 @@ traffic_show() {
     total=$(traffic_range_total "$start" "$end")
   fi
   printf '%s\n全部入站：%s\n' '----------------------------------------------------------' "$(traffic_format_bytes "$total")"
-  traffic_limits_are_enabled && limit_status="已启用" || limit_status="未启用"
-  printf '流量限制：%s\n' "$limit_status"
 }
 
 traffic_prompt_range() {
@@ -1675,7 +1401,7 @@ traffic_clear_tag_records() {
   [[ -n $tag ]] || traffic_select_record_tag tag || return 0
   traffic_collect || true; traffic_init_file
   jq -e --arg tag "$tag" '.inbounds[$tag] != null' "$TRAFFIC_FILE" >/dev/null || { warn "没有入站 ${tag} 的流量记录。"; return 1; }
-  confirm "清空入站 ${tag} 当前周期的流量记录和额度已用量；已删除的入站将移除整条记录（保留全部入站总流量）？" N || return 0
+  confirm "清空入站 ${tag} 当前周期的流量记录；已删除的入站将移除整条记录（保留全部入站总流量）？" N || return 0
   traffic_lock_acquire || return 1
   # Statistics may be stopped: seed legacy totals before deleting any record.
   traffic_update_file '{}' false || { traffic_lock_release; return 1; }
@@ -1684,7 +1410,7 @@ traffic_clear_tag_records() {
     elif .inbounds[$tag].deleted==true then del(.inbounds[$tag])
     else
       .inbounds[$tag].daily={} | .inbounds[$tag].cycles={} |
-      if .inbounds[$tag].limit.enabled==true then .inbounds[$tag].limit.usedBytes=0 else . end
+      .
     end
   ' "$TRAFFIC_FILE" >"$tmp" || rc=1
   if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
@@ -1697,16 +1423,13 @@ traffic_clear_tag_records() {
 traffic_clear_all_records() {
   local answer tmp rc=0
   traffic_collect || true; traffic_init_file
-  printf '输入 RESET 确认清空全部入站流量记录和入站额度已用量（不清空用户流量）：'
+  printf '输入 RESET 确认清空全部入站流量记录（不清空用户流量）：'
   read -r answer || { cancel_input; return 0; }
   [[ $answer == RESET ]] || { info "已取消。"; return 0; }
   traffic_lock_acquire || return 1
   tmp=$(temp_file); jq '
     .totals={daily:{},cycles:{}} |
-    .inbounds |= with_entries(
-      .value.daily={} | .value.cycles={} |
-      if .value.limit.enabled==true then .value.limit.usedBytes=0 else . end
-    )
+    .inbounds |= with_entries(.value.daily={} | .value.cycles={})
   ' "$TRAFFIC_FILE" >"$tmp" || rc=1
   if ((rc == 0)); then traffic_write_file "$tmp" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
@@ -1825,7 +1548,7 @@ traffic_enable() {
 
 traffic_disable() {
   traffic_require_root traffic-disable
-  traffic_limits_are_enabled && { warn "请先关闭流量限制功能，再停止流量统计。"; return 1; }
+  [[ $(traffic_user_limit_count) == 0 ]] || { warn "仍有用户额度生效，不能停止流量统计。"; return 1; }
   traffic_collect || true
   if ! traffic_runtime_stop; then
     traffic_timer_install || true

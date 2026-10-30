@@ -393,7 +393,7 @@ add_client() {
       ) |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else jq --arg tag "$tag" --argjson user "$user" '(.inbounds[]|select(.tag==$tag)|.settings.clients) += [$user]' "$CONFIG_FILE" >"$tmp"; fi
-  state_apply_candidate_file "$tmp" apply_candidate || return
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" apply_candidate || return
   info "用户 ${label} 已添加。"
   print_links "$tag" "$label" || true
 }
