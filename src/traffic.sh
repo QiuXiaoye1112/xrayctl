@@ -16,6 +16,10 @@ traffic_user_managed_config() {
   [[ -r $CONFIG_FILE ]] && jq -e '.xrayctlUserStats.enabled==true' "$CONFIG_FILE" >/dev/null 2>&1
 }
 
+traffic_user_has_clients() {
+  [[ -r $CONFIG_FILE ]] && jq -e '[.inbounds[]? | select(.protocol=="vless") | .settings.clients[]?] | length>0' "$CONFIG_FILE" >/dev/null 2>&1
+}
+
 # The core aggregates user counters by email across all inbounds. Keep the
 # display label in the client object and use a separate, globally unique email
 # for accounting. UUIDs and share-link labels are unchanged. This function
@@ -438,6 +442,12 @@ traffic_user_enable() {
     return 1
   fi
   traffic_user_collect_serialized || { warn "用户统计已配置，但当前无法读取 Xray API。"; return 1; }
+}
+
+traffic_user_ensure_configured() {
+  traffic_user_has_clients || return 0
+  traffic_user_managed_config && return 0
+  traffic_user_enable
 }
 
 traffic_user_select() {

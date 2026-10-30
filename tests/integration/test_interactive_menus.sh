@@ -142,6 +142,7 @@ exercise_menu_route main_menu 7 'uninstall_xray'
 traffic_is_enabled() { return 0; }
 traffic_collect() { record traffic_collect; }
 traffic_users_show() { record "traffic_users_show ${1-}"; }
+traffic_user_ensure_configured() { record traffic_user_ensure_configured; }
 traffic_user_menu() { record traffic_user_menu; }
 # Restore the real menu functions after main-menu routing stubs.
 # shellcheck source=../../src/menu.sh
@@ -149,6 +150,9 @@ source "${REPO_ROOT}/src/menu.sh"
 traffic_user_menu() { record traffic_user_menu; }
 exercise_menu_route traffic_limit_menu 2 traffic_user_menu
 : >"$EVENT_LOG"; set_inputs 0; traffic_limit_menu >"$TEST_ROOT/traffic-limit-menu.txt"
+ensure_line=$(grep -n '^traffic_user_ensure_configured$' "$EVENT_LOG" | cut -d: -f1)
+show_line=$(grep -n '^traffic_users_show' "$EVENT_LOG" | cut -d: -f1)
+[[ -n $ensure_line && -n $show_line && $ensure_line -lt $show_line ]] || fail 'user StatsService was not ensured before the first traffic limit display'
 if rg -q '入站额度' "$TEST_ROOT/traffic-limit-menu.txt"; then fail 'user flow limit menu still exposes inbound quota controls'; fi
 if rg -q '开启流量限制|关闭流量限制|3\)' "$TEST_ROOT/traffic-limit-menu.txt"; then fail 'user flow limit menu still exposes a global toggle'; fi
 

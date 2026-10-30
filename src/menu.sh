@@ -510,6 +510,7 @@ traffic_menu() {
 
 traffic_limit_menu() {
   local choice
+  traffic_user_ensure_configured || true
   while true; do
     if traffic_is_enabled; then run_menu_action traffic_collect || true; fi
     clear_screen
@@ -708,7 +709,7 @@ dispatch() {
               ;;
             user)
               case ${2:-show} in
-                show) traffic_collect || true; traffic_users_show;;
+                show) traffic_user_ensure_configured || true; traffic_collect || true; traffic_users_show;;
                 enable) traffic_user_enable;;
                 set) traffic_user_limit_set "${3-}" "${4-}" "${5-}" "${6-}" "${7-}";;
                 remove|delete) traffic_user_limit_remove "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
