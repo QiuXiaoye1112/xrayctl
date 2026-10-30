@@ -116,7 +116,7 @@ id_a=$(jq -r '.inbounds[0].settings.clients[0].email' "$CONFIG_FILE")
 id_b=$(jq -r '.inbounds[1].settings.clients[0].email' "$CONFIG_FILE")
 jq --arg a "$id_a" '.enabled=true | .inbounds.a.users[$a]={label:"alice",cycles:{"2026-02-01 00:00:00":10},limit:{enabled:true,quotaBytes:10,usedBytes:10,anchorDay:15,anchorTime:"00:00:00",cycleStart:"2026-01-15 00:00:00",cycleEnd:"2026-02-15 00:00:00"}}' "$TRAFFIC_FILE" >"$tmp/state"
 cp "$tmp/state" "$TRAFFIC_FILE"
-user_display=$(traffic_users_show)
+user_display=$(traffic_users_show "")
 [[ $user_display == *'流量限制'* ]]
 [[ $user_display == *'alice'* && $user_display == *'10 B / 10 B'* && $user_display == *'超额'* ]]
 [[ $user_display != *'剩余'* && $user_display != *'入站：'* && $user_display != *'流量统计：'* && $user_display != *'用户统计：'* && $user_display != *'仍有入站总额度生效'* ]]
@@ -159,12 +159,12 @@ user_display=$(traffic_users_show)
 cp "$TRAFFIC_FILE" "$tmp/before-unlimited-display"
 jq --arg a "$id_a" 'del(.inbounds.a.users[$a].limit)' "$TRAFFIC_FILE" >"$tmp/unlimited-display"
 cp "$tmp/unlimited-display" "$TRAFFIC_FILE"
-unlimited_display=$(traffic_users_show)
+unlimited_display=$(traffic_users_show "")
 [[ $unlimited_display == *'10 B / ∞'* ]]
 cp "$tmp/before-unlimited-display" "$TRAFFIC_FILE"
 jq '.inbounds += [{tag:"c",protocol:"socks",settings:{accounts:[]}}]' "$CONFIG_FILE" >"$tmp/with-socks"
 cp "$tmp/with-socks" "$CONFIG_FILE"
-user_display=$(traffic_users_show)
+user_display=$(traffic_users_show "")
 [[ $user_display == *'c'* && $user_display == *'此入站没有可统计的认证账号'* && $user_display != *'socks'* ]]
 state_commit() { cp "$1" "$CONFIG_FILE"; }
 jq '.routing.rules += [{type:"field",user:["regexp:^new"],outboundTag:"direct"}] | .inbounds[0].settings.clients += [{email:"new-user",id:"123e4567-e89b-12d3-a456-426614174003"}]' "$CONFIG_FILE" >"$tmp/new-candidate"

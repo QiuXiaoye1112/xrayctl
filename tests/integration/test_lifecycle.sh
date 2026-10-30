@@ -111,7 +111,7 @@ trap - ERR
 
 # An unconfigured traffic page is informational. User quota management attempts
 # automatic setup and reports a single concrete failure if that setup cannot start.
-traffic_status_output=$(traffic_users_show 2>&1)
+traffic_status_output=$(traffic_users_show "" 2>&1)
 [[ $traffic_status_output == *"信息 · 用户流量统计尚未配置。"* ]] || fail "unconfigured user traffic was not shown as information"
 [[ $traffic_status_output != *"警告 ·"* ]] || fail "read-only traffic status emitted a warning"
 traffic_user_managed_config() { return 1; }

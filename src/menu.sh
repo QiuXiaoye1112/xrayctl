@@ -657,7 +657,7 @@ traffic_limit_menu() {
   while true; do
     if traffic_is_enabled; then run_menu_action traffic_collect || true; fi
     clear_screen
-    traffic_users_show || true
+    traffic_users_show "" || true
     printf '\n1) 刷新流量\n2) 管理用户额度\n0) 返回\n'
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
@@ -879,7 +879,7 @@ dispatch() {
               ;;
             user)
               case ${2:-show} in
-                show) traffic_user_ensure_configured || true; traffic_collect || true; traffic_users_show;;
+                show) traffic_user_ensure_configured || true; traffic_collect || true; traffic_users_show "${3-}";;
                 enable) traffic_user_enable;;
                 set) traffic_user_limit_set "${3-}" "${4-}" "${5-}" "${6-}" "${7-}";;
                 remove|delete) traffic_user_limit_remove "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
