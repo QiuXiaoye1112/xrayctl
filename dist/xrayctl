@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="99fa72b03b1e"
+readonly XRAYCTL_BUILD_COMMIT="7ac29955b842"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
