@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq openssl ripgrep shellcheck unzip
+        run: sudo apt-get update && sudo apt-get install -y iproute2 iptables jq netcat-openbsd nftables openssl ripgrep shellcheck unzip
       - name: Download and verify current Xray release
         shell: bash
         run: |
@@ -25,15 +25,21 @@ jobs:
             aarch64) asset=Xray-linux-arm64-v8a.zip ;;
             *) printf 'unsupported runner architecture: %s\n' "$(uname -m)" >&2; exit 1 ;;
           esac
-          base="https://github.com/XTLS/Xray-core/releases/download/${version}"
-          curl -fsSL --connect-timeout 10 --max-time 120 "$base/$asset" -o "$RUNNER_TEMP/$asset"
-          curl -fsSL --connect-timeout 10 --max-time 30 "$base/$asset.dgst" -o "$RUNNER_TEMP/$asset.dgst"
-          expected=$(awk -F'= ' '$1=="SHA2-256" {print $2; exit}' "$RUNNER_TEMP/$asset.dgst")
-          printf '%s  %s\n' "$expected" "$RUNNER_TEMP/$asset" | sha256sum -c -
-          mkdir -p "$RUNNER_TEMP/xray"
-          unzip -q "$RUNNER_TEMP/$asset" -d "$RUNNER_TEMP/xray"
-          "$RUNNER_TEMP/xray/xray" version | sed -n '1p'
-          printf 'XRAYCTL_REAL_XRAY_BIN=%s\n' "$RUNNER_TEMP/xray/xray" >>"$GITHUB_ENV"
+          for release in "$version" v26.3.27; do
+            destination="$RUNNER_TEMP/xray-${release#v}"
+            archive="$RUNNER_TEMP/Xray-${release#v}.zip"
+            digest="$RUNNER_TEMP/Xray-${release#v}.zip.dgst"
+            base="https://github.com/XTLS/Xray-core/releases/download/${release}"
+            curl -fsSL --connect-timeout 10 --max-time 120 "$base/$asset" -o "$archive"
+            curl -fsSL --connect-timeout 10 --max-time 30 "$base/$asset.dgst" -o "$digest"
+            expected=$(awk -F'= ' '$1=="SHA2-256" {print $2; exit}' "$digest")
+            printf '%s  %s\n' "$expected" "$archive" | sha256sum -c -
+            mkdir -p "$destination"
+            unzip -q "$archive" -d "$destination"
+            "$destination/xray" version | sed -n '1p'
+          done
+          printf 'XRAYCTL_REAL_XRAY_BIN=%s\n' "$RUNNER_TEMP/xray-${version#v}/xray" >>"$GITHUB_ENV"
+          printf 'XRAYCTL_PINNED_XRAY_BIN=%s\n' "$RUNNER_TEMP/xray-26.3.27/xray" >>"$GITHUB_ENV"
       - name: Build, lint, and test
         env:
           REQUIRE_SHELLCHECK: "1"
@@ -42,6 +48,26 @@ jobs:
           XRAYCTL_BUILD_COMMIT="$recorded_commit" bash scripts/build.sh
           git diff --exit-code -- dist/xrayctl
           bash tests/run.sh
+      - name: Verify the pinned Xray release with real processes
+        run: |
+          for xray in "$XRAYCTL_PINNED_XRAY_BIN" "$XRAYCTL_REAL_XRAY_BIN"; do
+            XRAYCTL_REAL_XRAY_BIN="$xray" bash tests/unit/test_user_identity.sh
+            XRAYCTL_REAL_XRAY_BIN="$xray" bash tests/integration/test_real_xray_user_traffic.sh
+            XRAYCTL_REAL_XRAY_BIN="$xray" bash tests/integration/test_user_quota_real_xray.sh
+            XRAYCTL_REAL_XRAY_BIN="$xray" XRAYCTL_TEST_DUPLICATE=1 bash tests/integration/test_user_quota_real_xray.sh
+            XRAYCTL_REAL_XRAY_BIN="$xray" XRAYCTL_TEST_REALITY=1 bash tests/integration/test_user_quota_real_xray.sh
+          done
+      - name: Verify user and inbound quotas together in isolated network namespaces
+        run: |
+          sudo --preserve-env=XRAYCTL_PINNED_XRAY_BIN,XRAYCTL_REAL_XRAY_BIN unshare --net bash -ec '
+            ip link set lo up
+            for backend in iptables nft; do
+              for xray in "$XRAYCTL_PINNED_XRAY_BIN" "$XRAYCTL_REAL_XRAY_BIN"; do
+                XRAYCTL_REAL_XRAY_BIN="$xray" XRAYCTL_TEST_FIREWALL=1 XRAYCTL_TEST_BACKEND="$backend" \
+                  bash tests/integration/test_user_quota_real_xray.sh
+              done
+            done
+          '
 
   alpine-openrc:
     runs-on: ubuntu-latest

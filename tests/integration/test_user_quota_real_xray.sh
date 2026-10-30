@@ -5,13 +5,13 @@ bin=${XRAYCTL_REAL_XRAY_BIN:-}
 if [[ -z $bin ]]; then printf 'ok - real user quota test skipped (set XRAYCTL_REAL_XRAY_BIN)\n'; exit 0; fi
 for cmd in jq curl nc; do command -v "$cmd" >/dev/null || { printf 'not ok - missing %s\n' "$cmd" >&2; exit 1; }; done
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-user-quota.XXXXXX")
-server_pid='' client_pid='' listener_pid='' tls_pid=''
+server_pid='' client_pid='' listener_pid=''
 cleanup_test() {
   if [[ ${XRAYCTL_TEST_KEEP:-0} == 1 && ${XRAYCTL_TEST_FIREWALL:-0} == 1 ]]; then
     iptables-save >"$TEST_ROOT/iptables.txt" 2>/dev/null || true
     if command -v nft >/dev/null; then nft -j list ruleset >"$TEST_ROOT/nft.json" 2>/dev/null || true; fi
   fi
-  for pid in "$server_pid" "$client_pid" "$listener_pid" "$tls_pid"; do [[ -z $pid ]] || kill "$pid" 2>/dev/null || true; done
+  for pid in "$server_pid" "$client_pid" "$listener_pid"; do [[ -z $pid ]] || kill "$pid" 2>/dev/null || true; done
   wait 2>/dev/null || true
   if [[ ${XRAYCTL_TEST_KEEP:-0} == 1 ]]; then printf 'test files: %s\n' "$TEST_ROOT" >&2; else rm -rf "$TEST_ROOT"; fi
 }
@@ -25,26 +25,19 @@ mkdir -p "$XRAYCTL_CONFIG_DIR"
 source "$root/xrayctl.sh"
 trap - ERR
 trap cleanup_test EXIT
-base=$((30000 + RANDOM % 20000)); api=$base; inbound=$((base+1)); alice=$((base+2)); bob=$((base+3)); target=$((base+4)); tls_port=$((base+5)); other_in=$((base+6)); other_socks=$((base+7))
+base=$((30000 + RANDOM % 20000)); api=$base; inbound=$((base+1)); alice=$((base+2)); bob=$((base+3)); target=$((base+4)); other_in=$((base+6)); other_socks=$((base+7))
 jq --argjson port "$inbound" 'del(.api,.stats,.policy) | .inbounds[0].port=$port | .routing.rules=[]' "$root/tests/fixtures/user-traffic/server.json" >"$TEST_ROOT/input.json"
 if [[ ${XRAYCTL_TEST_DUPLICATE:-0} == 1 ]]; then
   jq --argjson port "$other_in" '.inbounds += [{tag:"b",listen:"127.0.0.1",port:$port,protocol:"vless",settings:{decryption:"none",clients:[{email:"alice",id:"123e4567-e89b-12d3-a456-426614174002"}]}}]' "$TEST_ROOT/input.json" >"$TEST_ROOT/duplicate.json"
   mv "$TEST_ROOT/duplicate.json" "$TEST_ROOT/input.json"
 fi
 if [[ ${XRAYCTL_TEST_REALITY:-0} == 1 ]]; then
-  command -v openssl >/dev/null || { printf 'not ok - openssl is required for REALITY test\n' >&2; exit 1; }
   keys=$("$bin" x25519)
   private=$(awk '/^PrivateKey:/ {print $2}' <<<"$keys")
   public=$(awk '/^Password \(PublicKey\):/ {print $3}' <<<"$keys")
   [[ -n $private && -n $public ]]
   reality_name=${XRAYCTL_TEST_REALITY_NAME:-example.com}
-  reality_target=${XRAYCTL_TEST_REALITY_TARGET:-127.0.0.1:$tls_port}
-  if [[ -z ${XRAYCTL_TEST_REALITY_TARGET:-} ]]; then
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$reality_name" -addext "subjectAltName=DNS:$reality_name" -keyout "$TEST_ROOT/tls.key" -out "$TEST_ROOT/tls.crt" -days 1 > /dev/null 2>&1
-    openssl s_server -accept "127.0.0.1:$tls_port" -cert "$TEST_ROOT/tls.crt" -key "$TEST_ROOT/tls.key" -cert2 "$TEST_ROOT/tls.crt" -key2 "$TEST_ROOT/tls.key" -servername "$reality_name" -alpn h2,http/1.1 -tls1_3 -www -quiet >"$TEST_ROOT/tls.log" 2>&1 & tls_pid=$!
-    sleep .3
-    if ! kill -0 "$tls_pid" 2>/dev/null; then cat "$TEST_ROOT/tls.log" >&2; exit 1; fi
-  fi
+  reality_target=${XRAYCTL_TEST_REALITY_TARGET:-example.com:443}
   jq --arg private "$private" --arg target "$reality_target" --arg name "$reality_name" '
     .log.loglevel="debug" | .inbounds[0].streamSettings={network:"raw",security:"reality",realitySettings:{show:true,dest:$target,serverNames:[$name],privateKey:$private,shortIds:["0123456789abcdef"]}} |
     .inbounds[0].settings.clients[].flow="xtls-rprx-vision" |
@@ -78,7 +71,10 @@ start_test_server() {
   return 1
 }
 start_test_server
-start_test_client() { "$bin" run -config "$TEST_ROOT/client.json" >"$TEST_ROOT/client.log" 2>&1 & client_pid=$!; sleep .5; }
+start_test_client() {
+  "$bin" run -config "$TEST_ROOT/client.json" >"$TEST_ROOT/client.log" 2>&1 & client_pid=$!
+  sleep .5
+}
 restart_test_client() { kill "$client_pid"; wait "$client_pid" || true; client_pid=''; start_test_client; }
 start_test_client
 ensure_config() { :; }

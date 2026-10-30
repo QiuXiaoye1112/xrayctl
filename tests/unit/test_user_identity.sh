@@ -176,7 +176,10 @@ jq -e --arg id "$id_a" '[.routing.rules[] | select(.ruleTag==("xrayctl-user-limi
 if [[ -n ${XRAYCTL_REAL_XRAY_BIN:-} ]]; then
   # Add fields required by the actual core to the accounting candidate.
   jq '.inbounds |= map(.listen="127.0.0.1" | .port=(if .tag=="a" then 32402 else 32403 end) | .settings.decryption="none")' "$tmp/input" >"$tmp/real-input"
-  traffic_user_prepare_config "$tmp/real-input" "$tmp/real-config" '127.0.0.1:32401'
-  "$XRAYCTL_REAL_XRAY_BIN" run -test -format json -config "$tmp/real-config" >/dev/null
+  traffic_user_prepare_config "$tmp/real-input" "$tmp/real-config.json" '127.0.0.1:32401'
+  if ! "$XRAYCTL_REAL_XRAY_BIN" run -test -format json -config "$tmp/real-config.json" >"$tmp/xray-config-test.log" 2>&1; then
+    cat "$tmp/xray-config-test.log" >&2
+    exit 1
+  fi
 fi
 printf 'ok - VLESS user identities preserve labels, UUIDs and routing\n'
