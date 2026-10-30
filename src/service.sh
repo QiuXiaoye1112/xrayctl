@@ -263,7 +263,7 @@ install_or_update_xray() {
   validate_candidate "$CONFIG_FILE"
   platform_service_enable >/dev/null
   restart_service
-  traffic_runtime_ensure || warn "Xray 已启动，但流量统计运行时暂未恢复，请运行 xrayctl traffic enable 重试。"
+  traffic_runtime_ensure || true
   info "Xray 已安装/修复：$($XRAY_BIN version | sed -n '1p')"
 }
 

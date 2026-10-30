@@ -56,7 +56,7 @@ traffic_default_json > "$TRAFFIC_FILE"
   traffic_user_require_manager() { :; }
   ensure_config() { :; }
   require_xray_installed() { :; }
-  traffic_is_enabled() { :; }
+  traffic_runtime_ensure() { :; }
   traffic_user_collect_serialized() { :; }
   traffic_timer_install() { : > "$tmp/timer-upgraded"; }
   apply_candidate() { cp "$1" "$CONFIG_FILE"; }

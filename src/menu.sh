@@ -494,19 +494,14 @@ traffic_menu() {
     clear_screen
     traffic_show || true
     printf '\n1) 刷新\n2) 清空指定入站记录\n3) 清空全部入站流量记录\n'
-    if traffic_is_enabled; then printf '4) 停止流量统计\n'; else printf '4) 开启流量统计\n'; fi
-    printf '5) 设置月度统计起点\n'
+    printf '4) 设置月度统计起点\n'
     printf '0) 返回\n'
     read -r -p "请选择: " choice || { cancel_input; return 0; }
     case $choice in
       1) run_menu_action traffic_collect;;
       2) run_menu_action traffic_clear_tag_records; pause;;
       3) run_menu_action traffic_clear_all_records; pause;;
-      4)
-        if traffic_is_enabled; then run_menu_action traffic_disable; else run_menu_action traffic_enable; fi
-        pause
-        ;;
-      5) run_menu_action traffic_period_set; pause;;
+      4) run_menu_action traffic_period_set; pause;;
       0) return;;
       *) warn "无效选项。"; pause;;
     esac
@@ -536,7 +531,7 @@ traffic_user_menu() {
   ensure_config
   select_inbound tag '^vless$' || { pause; return 0; }
   if ! traffic_user_managed_config; then
-    run_menu_action traffic_user_enable
+    if ! traffic_user_enable; then pause; return 0; fi
     if ! traffic_user_managed_config; then pause; return 0; fi
   fi
   while true; do
@@ -626,7 +621,6 @@ xrayctl - Xray Linux 管理脚本
   xrayctl logs [行数]             查看服务日志
   xrayctl traffic [开始日期] [结束日期] 查看当前周期内按入站累计流量
   xrayctl traffic period [show|set <日期> <HH:MM>] 查看/设置统一月度统计起点
-  xrayctl traffic enable|disable       开启/停止流量统计
   xrayctl traffic user enable
   xrayctl traffic user show
   xrayctl traffic user set <入站> <用户> <GB> <重置日> [HH:MM]
@@ -676,7 +670,10 @@ EOF
 dispatch() {
   local command=${1:-menu}; shift || true
   case $command in
-    menu) main_menu;;
+    menu)
+      if [[ ${XRAYCTL_TESTING:-0} == 1 || $(id -u) -eq 0 ]]; then traffic_runtime_ensure || true; fi
+      main_menu
+      ;;
     help|-h|--help) show_help;;
     version|-v|--version)
       printf 'xrayctl %s' "$XRAYCTL_VERSION"
@@ -684,37 +681,45 @@ dispatch() {
       printf '\n'
       ;;
     install) install_or_update_xray "${1-}";;
-    status) show_status;;
+    status)
+      if [[ ${XRAYCTL_TESTING:-0} == 1 || $(id -u) -eq 0 ]]; then traffic_runtime_ensure || true; fi
+      show_status
+      ;;
     start|stop|restart|enable|disable) service_action "$command";;
     logs) show_logs "${1:-100}";;
     traffic)
       case ${1:-show} in
-        show) traffic_collect || true; traffic_show "${2-}" "${3-}";;
         enable|start) traffic_enable;;
         disable|stop) traffic_disable;;
-        collect|refresh) traffic_collect;;
-        period)
-          case ${2:-show} in
-            show) traffic_period_show;;
-            set) traffic_period_set "${3-}" "${4-}";;
-            *) die "未知 traffic period 子命令：${2}";;
+        *)
+          traffic_runtime_ensure || true
+          case ${1:-show} in
+            show) traffic_collect || true; traffic_show "${2-}" "${3-}";;
+            collect|refresh) traffic_collect;;
+            period)
+              case ${2:-show} in
+                show) traffic_period_show;;
+                set) traffic_period_set "${3-}" "${4-}";;
+                *) die "未知 traffic period 子命令：${2}";;
+              esac
+              ;;
+            reset)
+              if [[ ${2-} == --all ]]; then traffic_clear_all_records; else traffic_clear_tag_records "${2-}"; fi
+              ;;
+            user)
+              case ${2:-show} in
+                show) traffic_collect || true; traffic_users_show;;
+                enable) traffic_user_enable;;
+                set) traffic_user_limit_set "${3-}" "${4-}" "${5-}" "${6-}" "${7-}";;
+                remove|delete) traffic_user_limit_remove "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
+                reset) traffic_user_reset "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
+                *) die "未知 traffic user 子命令：${2}";;
+              esac
+              ;;
+            [0-9][0-9][0-9][0-9]-*) traffic_collect || true; traffic_show "$1" "${2:-$(traffic_today)}";;
+            *) die "未知 traffic 子命令：${1}";;
           esac
           ;;
-        reset)
-          if [[ ${2-} == --all ]]; then traffic_clear_all_records; else traffic_clear_tag_records "${2-}"; fi
-          ;;
-        user)
-          case ${2:-show} in
-            show) traffic_collect || true; traffic_users_show;;
-            enable) traffic_user_enable;;
-            set) traffic_user_limit_set "${3-}" "${4-}" "${5-}" "${6-}" "${7-}";;
-            remove|delete) traffic_user_limit_remove "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
-            reset) traffic_user_reset "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
-            *) die "未知 traffic user 子命令：${2}";;
-          esac
-          ;;
-        [0-9][0-9][0-9][0-9]-*) traffic_collect || true; traffic_show "$1" "${2:-$(traffic_today)}";;
-        *) die "未知 traffic 子命令：${1}";;
       esac
       ;;
     inbound)
@@ -761,6 +766,7 @@ dispatch() {
 
     bbr) manage_bbr;;
     internal-traffic-collect) internal_traffic_collect;;
+    internal-traffic-ensure) traffic_runtime_ensure;;
     internal-traffic-watch) internal_traffic_watch;;
     *) error "未知命令：$command"; show_help; return 2;;
   esac

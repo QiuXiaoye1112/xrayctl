@@ -29,6 +29,8 @@ jq '.inbounds=[
   {"protocol":"http","tag":"http","listen":"0.0.0.0","port":24443,"settings":{"accounts":[]}}
 ]' "$CONFIG_FILE" >"$candidate"
 mv -f "$candidate" "$CONFIG_FILE"
+traffic_init_file
+jq -e '.enabled==true' "$TRAFFIC_FILE" >/dev/null
 
 # Calendar-month retention clamps missing dates at month end.
 [[ $(traffic_months_ago 2026-08-24 3) == 2026-05-24 ]]
@@ -63,7 +65,7 @@ traffic_prompt_range range_start range_end <<< $'\n\n'
 # are discarded; per-user quota state lives in each inbound's users object.
 printf '%s\n' '{"schema":1,"enabled":false,"backend":"","lastCollectedAt":"","inbounds":{}}' >"$TRAFFIC_FILE"
 traffic_init_file
-jq -e '(has("limitsEnabled")|not)' "$TRAFFIC_FILE" >/dev/null
+jq -e '.enabled==true and (has("limitsEnabled")|not)' "$TRAFFIC_FILE" >/dev/null
 
 # Existing client-side totals are converted once, including quota usage.
 tmp=$(temp_file)
@@ -167,7 +169,19 @@ jq -e '.inbounds.socks==null' "$TRAFFIC_FILE" >/dev/null
 
 # Backups include the retained traffic file and restore it atomically with the
 # rest of xrayctl state.
-traffic_set_enabled false
+if traffic_set_enabled false >/dev/null 2>&1; then
+  printf 'traffic stats were unexpectedly disabled\n' >&2
+  exit 1
+fi
+jq -e '.enabled==true' "$TRAFFIC_FILE" >/dev/null
+traffic_disable >/dev/null
+jq -e '.enabled==true' "$TRAFFIC_FILE" >/dev/null
+traffic_collect() { :; }
+traffic_ensure_backend() { :; }
+traffic_sync_inventory() { :; }
+traffic_rules_restore_serialized() { :; }
+traffic_timer_install() { :; }
+traffic_runtime_stop() { :; }
 archive="${TRAFFIC_FILE%/*}/traffic-backup.tar.gz"
 require_root() { :; }
 ensure_runtime_dependencies() { :; }
@@ -182,6 +196,18 @@ setup_certificate_access() { mkdir -p "$CERT_DIR"; }
 setup_runtime_access() { :; }
 restore_backup "$archive" >/dev/null
 jq -e '.inbounds["vless-new"].daily["2026-08-24"]==2147483648' "$TRAFFIC_FILE" >/dev/null
+
+# Runtime setup automatically migrates stopped installations and installs the
+# existing collector backend/timer without a separate user toggle.
+printf '%s\n' '{"schema":1,"enabled":false,"backend":"","lastCollectedAt":"","period":{"day":1,"time":"00:00:00"},"periodsSeeded":false,"inbounds":{}}' >"$TRAFFIC_FILE"
+traffic_ensure_backend() { :; }
+traffic_sync_inventory() { :; }
+traffic_rules_restore_serialized() { :; }
+traffic_timer_install() { : >"${TRAFFIC_FILE}.timer-installed"; }
+traffic_collect() { : >"${TRAFFIC_FILE}.collected"; }
+traffic_runtime_ensure
+jq -e '.enabled==true' "$TRAFFIC_FILE" >/dev/null
+[[ -f ${TRAFFIC_FILE}.timer-installed && ! -e ${TRAFFIC_FILE}.collected ]]
 BASH
 
 
@@ -402,6 +428,8 @@ traffic_init_file
 tmp=$(temp_file)
 jq '.inbounds.vless={protocol:"vless",port:17225,deleted:false,daily:{"2026-08-21":100,"2026-08-22":200,"2026-08-24":300}}' "$TRAFFIC_FILE" >"$tmp"
 install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
+original_traffic_collect=$(declare -f traffic_collect)
+traffic_collect() { :; }
 traffic_period_set 22 18:30 >/dev/null
 ! traffic_period_set 22 18:30:15 2>/dev/null
 [[ $(traffic_period_start '2026-08-22 18:29:59') == '2026-07-22 18:30:00' ]]
@@ -411,6 +439,7 @@ jq -e '.inbounds.vless.cycles["2026-08-22 18:30:00"]==500 and .inbounds.vless.li
 output=$(traffic_show)
 grep -Fq '统计范围：2026-08-22 18:30:00 ～ 2026-09-22 18:30:00' <<<"$output"
 grep -Fq '全部入站：500 B' <<<"$output"
+eval "$original_traffic_collect"
 MOCK_COUNTERS=$'vless\t50'
 traffic_read_counters() { printf '%s\n' "$MOCK_COUNTERS"; }
 traffic_rules_restore() { :; }
@@ -455,7 +484,7 @@ jq 'del(.accountingMultiplier) | .periodsSeeded=true |
              b:{daily:{"2026-08-24":200},cycles:{"2026-08-01 00:00:00":200}}}' "$TRAFFIC_FILE" >"$tmp"
 mv -f "$tmp" "$TRAFFIC_FILE"
 confirm() { return 0; }
-# Collection is disabled: clearing must still migrate the aggregate first.
+# Clearing also migrates the aggregate before updating a single inbound.
 traffic_clear_tag_records a >/dev/null
 traffic_sync_inventory
 jq -e '.totals.daily["2026-08-24"]==600 and .totals.cycles["2026-08-01 00:00:00"]==600 and

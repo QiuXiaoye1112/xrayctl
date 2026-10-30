@@ -155,11 +155,13 @@ if rg -q '开启流量限制|关闭流量限制|3\)' "$TEST_ROOT/traffic-limit-m
 traffic_show() { :; }
 traffic_clear_tag_records() { record traffic_clear_tag_records; }
 traffic_clear_all_records() { record traffic_clear_all_records; }
-traffic_disable() { record traffic_disable; }
 traffic_period_set() { record traffic_period_set; }
-for spec in '1 traffic_collect' '2 traffic_clear_tag_records' '3 traffic_clear_all_records' '4 traffic_disable' '5 traffic_period_set'; do
+for spec in '1 traffic_collect' '2 traffic_clear_tag_records' '3 traffic_clear_all_records' '4 traffic_period_set'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route traffic_menu "$choice" "$action"
 done
+: >"$EVENT_LOG"; set_inputs 0; traffic_menu >"$TEST_ROOT/traffic-menu.txt"
+if rg -q '开启流量统计|停止流量统计|4\) (开启|停止)' "$TEST_ROOT/traffic-menu.txt"; then fail 'traffic information menu still exposes a manual traffic toggle'; fi
+if ! rg -q '4\) 设置月度统计起点' "$TEST_ROOT/traffic-menu.txt"; then fail 'traffic period option was not renumbered after removing the toggle'; fi
 
 prompt_renamed_inbound_tag() { printf -v "$1" '%s' "$2"; }
 for spec in '1 rename_inbound node node' '2 modify_inbound_basic node' '3 modify_inbound_transport node'; do

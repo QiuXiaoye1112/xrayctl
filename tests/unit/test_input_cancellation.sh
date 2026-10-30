@@ -51,6 +51,7 @@ touch "$CERT_DIR/one.example.com.crt" "$CERT_DIR/one.example.com.key" "$CERT_DIR
 check_cancel select_managed_certificate value
 ensure_runtime_dependencies() { :; }
 require_xray_installed() { :; }
+traffic_runtime_ensure() { :; }
 check_cancel add_outbound
 
 # EOF at later fields must propagate through nested builders too.

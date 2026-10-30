@@ -415,7 +415,7 @@ traffic_user_enable() {
   traffic_user_require_manager
   ensure_config
   require_xray_installed
-  traffic_is_enabled || { warn "请先开启流量统计。"; return 1; }
+  traffic_runtime_ensure || return 1
   local address candidate needs_timer_update=0
   if [[ $(platform_init_system) == systemd ]] &&
      { [[ ! -f $TRAFFIC_SYSTEMD_SERVICE ]] || ! grep -Fq "$(dirname "$CONFIG_FILE")" "$TRAFFIC_SYSTEMD_SERVICE"; }; then
@@ -554,10 +554,13 @@ traffic_user_reset() {
 
 traffic_users_show() {
   local filter=${1-} tag protocol id label used quota start end enabled status period_start current_bytes current_tag="" user_state
-  [[ -r $CONFIG_FILE && -r $TRAFFIC_FILE ]] || { warn "用户流量统计尚未配置。"; return 1; }
+  heading '流量限制'
+  if [[ ! -r $CONFIG_FILE || ! -r $TRAFFIC_FILE ]]; then
+    info "用户流量统计尚未配置。"
+    return 0
+  fi
   IFS=$'\t' read -r period_start _ < <(traffic_period_bounds "$(traffic_now)")
   traffic_user_managed_config && user_state='已配置' || user_state='未配置'
-  heading '流量限制'
   while IFS=$'\t' read -r tag protocol id label current_bytes used quota start end enabled; do
     [[ -n $tag ]] || continue
     if [[ $tag != "$current_tag" ]]; then
@@ -737,7 +740,7 @@ traffic_period_bounds() {
 }
 
 traffic_default_json() {
-  printf '%s\n' '{"schema":1,"accountingMultiplier":2,"enabled":false,"backend":"","lastCollectedAt":"","period":{"day":1,"time":"00:00:00"},"periodsSeeded":false,"inbounds":{}}'
+  printf '%s\n' '{"schema":1,"accountingMultiplier":2,"enabled":true,"backend":"","lastCollectedAt":"","period":{"day":1,"time":"00:00:00"},"periodsSeeded":false,"inbounds":{}}'
 }
 
 # Install a complete JSON file by rename in the same directory so readers
@@ -776,13 +779,13 @@ traffic_init_file_locked() {
     rm -f "$tmp"
   elif ! jq -e '.schema==1 and (.enabled|type)=="boolean" and (.backend|type)=="string" and (.lastCollectedAt|type)=="string" and (.period.day|type)=="number" and (.period.time|type)=="string" and (.periodsSeeded|type)=="boolean"' "$TRAFFIC_FILE" >/dev/null 2>&1; then
     tmp=$(temp_file)
-    jq '.schema=1 | .enabled=(.enabled==true) | .backend=(.backend // "") | .lastCollectedAt=(.lastCollectedAt // "") | .period=(.period // {day:1,time:"00:00:00"}) | .periodsSeeded=(.periodsSeeded==true) | .inbounds=(if (.inbounds|type)=="object" then .inbounds else {} end) | del(.limitsEnabled) | .inbounds |= with_entries(del(.value.limit))' \
+    jq '.schema=1 | .enabled=true | .backend=(.backend // "") | .lastCollectedAt=(.lastCollectedAt // "") | .period=(.period // {day:1,time:"00:00:00"}) | .periodsSeeded=(.periodsSeeded==true) | .inbounds=(if (.inbounds|type)=="object" then .inbounds else {} end) | del(.limitsEnabled) | .inbounds |= with_entries(del(.value.limit))' \
       "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
     traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
-  elif jq -e 'has("limitsEnabled") or any(.inbounds[]?; type=="object" and has("limit"))' "$TRAFFIC_FILE" >/dev/null 2>&1; then
+  elif jq -e '.enabled!=true or has("limitsEnabled") or any(.inbounds[]?; type=="object" and has("limit"))' "$TRAFFIC_FILE" >/dev/null 2>&1; then
     tmp=$(temp_file)
-    jq 'del(.limitsEnabled) | .inbounds |= with_entries(del(.value.limit))' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
+    jq '.enabled=true | del(.limitsEnabled) | .inbounds |= with_entries(del(.value.limit))' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
     traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
   fi
@@ -794,7 +797,9 @@ traffic_is_enabled() {
 
 traffic_set_enabled() {
   local enabled=$1 tmp rc=0
-  traffic_init_file
+  [[ $enabled == true ]] || { warn "流量统计默认开启，不支持关闭。"; return 1; }
+  traffic_init_file || return 1
+  traffic_is_enabled && return 0
   traffic_lock_acquire || return 1
   tmp=$(temp_file)
   jq --argjson enabled "$enabled" '.enabled=$enabled' "$TRAFFIC_FILE" >"$tmp" || rc=1
@@ -981,7 +986,7 @@ traffic_ensure_backend() {
   [[ $(traffic_backend) != none ]] && return 0
   info "流量统计需要 nftables，正在安装..."
   install_packages nftables
-  [[ $(traffic_backend) != none ]] || { warn "nftables 安装失败，无法开启流量统计。"; return 1; }
+  [[ $(traffic_backend) != none ]] || { warn "nftables 安装失败，流量统计无法运行。"; return 1; }
 }
 
 traffic_read_nft_counters() {
@@ -1514,7 +1519,12 @@ traffic_timer_remove() {
 }
 
 traffic_runtime_ensure() {
-  traffic_is_enabled || return 0
+  traffic_require_root internal-traffic-ensure
+  local was_enabled=0
+  traffic_is_enabled && was_enabled=1
+  traffic_init_file || return 1
+  traffic_set_enabled true || return 1
+  if ((was_enabled)); then traffic_collect || true; fi
   traffic_ensure_backend || return 1
   traffic_sync_inventory || return 1
   traffic_rules_restore_serialized || return 1
@@ -1528,35 +1538,13 @@ traffic_runtime_stop() {
 
 traffic_enable() {
   traffic_require_root traffic-enable; ensure_config
-  local selected
-  traffic_ensure_backend || return 1
-  selected=$(traffic_backend)
-  if traffic_backend_conflicts "$selected"; then
-    warn "检测到同名 ${selected} 流量规则，但无法确认由 xrayctl 管理；拒绝覆盖。"
-    return 1
-  fi
-  traffic_set_backend "$selected"
-  traffic_set_enabled true
-  traffic_sync_inventory
-  if ! traffic_rules_restore || ! traffic_timer_install; then
-    traffic_set_enabled false; traffic_runtime_stop || true
-    warn "流量统计启动失败，已撤销运行时规则。"; return 1
-  fi
+  traffic_runtime_ensure || return 1
   meta_resource_register trafficFile "$TRAFFIC_FILE"
-  info "流量统计已开启；每分钟保存一次，只保留当前月度周期。"
+  info "流量统计已自动开启；每分钟采集一次。"
 }
 
 traffic_disable() {
-  traffic_require_root traffic-disable
-  [[ $(traffic_user_limit_count) == 0 ]] || { warn "仍有用户额度生效，不能停止流量统计。"; return 1; }
-  traffic_collect || true
-  if ! traffic_runtime_stop; then
-    traffic_timer_install || true
-    warn "检测到不属于 xrayctl 的同名规则，流量统计未停止。"
-    return 1
-  fi
-  traffic_set_enabled false
-  info "流量统计已停止，已有记录将继续保留。"
+  info "流量统计默认开启，不支持关闭。"
 }
 
 traffic_remove_all() {

@@ -45,6 +45,7 @@ source "${REPO_ROOT}/tests/helpers/assert.sh"
 source "${REPO_ROOT}/xrayctl.sh"
 trap - ERR
 trap cleanup_test_root EXIT
+traffic_collect() { :; }
 
 ensure_runtime_dependencies() { :; }
 require_xray_installed() { :; }
@@ -108,6 +109,24 @@ trap - ERR
 [[ $menu_failure_output != *"命令在第"* ]] || fail "expected menu failure triggered the global ERR trace"
 [[ $menu_failure_output == *"操作未完成"* ]] || fail "menu failure did not produce the concise retry warning"
 
+# An unconfigured traffic page is informational. User quota management attempts
+# automatic setup and reports a single concrete failure if that setup cannot start.
+traffic_status_output=$(traffic_users_show 2>&1)
+[[ $traffic_status_output == *"信息 · 用户流量统计尚未配置。"* ]] || fail "unconfigured user traffic was not shown as information"
+[[ $traffic_status_output != *"警告 ·"* ]] || fail "read-only traffic status emitted a warning"
+traffic_user_managed_config() { return 1; }
+select_inbound() { printf -v "$1" '%s' vless-node; }
+pause() { :; }
+traffic_user_enable() { traffic_runtime_ensure; }
+traffic_runtime_ensure() { : >"${XRAYCTL_TRAFFIC_FILE}.runtime-ensure"; warn "流量统计自动启动失败。"; return 1; }
+traffic_menu_output=$(traffic_user_menu 2>&1)
+warning_count=$(printf '%s\n' "$traffic_menu_output" | grep -c '警告 ·' || true)
+assert_eq 1 "$warning_count" "automatic traffic startup failure showed duplicate warnings"
+[[ $traffic_menu_output == *"流量统计自动启动失败。"* ]] || fail "user quota menu did not report automatic startup failure"
+[[ -f ${XRAYCTL_TRAFFIC_FILE}.runtime-ensure ]] || fail "user quota menu did not try to start default traffic collection"
+[[ $traffic_menu_output != *"请先开启流量统计"* ]] || fail "user quota menu still asks users to enable default traffic collection"
+[[ $traffic_menu_output != *"操作未完成"* ]] || fail "user quota menu repeated its specific warning"
+
 before_failed_assignment=$(jq -S . "$CONFIG_FILE")
 service_is_active() { return 0; }
 restart_service() { return 1; }
@@ -130,6 +149,7 @@ traffic_init_file
 candidate=$(temp_file)
 jq '.inbounds["vless-node"]={protocol:"vless",port:8443,daily:{},cycles:{},limit:{enabled:true,usedBytes:123,quotaBytes:1000}}' "$TRAFFIC_FILE" >"$candidate"
 install -m 600 "$candidate" "$TRAFFIC_FILE"; rm -f "$candidate"
+traffic_init_file
 delete_inbound vless-node 1 >/dev/null
 assert_eq 0 "$(jq '.inbounds|length' "$CONFIG_FILE")" "inbound delete failed"
 assert_eq null "$(jq -r '.inbounds["vless-node"]' "$META_FILE")" "inbound metadata delete failed"
