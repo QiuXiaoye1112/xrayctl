@@ -168,6 +168,58 @@ create_domain_template() {
   info "模板 ${name} 已创建。"
 }
 
+delete_domain_template() {
+  ensure_runtime_dependencies outbound-template-delete; ensure_config; ensure_meta
+  local name=${1-} meta_candidate current next config_candidate inbound user_refs
+  [[ -n $name ]] || die "请提供要删除的模板名称。"
+  domain_template_exists "$name" || die "找不到模板：$name"
+  if ! jq -e --arg name "$name" '
+    [ .routing.rules[]? |
+      select(.template==$name and ((.ruleTag // "")|startswith("xrayctl-domain:"))) |
+      select((.inboundTag|type)!="array" or (.inboundTag|length)!=1) ] | length==0
+  ' "$CONFIG_FILE" >/dev/null; then
+    warn "模板存在无法安全识别归属的入站规则，请先检查配置。"
+    return 1
+  fi
+  confirm "删除模板 ${name}？其入站和用户绑定及对应规则也会移除。" N || return 0
+
+  meta_candidate=$(temp_file) || return 1
+  jq --arg name "$name" '
+    .domainTemplates.templates = [.domainTemplates.templates[]? | select(.name!=$name)] |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? | select(.template!=$name)] |
+    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? | select(.template!=$name)]
+  ' "$META_FILE" >"$meta_candidate" || { rm -f "$meta_candidate"; return 1; }
+  current=$(temp_file) || { rm -f "$meta_candidate"; return 1; }
+  cp "$CONFIG_FILE" "$current" || { rm -f "$meta_candidate" "$current"; return 1; }
+  while IFS= read -r inbound; do
+    [[ -n $inbound ]] || continue
+    _rebuild_inbound_template_config next "$current" "$inbound" "$meta_candidate" || {
+      rm -f "$meta_candidate" "$current"; return 1;
+    }
+    rm -f "$current"
+    current=$next
+  done < <(jq -r --arg name "$name" --slurpfile config "$CONFIG_FILE" '
+    ([.domainTemplates.bindings[]? | select(.template==$name) | .inbound] +
+     [$config[0].routing.rules[]? |
+       select(.template==$name and ((.ruleTag // "")|startswith("xrayctl-domain:"))) | .inboundTag[0]]) |
+    map(select(type=="string" and length>0)) | unique[]
+  ' "$META_FILE")
+  user_refs=$(jq -r --arg name "$name" --slurpfile config "$CONFIG_FILE" '
+    ([.domainTemplates.userBindings[]? | select(.template==$name)] +
+     [$config[0].routing.rules[]? |
+       select(.template==$name and ((.ruleTag // "")|startswith("xrayctl-user-domain:")))]) | length
+  ' "$META_FILE") || { rm -f "$meta_candidate" "$current"; return 1; }
+  if ((user_refs > 0)); then
+    config_candidate=$(temp_file) || { rm -f "$meta_candidate" "$current"; return 1; }
+    _rebuild_user_template_config "$current" "$config_candidate" "$meta_candidate" || {
+      rm -f "$meta_candidate" "$current" "$config_candidate"; return 1;
+    }
+    rm -f "$current"
+    current=$config_candidate
+  fi
+  _commit_template_change "$current" "$meta_candidate" "模板 ${name} 已删除。"
+}
+
 _commit_template_change() {
   local config_candidate=$1 meta_candidate=$2 message=$3 rc=0
   if cmp -s "$CONFIG_FILE" "$config_candidate"; then

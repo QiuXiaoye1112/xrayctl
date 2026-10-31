@@ -143,6 +143,26 @@ check_inbound_routing_summary() {
   [[ $menu_output == *'分流规则：1 条'* && $menu_output == *$'  模板：\n    user-only → direct'* ]] || fail 'user routing summary was changed'
 }
 check_inbound_routing_summary
+check_template_library_menu() {
+  local META_FILE="$TEST_ROOT/template-library-meta.json" output
+  ensure_meta
+  jq '.domainTemplates.templates=[{name:"openai",exact:[],suffix:["openai.com"]},{name:"claude",exact:[],suffix:[]}]' \
+    "$META_FILE" >"$TEST_ROOT/template-library-meta.tmp"
+  mv "$TEST_ROOT/template-library-meta.tmp" "$META_FILE"
+  set_inputs 0
+  output=$(template_library_menu)
+  [[ $output == *openai* && $output == *claude* ]] || fail 'template library omitted template names'
+  [[ $output != *'1) openai'* && $output != *'2) claude'* ]] || fail 'template list displayed action numbers'
+  [[ $output == *'1) 新建模板'* && $output == *'2) 管理模板'* && $output == *'3) 删除模板'* && $output == *'0) 返回'* ]] || fail 'template actions have the wrong order'
+  : >"$EVENT_LOG"; set_inputs 1 0; template_library_menu >/dev/null
+  assert_recorded 'create_domain_template'
+  template_manage_menu() { record template_manage_menu "$1"; }
+  : >"$EVENT_LOG"; set_inputs 2 1 0; template_library_menu >/dev/null
+  assert_recorded 'template_manage_menu openai'
+  : >"$EVENT_LOG"; set_inputs 3 2 0; template_library_menu >/dev/null
+  assert_recorded 'delete_domain_template claude'
+}
+check_template_library_menu
 : >"$EVENT_LOG"; set_inputs 1 0; inbound_outbound_menu >/dev/null
 assert_recorded 'assign_outbound node '
 : >"$EVENT_LOG"; set_inputs 3 1 0 0; inbound_outbound_menu >/dev/null

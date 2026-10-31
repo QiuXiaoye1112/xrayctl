@@ -382,35 +382,22 @@ template_manage_menu() {
 }
 
 template_library_menu() {
-  local choice name number=0
-  local -a names=()
+  local choice name exact suffix
   while true; do
     clear_screen
     heading '模板库'
-    names=()
-    number=0
     while IFS=$'\t' read -r name exact suffix; do
       [[ -n $name ]] || continue
-      names+=("$name")
-      ((number+=1))
-      printf '%s) %-16s 精确 %s 个，子域名 %s 个\n' "$number" "$name" "$exact" "$suffix"
+      printf '  %-16s 精确 %s 个，子域名 %s 个\n' "$name" "$exact" "$suffix"
     done < <(list_domain_templates)
-    printf '\n%s) 新建模板\n0) 返回\n' "$((number + 1))"
+    printf '\n1) 新建模板\n2) 管理模板\n3) 删除模板\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
+      1) run_menu_action create_domain_template; pause;;
+      2) if select_domain_template name; then template_manage_menu "$name"; fi;;
+      3) if select_domain_template name; then run_menu_action delete_domain_template "$name"; pause; fi;;
       0) return;;
-      ''|*[!0-9]*) warn '无效选项。'; pause;;
-      *)
-        if ((choice == ${#names[@]} + 1)); then
-          run_menu_action create_domain_template
-          pause
-        elif ((choice >= 1 && choice <= ${#names[@]})); then
-          template_manage_menu "${names[$((choice-1))]}"
-        else
-          warn '无效选项。'
-          pause
-        fi
-        ;;
+      *) warn '无效选项。'; pause;;
     esac
   done
 }
