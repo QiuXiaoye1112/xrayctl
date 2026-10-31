@@ -188,15 +188,15 @@ choose() {
   for ((i=0; i<${#options[@]}; i++)); do printf '  %d) %s\n' "$((i+1))" "${options[$i]}"; done
   while true; do
     read -r -p "请选择 [1-${#options[@]}]: " selected_value || { cancel_selection; return 1; }
-    if [[ $selected_value =~ ^[0-9]+$ ]] && (( selected_value >= 1 && selected_value <= ${#options[@]} )); then
-      printf -v "$__var" '%s' "$selected_value"
+    if [[ $selected_value =~ ^[0-9]{1,9}$ ]] && (( 10#$selected_value >= 1 && 10#$selected_value <= ${#options[@]} )); then
+      printf -v "$__var" '%s' "$((10#$selected_value))"
       return 0
     fi
     warn "无效选项。"
   done
 }
 
-validate_port() { [[ $1 =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+validate_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 validate_tag() { [[ $1 =~ ^[A-Za-z0-9_.-]+$ ]]; }
 validate_domain() { [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]; }
 validate_path() { [[ $1 == /* && $1 != *" "* ]]; }
@@ -287,7 +287,10 @@ run_menu_action() {
   else
     trap - ERR
   fi
-  return "$action_status"
+  if ((action_status != 0)); then
+    warn "操作未完成，脚本仍在运行，请检查输入后重试。"
+  fi
+  return 0
 }
 
 url_encode() { jq -rn --arg value "$1" '$value|@uri'; }

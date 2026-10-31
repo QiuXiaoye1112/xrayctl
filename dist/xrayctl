@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="7ac29955b842"
+readonly XRAYCTL_BUILD_COMMIT="2e8688a01d7c"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -188,15 +188,15 @@ choose() {
   for ((i=0; i<${#options[@]}; i++)); do printf '  %d) %s\n' "$((i+1))" "${options[$i]}"; done
   while true; do
     read -r -p "请选择 [1-${#options[@]}]: " selected_value || { cancel_selection; return 1; }
-    if [[ $selected_value =~ ^[0-9]+$ ]] && (( selected_value >= 1 && selected_value <= ${#options[@]} )); then
-      printf -v "$__var" '%s' "$selected_value"
+    if [[ $selected_value =~ ^[0-9]{1,9}$ ]] && (( 10#$selected_value >= 1 && 10#$selected_value <= ${#options[@]} )); then
+      printf -v "$__var" '%s' "$((10#$selected_value))"
       return 0
     fi
     warn "无效选项。"
   done
 }
 
-validate_port() { [[ $1 =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+validate_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 validate_tag() { [[ $1 =~ ^[A-Za-z0-9_.-]+$ ]]; }
 validate_domain() { [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]; }
 validate_path() { [[ $1 == /* && $1 != *" "* ]]; }
@@ -287,7 +287,10 @@ run_menu_action() {
   else
     trap - ERR
   fi
-  return "$action_status"
+  if ((action_status != 0)); then
+    warn "操作未完成，脚本仍在运行，请检查输入后重试。"
+  fi
+  return 0
 }
 
 url_encode() { jq -rn --arg value "$1" '$value|@uri'; }
@@ -305,6 +308,7 @@ generate_uuid() {
 # --- src/platform.sh ---
 validate_ipv4() {
   local value=$1 a b c d extra
+  [[ $value =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
   IFS=. read -r a b c d extra <<<"$value"
   [[ -z ${extra:-} && $a =~ ^[0-9]{1,3}$ && $b =~ ^[0-9]{1,3}$ && $c =~ ^[0-9]{1,3}$ && $d =~ ^[0-9]{1,3}$ ]] \
     && ((10#$a <= 255 && 10#$b <= 255 && 10#$c <= 255 && 10#$d <= 255))
@@ -340,7 +344,7 @@ platform_require_supported() {
 
 platform_service_exists() {
   case $(platform_init_system) in
-    systemd) systemctl list-unit-files "$SYSTEMD_UNIT" --no-legend 2>/dev/null | grep -q "$SYSTEMD_UNIT" ;;
+    systemd) systemctl list-unit-files "$SYSTEMD_UNIT" --no-legend 2>/dev/null | grep -F "$SYSTEMD_UNIT" >/dev/null ;;
     openrc) [[ -x $OPENRC_SERVICE ]] ;;
   esac
 }
@@ -361,7 +365,7 @@ platform_service_is_active() {
 platform_service_is_enabled() {
   case $(platform_init_system) in
     systemd) systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null ;;
-    openrc) rc-update show default 2>/dev/null | grep -Eq "[[:space:]]${SERVICE_NAME}([[:space:]]|$)" ;;
+    openrc) rc-update show default 2>/dev/null | grep -E "[[:space:]]${SERVICE_NAME}([[:space:]]|$)" >/dev/null ;;
   esac
 }
 
@@ -438,7 +442,34 @@ platform_daemon_reload() {
 }
 
 validate_ip_literal() {
-  validate_ipv4 "$1" || [[ $1 == *:* && $1 =~ ^[0-9A-Fa-f:]+$ && ${#1} -le 45 ]]
+  validate_ipv4 "$1" && return 0
+  local value=$1 rest group count=0 compressed=0
+  [[ $value == *:* && ${#value} -le 45 ]] || return 1
+  # An embedded IPv4 address occupies the final two IPv6 groups.
+  if [[ $value == *.* ]]; then
+    validate_ipv4 "${value##*:}" || return 1
+    value="${value%:*}:0:0"
+  fi
+  [[ $value =~ ^[0-9A-Fa-f:]+$ && $value != *:::* ]] || return 1
+  [[ $value != :* || $value == ::* ]] || return 1
+  [[ $value != *: || $value == *:: ]] || return 1
+  if [[ $value == *::* ]]; then
+    rest=${value#*::}
+    [[ $rest != *::* ]] || return 1
+    compressed=1
+    value=${value/::/:}
+    value=${value#:}; value=${value%:}
+  else
+    [[ $value != :* && $value != *: ]] || return 1
+  fi
+  rest=$value
+  while [[ -n $rest ]]; do
+    group=${rest%%:*}
+    [[ $group =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+    count=$((count + 1))
+    if [[ $rest == *:* ]]; then rest=${rest#*:}; else rest=""; fi
+  done
+  if ((compressed)); then ((count < 8)); else ((count == 8)); fi
 }
 
 detect_public_ipv4() {
@@ -1126,6 +1157,8 @@ state_commit() {
   fi
 
   if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$CONFIG_FILE"; then
+    error "配置写入失败，正在恢复原配置和 metadata。"
+    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
     ((traffic_locked == 0)) || traffic_lock_release
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
@@ -1257,7 +1290,8 @@ _state_build_inbound_meta_delete() {
   jq --arg tag "$tag" '
     del(.inbounds[$tag]) |
     .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
-    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? | select(.inbound != $tag)]' \
+    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? | select(.inbound != $tag)] |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? | select(.inbound != $tag)]' \
     "$current" >"$candidate"
 }
 
@@ -1269,6 +1303,8 @@ _state_build_inbound_meta_rename() {
     else . end |
     .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
     .domainTemplates.userBindings = [.domainTemplates.userBindings[]? |
+      if .inbound==$old then .inbound=$new else . end] |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? |
       if .inbound==$old then .inbound=$new else . end]' \
     "$current" >"$candidate"
 }
@@ -1319,9 +1355,15 @@ check_config() {
 }
 
 backup_all() {
-  require_root backup; ensure_config
+  ensure_runtime_dependencies backup; ensure_config
   local target=${1:-${BACKUP_DIR}/xrayctl-$(timestamp).tar.gz}
-  local paths=("${CONFIG_FILE#/}")
+  local paths=("${CONFIG_FILE#/}") path resolved_target
+  [[ ! -e $target && ! -L $target ]] || die "备份目标已存在，拒绝覆盖：$target"
+  mkdir -p "$(dirname "$target")"
+  resolved_target=$(readlink -f -- "$target") || die "无法解析备份目标路径。"
+  for path in "$CONFIG_DIR" "$CERT_DIR"; do
+    [[ $resolved_target != "$(readlink -f -- "$path" 2>/dev/null || true)/"* ]] || die "备份目标不能位于受备份的数据目录内。"
+  done
   if traffic_is_enabled; then traffic_collect || true; fi
   ensure_backup_dir
   mkdir -p "$(dirname "$target")"
@@ -1333,25 +1375,61 @@ backup_all() {
   info "备份已创建：$target（包含 Xray 配置、metadata、流量记录和证书副本，不含 Certbot 账户/lineage 数据）。"
 }
 
+_restore_backup_payload() {
+  local root=$1 extract_config=$2 __restored_traffic=$3
+  mkdir -p "$(dirname "$CONFIG_FILE")" "$(dirname "$META_FILE")" || return 1
+  [[ ! -L $CONFIG_FILE && ! -L $META_FILE ]] || return 1
+  cp -a "$root/$extract_config" "$CONFIG_FILE" || return 1
+  if [[ -f "$root/${META_FILE#/}" ]]; then
+    cp -a "$root/${META_FILE#/}" "$META_FILE" || return 1
+  else
+    rm -f "$META_FILE" || return 1
+  fi
+  if [[ -e $CERT_DIR ]]; then _safe_remove_path "$CERT_DIR" || return 1; fi
+  rm -rf "$CERT_DIR" || return 1
+  mkdir -p "$CERT_DIR" || return 1
+  if [[ -d "$root/${CERT_DIR#/}" ]]; then cp -a "$root/${CERT_DIR#/}/." "$CERT_DIR/" || return 1; fi
+  if [[ -f "$root/${TRAFFIC_FILE#/}" ]]; then
+    mkdir -p "$(dirname "$TRAFFIC_FILE")" || return 1
+    traffic_write_file "$root/${TRAFFIC_FILE#/}" || return 1
+    printf -v "$__restored_traffic" '%s' 1
+  fi
+}
+
 restore_backup() {
   ensure_runtime_dependencies restore
   local archive=${1-} temp extract_config snapshot had_meta=0 had_certs=0 had_traffic=0 restored_traffic=0
-  local metadata_source traffic_source
+  local metadata_source traffic_source validation_config snapshot_failed=0 rollback_failed=0
   [[ -n $archive ]] || prompt_value archive "备份文件路径" || return 1
   [[ -r $archive ]] || die "无法读取备份：$archive"
   tar -tzf "$archive" >/dev/null || die "不是有效的 tar.gz 备份。"
   if tar -tzf "$archive" | awk 'BEGIN{bad=0} /^\// || /(^|\/)\.\.($|\/)/ {bad=1} END{exit !bad}'; then
     die "备份包含不安全的路径。"
   fi
+  # Reject links/devices before extraction: a post-extraction symlink scan is
+  # too late to protect against hard links and special archive members.
+  if ! tar -tvzf "$archive" | awk 'substr($0,1,1)!~/^[-d]$/ {bad=1} END{exit bad}'; then
+    die "备份只允许普通文件和目录，不能包含链接或设备。"
+  fi
   extract_config="${CONFIG_FILE#/}"
   tar -tzf "$archive" | grep -Fx "$extract_config" >/dev/null || die "备份中没有 ${extract_config}。"
   temp=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-restore.XXXXXX")
-  tar -xzf "$archive" -C "$temp"
+  tar -xzf "$archive" -C "$temp" || { rm -rf "$temp"; die "备份解包失败，未修改当前配置。"; }
   if find "$temp" -type l -print -quit | grep -q .; then rm -rf "$temp"; die "备份中不允许包含符号链接。"; fi
   [[ -f "$temp/$extract_config" ]] || { rm -rf "$temp"; die "备份配置不是普通文件。"; }
   jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' \
     "$temp/$extract_config" >/dev/null || { rm -rf "$temp"; die "备份配置 JSON 结构无效。"; }
-  validate_restore_config "$temp/$extract_config" || { rm -rf "$temp"; die "备份配置未通过检查。"; }
+  # During disaster recovery the live certificates may be missing. Validate
+  # against the archived copies before writing any production file.
+  validation_config="$temp/validate.json"
+  jq --arg certDir "$CERT_DIR/" --arg root "$temp" '
+    (.inbounds[]?.streamSettings.tlsSettings.certificates[]?) |=
+      (if (.certificateFile|type)=="string" and (.certificateFile|startswith($certDir))
+       then .certificateFile=($root+.certificateFile) else . end |
+       if (.keyFile|type)=="string" and (.keyFile|startswith($certDir))
+       then .keyFile=($root+.keyFile) else . end)
+  ' "$temp/$extract_config" >"$validation_config" || { rm -rf "$temp"; die "无法准备备份配置校验。"; }
+  validate_restore_config "$validation_config" || { rm -rf "$temp"; die "备份配置未通过检查。"; }
   metadata_source="$temp/${META_FILE#/}"
   traffic_source="$temp/${TRAFFIC_FILE#/}"
   if [[ -f $metadata_source ]]; then
@@ -1362,47 +1440,50 @@ restore_backup() {
     jq -e 'type=="object" and ((.inbounds // {})|type)=="object"' "$traffic_source" >/dev/null \
       || { rm -rf "$temp"; die "备份流量记录无效，未修改当前配置。"; }
   fi
+  if [[ -L $CONFIG_FILE || -L $META_FILE || -L $CERT_DIR ]] ||
+    { [[ -e $CERT_DIR ]] && ! _safe_remove_path "$CERT_DIR"; }; then
+    rm -rf "$temp"; die "恢复目标路径不安全，未修改当前配置。"
+  fi
   confirm "恢复会覆盖当前配置和托管证书，继续吗？" N || { rm -rf "$temp"; return; }
 
   if traffic_is_enabled; then
     traffic_collect || true
-    traffic_runtime_stop || { rm -rf "$temp"; die "无法安全停止现有流量统计规则，已取消恢复。"; }
   fi
   backup_config_quiet >/dev/null || true
-  snapshot="$temp/.current"
-  mkdir -p "$snapshot"
-  [[ ! -f $CONFIG_FILE ]] || cp -a "$CONFIG_FILE" "$snapshot/config.json"
-  if [[ -f $META_FILE ]]; then cp -a "$META_FILE" "$snapshot/meta.json"; had_meta=1; fi
-  if [[ -d $CERT_DIR ]]; then cp -a "$CERT_DIR" "$snapshot/certs"; had_certs=1; fi
-  if [[ -f $TRAFFIC_FILE ]]; then cp -a "$TRAFFIC_FILE" "$snapshot/traffic.json"; had_traffic=1; fi
-
-  cp -a "$temp/$extract_config" "$CONFIG_FILE"
-  if [[ -f "$temp/${META_FILE#/}" ]]; then cp -a "$temp/${META_FILE#/}" "$META_FILE"; else rm -f "$META_FILE"; fi
-  rm -rf "$CERT_DIR"
-  mkdir -p "$CERT_DIR"
-  if [[ -d "$temp/${CERT_DIR#/}" ]]; then cp -a "$temp/${CERT_DIR#/}/." "$CERT_DIR/"; fi
-  if [[ -f "$temp/${TRAFFIC_FILE#/}" ]]; then
-    mkdir -p "$(dirname "$TRAFFIC_FILE")"
-    traffic_write_file "$temp/${TRAFFIC_FILE#/}"
-    restored_traffic=1
+  snapshot=$(mktemp -d "$temp/.current.XXXXXX") || { rm -rf "$temp"; die "无法创建恢复前快照。"; }
+  if [[ -f $CONFIG_FILE ]]; then cp -a "$CONFIG_FILE" "$snapshot/config.json" || snapshot_failed=1; fi
+  if [[ -f $META_FILE ]]; then cp -a "$META_FILE" "$snapshot/meta.json" || snapshot_failed=1; had_meta=1; fi
+  if [[ -d $CERT_DIR ]]; then cp -a "$CERT_DIR" "$snapshot/certs" || snapshot_failed=1; had_certs=1; fi
+  if [[ -f $TRAFFIC_FILE ]]; then cp -a "$TRAFFIC_FILE" "$snapshot/traffic.json" || snapshot_failed=1; had_traffic=1; fi
+  if ((snapshot_failed)); then
+    rm -rf "$temp"; die "无法保存恢复前快照，未修改当前配置。"
   fi
-  if ! init_meta || ! setup_runtime_access || \
+  if traffic_is_enabled; then
+    traffic_runtime_stop || { rm -rf "$temp"; die "无法安全停止现有流量统计规则，已取消恢复。"; }
+  fi
+  if ! _restore_backup_payload "$temp" "$extract_config" restored_traffic || ! init_meta || ! setup_runtime_access || \
     ! validate_restore_config "$CONFIG_FILE" || ! restart_service || ! traffic_runtime_ensure; then
     error "恢复后配置、服务或流量统计运行时失败，正在整体回滚。"
-    if [[ -f "$snapshot/config.json" ]]; then cp -a "$snapshot/config.json" "$CONFIG_FILE"; else rm -f "$CONFIG_FILE"; fi
-    if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE"; else rm -f "$META_FILE"; fi
-    rm -rf "$CERT_DIR"
-    mkdir -p "$CERT_DIR"
-    if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/"; fi
+    if [[ -f "$snapshot/config.json" ]]; then cp -a "$snapshot/config.json" "$CONFIG_FILE" || rollback_failed=1
+    else rm -f "$CONFIG_FILE" || rollback_failed=1; fi
+    if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE" || rollback_failed=1
+    else rm -f "$META_FILE" || rollback_failed=1; fi
+    rm -rf "$CERT_DIR" || rollback_failed=1
+    mkdir -p "$CERT_DIR" || rollback_failed=1
+    if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/" || rollback_failed=1; fi
     if ((had_traffic)); then
-      mkdir -p "$(dirname "$TRAFFIC_FILE")"; traffic_write_file "$snapshot/traffic.json"
+      mkdir -p "$(dirname "$TRAFFIC_FILE")" || rollback_failed=1
+      traffic_write_file "$snapshot/traffic.json" || rollback_failed=1
     elif ((restored_traffic)); then
-      rm -f "$TRAFFIC_FILE"
+      rm -f "$TRAFFIC_FILE" || rollback_failed=1
     fi
-    init_meta || true
-    setup_runtime_access || true
-    restart_service || true
-    traffic_runtime_ensure || true
+    init_meta || rollback_failed=1
+    setup_runtime_access || rollback_failed=1
+    restart_service || rollback_failed=1
+    traffic_runtime_ensure || rollback_failed=1
+    if ((rollback_failed)); then
+      die "恢复失败，回滚未完全成功；原始快照保留在 ${snapshot}，请检查服务并手动恢复。"
+    fi
     rm -rf "$temp"
     die "恢复失败，已回滚配置、元数据、证书、流量记录和运行时规则。"
   fi
@@ -1565,7 +1646,7 @@ validate_certificate_pair_files() {
     || { warn "证书格式无效，请重新输入。"; return 1; }
   openssl x509 -in "$cert" -checkend 0 -noout >/dev/null 2>&1 \
     || { warn "证书已经过期，请重新选择。"; return 1; }
-  openssl pkey -in "$key" -noout >/dev/null 2>&1 \
+  openssl pkey -in "$key" -passin pass: -noout >/dev/null 2>&1 \
     || { warn "私钥格式无效，请重新输入。"; return 1; }
   cert_pub=$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | openssl sha256)
   key_pub=$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | openssl sha256)
@@ -1598,7 +1679,7 @@ ensure_certbot_environment() {
   local need_install=0
 
   if [[ ! -x $CERTBOT_BIN ]]; then need_install=1
-  elif ! "$CERTBOT_BIN" --help all 2>/dev/null | grep -q -- '--ip-address'; then need_install=1
+  elif ! "$CERTBOT_BIN" --help all 2>/dev/null | grep -- '--ip-address' >/dev/null; then need_install=1
   elif ! "$CERTBOT_VENV/bin/python" -c 'import certbot_dns_cloudflare' >/dev/null 2>&1; then need_install=1
   elif ! "$CERTBOT_VENV/bin/python" -c 'import certbot_nginx' >/dev/null 2>&1; then need_install=1
   fi
@@ -1641,9 +1722,9 @@ ensure_certbot_environment() {
     --timeout 15 --retries 2 --upgrade 'certbot>=5.4' certbot-dns-cloudflare certbot-nginx \
     || die "Certbot / 插件安装失败。"
 
-  "$CERTBOT_BIN" --help all 2>/dev/null | grep -q -- '--ip-address' \
+  "$CERTBOT_BIN" --help all 2>/dev/null | grep -- '--ip-address' >/dev/null \
     || die "当前安装的 Certbot 不支持 IP 证书。"
-  "$CERTBOT_VENV/bin/pip" list 2>/dev/null | grep -q 'certbot-dns-cloudflare' \
+  "$CERTBOT_VENV/bin/python" -c 'import certbot_dns_cloudflare' >/dev/null 2>&1 \
     || warn "certbot-dns-cloudflare 插件安装可能失败，Cloudflare DNS 验证不可用。"
   fi  # end of need_install == 1 block
 
@@ -1811,6 +1892,8 @@ replace_certificate_pair() {
   local had_cert=0 had_key=0 need_rollback=0
   local replace_changed=0
 
+  validate_certificate_pair_files "$source_cert" "$source_key" || return 1
+
   # --- Compute change BEFORE any replacement ---
   if ! cmp -s "$source_cert" "$cert_target" 2>/dev/null ||
      ! cmp -s "$source_key"  "$key_target"  2>/dev/null; then
@@ -1822,7 +1905,7 @@ replace_certificate_pair() {
     return 0
   fi
 
-  setup_certificate_access
+  setup_certificate_access || return 1
 
   install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$source_cert" "$cert_tmp" || return 1
   install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$source_key"  "$key_tmp"  || { rm -f "$cert_tmp"; return 1; }
@@ -3374,7 +3457,7 @@ link_query_for_stream() {
     reality)
       sni=$(jq -r '.realitySettings.serverNames[0]' <<<"$stream")
       sid=$(jq -r '.realitySettings.shortIds[0]' <<<"$stream")
-      pbk=$(reality_public_key "$tag") || { warn "无法获得 REALITY 公钥。"; return 0; }
+      pbk=$(reality_public_key "$tag") || { warn "无法获得 REALITY 公钥。"; return 1; }
       query+="&sni=$(url_encode "$sni")&fp=chrome&pbk=$(url_encode "$pbk")&sid=$(url_encode "$sid")&spx=%2F"
       ;;
   esac
@@ -3387,7 +3470,7 @@ link_query_for_stream() {
 
 print_links() {
   ensure_config; init_meta
-  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link
+  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link flow
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
@@ -3398,12 +3481,14 @@ print_links() {
   heading "${tag} 分享信息"
   case $protocol in
     vless)
-      query=$(link_query_for_stream "$tag" "$protocol")
-      while IFS= read -r -d '' label && IFS= read -r -d '' id; do
+      query=$(link_query_for_stream "$tag" "") || return 1
+      while IFS= read -r -d '' label && IFS= read -r -d '' id && IFS= read -r -d '' flow; do
         [[ -z $filter || $label == "$filter" ]] || continue
-        link="vless://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")"
+        link="vless://${id}@${uri_host}:${port}?${query}"
+        [[ -z $flow ]] || link+="&flow=$(url_encode "$flow")"
+        link+="#$(url_encode "${tag}-${label}")"
         print_share_entry "$label" "链接" "$link"
-      done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", (.id // ""), "\u0000"' "$CONFIG_FILE")
+      done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", (.id // ""), "\u0000", (.flow // ""), "\u0000"' "$CONFIG_FILE")
       ;;
     socks)
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
@@ -4633,8 +4718,21 @@ traffic_samples_json() {
   '
 }
 
+traffic_backend_test_guard() {
+  local command=$1
+  [[ ${XRAYCTL_TESTING:-0} == 1 ]] || return 0
+  # Unit tests supply shell-function backends. Real packet-rule tests must
+  # explicitly opt in and use their own network namespace, as CI already does.
+  declare -F "$command" >/dev/null && return 0
+  if [[ ${XRAYCTL_TEST_FIREWALL:-0} == 1 && -r /proc/self/ns/net && -r /proc/1/ns/net ]] &&
+    [[ $(readlink /proc/self/ns/net) != "$(readlink /proc/1/ns/net)" ]]; then return 0; fi
+  error "测试模式拒绝修改主机防火墙；请提供 ${command} 测试桩或显式使用专用网络命名空间。"
+  return 1
+}
+
 traffic_clear_nft_rules() {
   command_exists nft || return 0
+  traffic_backend_test_guard nft || return 1
   local payload
   payload=$(nft -j list table inet "$TRAFFIC_NFT_TABLE" 2>/dev/null) || return 0
   if ! jq -e '
@@ -4651,6 +4749,7 @@ traffic_clear_iptables_rules() {
   local command parent chain rules rc=0
   for command in iptables ip6tables; do
     command_exists "$command" || continue
+    traffic_backend_test_guard "$command" || return 1
     for chain in "$TRAFFIC_IPTABLES_IN_CHAIN" "$TRAFFIC_IPTABLES_OUT_CHAIN"; do
       rules=$("$command" -t filter -S "$chain" 2>/dev/null) || continue
       if awk -v chain="$chain" '$1=="-A" && $2==chain && index($0,"xrayctl-traffic:")==0 {bad=1} END{exit bad}' <<<"$rules"; then :
@@ -4684,6 +4783,7 @@ traffic_protocols_for_inbound() {
 }
 
 traffic_restore_nft_rules() {
+  traffic_backend_test_guard nft || return 1
   local tag inbound_protocol port transport_protocol count_comment count=0
   command_exists nft || return 1
   traffic_clear_nft_rules || return 1
@@ -4707,6 +4807,7 @@ traffic_restore_iptables_rules() {
   traffic_clear_iptables_rules || return 1
   for command in iptables ip6tables; do
     command_exists "$command" || continue
+    traffic_backend_test_guard "$command" || return 1
     "$command" -t filter -N "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -N "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -C INPUT -j "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I INPUT 1 -j "$TRAFFIC_IPTABLES_IN_CHAIN"
@@ -5150,8 +5251,7 @@ internal_traffic_watch() {
 }
 
 # --- src/outbound.sh ---
-# --- Missing function definitions for xrayctl ---
-# These functions are called but never defined in the script.
+# Outbounds, inbound domain routes, and per-user routes share config transactions.
 
 # Convert an IP address to a freedom outbound tag name.
 # Replaces dots and colons with hyphens, prefixed with "local-".
@@ -5184,7 +5284,7 @@ _outbound_display_name() {
     local ip
     ip=$(jq -r --arg tag "$tag" '(.outbounds[]? | select(.tag==$tag) | .sendThrough) // empty' "$CONFIG_FILE" 2>/dev/null)
     if [[ -n $ip ]]; then
-      printf '%s' "$ip"
+      if [[ $ip == *:* ]]; then _short_ipv6 "$ip"; else printf '%s' "$ip"; fi
     else
       printf '%s' "$tag"
     fi
@@ -5203,7 +5303,8 @@ _outbound_overview_display_name() {
 _outbound_endpoint_display() {
   local address=$1 port=$2
   if [[ $address == *:* ]]; then
-    printf '[%s]:%s' "$address" "$port"
+    address=${address#\[}; address=${address%\]}
+    printf '[%s]:%s' "$(_short_ipv6 "$address")" "$port"
   else
     printf '%s:%s' "$address" "$port"
   fi
@@ -5216,7 +5317,13 @@ _stage_local_outbound() {
   [[ -n $ip ]] || return 0
   local tag
   tag=$(_freedom_tag_for_ip "$ip")
-  # Add or update the freedom outbound with the given sendThrough IP
+  if ! jq -e --arg tag "$tag" --arg ip "$ip" '
+    all(.inbounds[]?; .tag!=$tag) and
+    all(.outbounds[]?; .tag!=$tag or (.protocol=="freedom" and .sendThrough==$ip))
+  ' "$candidate" >/dev/null; then
+    error "本机出站标签与已有资源冲突：$tag"
+    return 1
+  fi
   local tmp
   tmp=$(temp_file) || return 1
   jq --arg tag "$tag" --arg ip "$ip" '
@@ -5267,9 +5374,11 @@ _meta_template_domains_delete() {
   ' "$current" >"$candidate"
 }
 _rebuild_user_template_bindings_config() {
-  local __var=$1 metadata=$2 candidate
+  local __var=$1 metadata=$2 base=${3:-$CONFIG_FILE} candidate public_candidate
+  _rebuild_template_bound_inbounds_config public_candidate "$metadata" "" "$base" || return 1
   candidate=$(temp_file) || return 1
-  _rebuild_user_template_config "$CONFIG_FILE" "$candidate" "$metadata" || { rm -f "$candidate"; return 1; }
+  _rebuild_user_template_config "$public_candidate" "$candidate" "$metadata" || { rm -f "$candidate" "$public_candidate"; return 1; }
+  rm -f "$public_candidate"
   printf -v "$__var" '%s' "$candidate"
 }
 
@@ -5308,6 +5417,8 @@ _commit_template_change() {
 add_domain_template_domains() {
   ensure_runtime_dependencies outbound-template-edit; ensure_config; ensure_meta
   local name=$1 match=$2 raw=$3 normalized domains_json meta_candidate config_candidate
+  domain_template_exists "$name" || die "找不到模板：$name"
+  case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
   normalized=$(_normalize_domain_list "$raw") || return 1
   domains_json=$(printf '%s\n' "$normalized" | jq -Rsc 'split("\n") | map(select(length>0)) | unique')
   meta_candidate=$(temp_file)
@@ -5325,6 +5436,8 @@ add_domain_template_domains() {
 delete_domain_template_domains() {
   ensure_runtime_dependencies outbound-template-edit; ensure_config; ensure_meta
   local name=$1 match=$2 raw=$3 normalized domains_json meta_candidate config_candidate
+  domain_template_exists "$name" || die "找不到模板：$name"
+  case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
   normalized=$(_normalize_domain_list "$raw") || return 1
   domains_json=$(printf '%s\n' "$normalized" | jq -Rsc 'split("\n") | map(select(length>0)) | unique')
   meta_candidate=$(temp_file)
@@ -5385,7 +5498,7 @@ list_outbound_overview() {
 list_inbound_outbound_status() {
   ensure_config
   heading "入站出站状态"
-  printf '入站\t默认出站\t用户数\n'
+  printf '入站\t默认出站\t公共域名规则\t用户数\n'
   jq -r '
     (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native | (.outbounds // []) as $outbounds |
     .inbounds[]? | select(.protocol=="vless" or .protocol=="socks" or .protocol=="http") |
@@ -5393,6 +5506,7 @@ list_inbound_outbound_status() {
     [$tag,
      (([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native) as $route |
        ([$outbounds[]? | select(.tag==$route) | .sendThrough][0] // $route)),
+     ([$rules[]? | select(((.ruleTag // "")|startswith("xrayctl-domain:")) and .inboundTag==[$tag])] | length | tostring),
      (if $protocol=="vless" then (.settings.clients // [] | length)
       elif $protocol=="socks" and .settings.auth=="password" then ((.settings.accounts // .settings.users // []) | length)
       elif $protocol=="http" then ((.settings.accounts // .settings.users // []) | length)
@@ -5843,7 +5957,7 @@ outbound_user_domain_add() {
   while IFS= read -r domain; do [[ -n $domain ]] && domains+=("$domain"); done <<<"$normalized"
   domains_json=$(printf '%s\n' "${domains[@]}" | jq -Rsc 'split("\n")|map(select(length>0))|unique') || return 1
   existing=$(jq -r --arg inbound "$inbound" --arg identity "$identity" --arg match "$match" --argjson domains "$domains_json" '
-    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and .inboundTag==[$inbound] and .user==[$identity]) | .domain[0] as $d |
+    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and (.template // "")=="" and .inboundTag==[$inbound] and .user==[$identity]) | .domain[0] as $d |
       select(any($domains[]; $d==((if $match=="suffix" then "domain:" else "full:" end)+.))) |
       if $match=="suffix" then $d[7:] else $d[5:] end] | unique | join(",")
   ' "$CONFIG_FILE") || return 1
@@ -5865,7 +5979,11 @@ outbound_user_domain_add() {
   [[ $rules_json != '[]' ]] || { info "没有需要添加的新域名规则。"; return 0; }
   _outbound_user_rules_safe "$inbound" || return 1
   candidate=$(temp_file) || return 1
-  jq --argjson rules "$rules_json" '.routing=(.routing // {rules:[]}) | .routing.rules += $rules' \
+  jq --argjson rules "$rules_json" '
+    .routing=(.routing // {rules:[]}) |
+    .routing.rules=([.routing.rules[]? | . as $old |
+      select(((((.ruleTag // "")|startswith("xrayctl-user-domain:")) and (.template // "")!="" and
+        any($rules[]; .inboundTag==$old.inboundTag and .user==$old.user and .domain==$old.domain))|not))] + $rules)'  \
     "$CONFIG_FILE" >"$candidate" || { rm -f "$candidate"; return 1; }
   _stage_local_outbound "$candidate" "$local_ip" || { rm -f "$candidate"; return 1; }
   tmp=$(temp_file) || { rm -f "$candidate"; return 1; }
@@ -5998,7 +6116,8 @@ _meta_template_remove_user_bindings() {
   local current=$1 candidate=$2 outbound=$3
   jq --arg tag "$outbound" '
     .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
-    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? | select(.outbound != $tag)]' \
+    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? | select(.outbound != $tag)] |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? | select(.outbound != $tag)]' \
     "$current" >"$candidate"
 }
 
@@ -6027,7 +6146,7 @@ delete_outbound() {
          ((.ruleTag|startswith("xrayctl-user-outbound:"))|not) and
          ((.ruleTag|startswith("xrayctl-user-domain:"))|not))
       )] | length' "$CONFIG_FILE")
-  template_refs=$(jq -r --arg tag "$tag" '[.domainTemplates.userBindings[]? | select(.outbound==$tag)] | length' "$META_FILE")
+  template_refs=$(jq -r --arg tag "$tag" '([.domainTemplates.userBindings[]? | select(.outbound==$tag)] + [.domainTemplates.bindings[]? | select(.outbound==$tag)]) | length' "$META_FILE")
   if ((custom_refs > 0)); then
     die "该出站仍被自定义路由规则引用，请先在完整配置中处理。"
   fi
@@ -6047,8 +6166,7 @@ delete_outbound() {
       rm -f "$tmp" "$meta_candidate"
       return 1
     }
-    rebuilt=$(temp_file)
-    _rebuild_user_template_config "$tmp" "$rebuilt" "$meta_candidate" || { rm -f "$tmp" "$rebuilt" "$meta_candidate"; return 1; }
+    _rebuild_user_template_bindings_config rebuilt "$meta_candidate" "$tmp" || { rm -f "$tmp" "$meta_candidate"; return 1; }
     rm -f "$tmp"; tmp=$rebuilt
     XRAYCTL_QUIET_CONFIG_APPLIED=1 state_commit_candidate_with_metadata "$tmp" "$meta_candidate" || return
     rm -f "$meta_candidate"
@@ -6056,6 +6174,666 @@ delete_outbound() {
     XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" apply_candidate || return
   fi
   info "出站 ${tag} 已删除。"
+}
+
+# Inbound domain rules and existing template bindings remain supported.
+
+_short_ipv6() {
+  local ip=$1 first last
+  [[ $ip == *:* ]] || { printf '%s' "$ip"; return; }
+  first=${ip%%:*}
+  last=${ip##*:}
+  [[ -n $first ]] || first=:
+  [[ -n $last ]] || last=:
+  printf '%s:...:%s' "$first" "$last"
+}
+
+_xrayctl_domain_rule_jq() {
+  cat <<'JQ'
+def xrayctl_domain_rule:
+  type == "object" and
+  ((.ruleTag // "") | type == "string") and
+  ((.ruleTag // "") | startswith("xrayctl-domain:"));
+JQ
+}
+
+_meta_template_bind() {
+  local current=$1 candidate=$2 inbound=$3 name=$4 outbound=$5
+  jq --arg inbound "$inbound" --arg name "$name" --arg outbound "$outbound" '
+    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
+    if any(.domainTemplates.templates[]?; .name==$name) then
+      .domainTemplates.bindings = ([.domainTemplates.bindings[]? |
+        select(.inbound!=$inbound or .template!=$name)] +
+        [{inbound:$inbound,template:$name,outbound:$outbound}])
+    else error("找不到模板") end' "$current" >"$candidate"
+}
+
+_meta_template_unbind() {
+  local current=$1 candidate=$2 inbound=$3 name=$4
+  jq --arg inbound "$inbound" --arg name "$name" '
+    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? |
+      select(.inbound!=$inbound or .template!=$name)]' "$current" >"$candidate"
+}
+
+_meta_template_set_outbound() {
+  local current=$1 candidate=$2 inbound=$3 name=$4 outbound=$5
+  jq --arg inbound "$inbound" --arg name "$name" --arg outbound "$outbound" '
+    .domainTemplates = (.domainTemplates // {templates:[],bindings:[]}) |
+    if any(.domainTemplates.bindings[]?; .inbound==$inbound and .template==$name) then
+      .domainTemplates.bindings |= map(
+        if .inbound==$inbound and .template==$name then .outbound=$outbound else . end)
+    else error("该入站未应用此模板")
+    end' "$current" >"$candidate"
+}
+
+list_inbound_template_bindings() {
+  ensure_meta
+  jq -r --arg inbound "$1" '.domainTemplates.bindings[]? |
+    select(.inbound==$inbound) | [.template,.outbound] | @tsv' "$META_FILE"
+}
+
+_desired_to_additions() {
+  local __var=$1 desired_json=$2 inbound=$3
+  local count i item match domain template outbound tag rule result='[]'
+  count=$(jq 'length' <<<"$desired_json")
+  for ((i=0; i<count; i++)); do
+    item=$(jq -c ".[$i]" <<<"$desired_json")
+    match=$(jq -r '.match' <<<"$item")
+    domain=$(jq -r '.domain' <<<"$item")
+    template=$(jq -r '.template' <<<"$item")
+    outbound=$(jq -r '.outbound' <<<"$item")
+    tag="xrayctl-domain:$(random_hex 4)"
+    rule=$(jq -n --arg inbound "$inbound" --arg outbound "$outbound" \
+      --arg match "$match" --arg domain "$domain" --arg tag "$tag" --arg template "$template" '
+      {type:"field",inboundTag:[$inbound],
+       domain:(if $match=="suffix" then ["domain:"+$domain] else ["full:"+$domain] end),
+       outboundTag:$outbound,ruleTag:$tag,template:$template}')
+    result=$(jq -c --argjson rule "$rule" --arg inbound "$inbound" \
+      --arg match "$match" --arg domain "$domain" \
+      '. + [{rule:$rule,inbound:$inbound,match:$match,domain:$domain}]' <<<"$result")
+  done
+  printf -v "$__var" '%s' "$result"
+}
+
+# Later bindings in metadata order override earlier ones for the same domain.
+
+_inbound_desired_entries() {
+  local __var=$1 metadata=$2 inbound=$3 result
+  result=$(jq -c --arg inbound "$inbound" '
+    .domainTemplates as $dt |
+    [$dt.bindings[]? | select(.inbound==$inbound)] as $bound |
+    reduce (
+      $bound[] as $b |
+      ($dt.templates[]? | select(.name==$b.template)) as $t |
+      (($t.exact[]? | {match:"exact", domain:., key:("full:"+.)}),
+       ($t.suffix[]? | {match:"suffix", domain:., key:("domain:"+.)})) |
+      {key:.key, match:.match, domain:.domain, template:$b.template, outbound:$b.outbound}
+    ) as $entry ({}; .[$entry.key]=$entry) |
+    [.[]]
+  ' "$metadata")
+  printf -v "$__var" '%s' "$result"
+}
+
+_template_key_jq() {
+  cat <<'JQ'
+def template_rule_key:
+  if has("domain_suffix") then .domain_suffix[0]
+  elif has("domain") then .domain[0]
+  else null end;
+JQ
+}
+
+_reconcile_template_rules_jq() {
+  _xrayctl_domain_rule_jq
+  _template_key_jq
+  cat <<'JQ'
+def inbound_template_rule($inbound):
+  xrayctl_domain_rule and (.inboundTag // [])==[$inbound] and ((.template // "")!="");
+($desired | map({key:.key, value:.}) | from_entries) as $desired_map |
+.routing=(.routing // {}) |
+.routing.rules=[(.routing.rules // [])[] |
+  if inbound_template_rule($inbound) then
+    (template_rule_key) as $k |
+    if $desired_map[$k] != null then
+      .outboundTag=$desired_map[$k].outbound | .template=$desired_map[$k].template
+    else empty end
+  else . end]
+JQ
+}
+
+_missing_template_rules_jq() {
+  _xrayctl_domain_rule_jq
+  _template_key_jq
+  cat <<'JQ'
+def inbound_managed($inbound):
+  xrayctl_domain_rule and (.inboundTag // [])==[$inbound];
+([.routing.rules[]? | select(inbound_managed($inbound)) | template_rule_key]) as $present |
+[$desired[] | select(((.key) as $k | $present | index($k)) == null)]
+JQ
+}
+
+_rebuild_inbound_template_config() {
+  local __var=$1 base=$2 inbound=$3 metadata=$4
+  local desired missing additions tmpA out
+  _inbound_desired_entries desired "$metadata" "$inbound"
+  tmpA=$(temp_file)
+  if ! jq --arg inbound "$inbound" --argjson desired "$desired" \
+    "$(_reconcile_template_rules_jq)" "$base" >"$tmpA"; then
+    rm -f "$tmpA"
+    return 1
+  fi
+  missing=$(jq -c --arg inbound "$inbound" --argjson desired "$desired" \
+    "$(_missing_template_rules_jq)" "$tmpA") || {
+    rm -f "$tmpA"
+    return 1
+  }
+  if [[ $missing == '[]' ]]; then
+    printf -v "$__var" '%s' "$tmpA"
+    return 0
+  fi
+  _desired_to_additions additions "$missing" "$inbound"
+  out=$(temp_file)
+  if ! _build_template_config_candidate "$tmpA" "$out" "$additions"; then
+    rm -f "$tmpA" "$out"
+    return 1
+  fi
+  rm -f "$tmpA"
+  printf -v "$__var" '%s' "$out"
+}
+
+_rebuild_template_bound_inbounds_config() {
+  local __var=$1 metadata=$2 name=$3 base=${4:-$CONFIG_FILE}
+  local current next inbound rc=0
+  current=$(temp_file)
+  cp "$base" "$current"
+  while IFS=$'\t' read -r inbound; do
+    [[ -n $inbound ]] || continue
+    if ! _rebuild_inbound_template_config next "$current" "$inbound" "$metadata"; then
+      rc=1
+      break
+    fi
+    rm -f "$current"
+    current=$next
+  done < <(jq -r --arg name "$name" \
+    '.domainTemplates.bindings[]? | select($name=="" or .template==$name) | .inbound' "$metadata")
+  if ((rc)); then
+    rm -f "$current"
+    return 1
+  fi
+  printf -v "$__var" '%s' "$current"
+}
+
+_build_template_config_candidate() {
+  local current=$1 candidate=$2 additions_json=$3
+  jq --argjson additions "$additions_json" "$(_template_config_jq)" "$current" >"$candidate"
+}
+
+_template_config_jq() {
+  _xrayctl_domain_rule_jq
+  cat <<'JQ'
+def managed_for($rule; $inbound):
+  ($rule | xrayctl_domain_rule) and (($rule.inboundTag // []) == [$inbound]);
+def same_rule($rule; $new):
+  managed_for($rule; $new.inbound) and
+  ($rule.domain == [(if $new.match=="suffix" then "domain:" else "full:" end)+$new.domain]);
+def insert_rule($rules; $new):
+  ([range(0; ($rules|length)) as $i |
+    select(
+      if $new.match=="exact" then
+        ($rules[$i] | managed_for(.; $new.inbound) and (.domain[0] | startswith("domain:")))
+      else
+        ($rules[$i] | managed_for(.; $new.inbound) and (.domain[0] | startswith("domain:")) and
+          ((.domain[0][7:]|split(".")|length) < ($new.domain|split(".")|length) or
+           ((.domain[0][7:]|split(".")|length) == ($new.domain|split(".")|length) and
+            (.domain[0][7:]|length) < ($new.domain|length))))
+      end
+    ) | $i] | .[0] // null) as $priority |
+  ([range(0; ($rules|length)) as $i |
+    select((($rules[$i].ruleTag // "") == ("xrayctl-outbound:"+$new.inbound)) or
+      (((($rules[$i].ruleTag // "")|startswith("xrayctl-user-outbound:"))) and (($rules[$i].inboundTag // [])==[$new.inbound]))) | $i] | .[0] // null) as $default |
+  ([range(0; ($rules|length)) as $i |
+    select($rules[$i] | managed_for(.; $new.inbound)) | $i] | .[-1] // null) as $last |
+  (if $priority != null then $priority
+   elif $default != null then $default
+   elif $last != null then $last + 1
+   else ($rules|length) end) as $index |
+  [range(0; (($rules|length)+1)) as $i |
+    if $i==$index then $new.rule
+    elif $i < $index then $rules[$i]
+    else $rules[$i-1] end];
+.routing=(.routing // {domainStrategy:"IPIfNonMatch",rules:[]}) |
+.routing.rules=reduce $additions[] as $new (.routing.rules;
+  if any(.[]; same_rule(.; $new)) then
+    map(if same_rule(.; $new) and ((.template // "") == ($new.rule.template // ""))
+        then .outboundTag=$new.rule.outboundTag else . end)
+  else insert_rule(.; $new) end)
+JQ
+}
+
+apply_domain_template() {
+  ensure_runtime_dependencies outbound-template-apply; ensure_config; ensure_meta
+  local inbound=$1 name=$2 outbound=$3 meta_candidate config_candidate
+  inbound_exists "$inbound" || die "找不到入站：$inbound"
+  domain_template_exists "$name" || die "找不到模板：$name"
+  outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
+  meta_candidate=$(temp_file)
+  _meta_template_bind "$META_FILE" "$meta_candidate" "$inbound" "$name" "$outbound" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _rebuild_inbound_template_config config_candidate "$CONFIG_FILE" "$inbound" "$meta_candidate" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _commit_template_change "$config_candidate" "$meta_candidate" "模板 ${name} 已应用到入站 ${inbound}（出站：${outbound}）。"
+}
+
+remove_domain_template() {
+  ensure_runtime_dependencies outbound-template-remove; ensure_config; ensure_meta
+  local inbound=$1 name=$2 meta_candidate config_candidate
+  meta_candidate=$(temp_file)
+  _meta_template_unbind "$META_FILE" "$meta_candidate" "$inbound" "$name" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _rebuild_inbound_template_config config_candidate "$CONFIG_FILE" "$inbound" "$meta_candidate" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _commit_template_change "$config_candidate" "$meta_candidate" "已从入站 ${inbound} 移除模板 ${name}。"
+}
+
+update_domain_template_outbound() {
+  ensure_runtime_dependencies outbound-template-set-outbound; ensure_config; ensure_meta
+  local inbound=$1 name=$2 outbound=$3 meta_candidate config_candidate
+  inbound_exists "$inbound" || die "找不到入站：$inbound"
+  domain_template_exists "$name" || die "找不到模板：$name"
+  outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
+  meta_candidate=$(temp_file)
+  _meta_template_set_outbound "$META_FILE" "$meta_candidate" "$inbound" "$name" "$outbound" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _rebuild_inbound_template_config config_candidate "$CONFIG_FILE" "$inbound" "$meta_candidate" || {
+    rm -f "$meta_candidate"
+    return 1
+  }
+  _commit_template_change "$config_candidate" "$meta_candidate" "模板 ${name} 的出站已更新为 ${outbound}（入站：${inbound}）。"
+}
+
+generate_domain_rule_id() {
+  local config=${1:-$CONFIG_FILE} id
+  while true; do
+    id=$(random_hex 4)
+    if ! jq -e --arg ruleTag "xrayctl-domain:${id}" \
+      '[.routing.rules[]?|select(.ruleTag==$ruleTag)]|length>0' "$config" >/dev/null 2>&1; then
+      printf '%s' "$id"
+      return 0
+    fi
+  done
+}
+
+list_domain_rules() {
+  ensure_config
+  local inbound=${1-} context=${2-} rows group_inbound="" number=0 match domain outbound group_start display display_match hide_templates=0
+  [[ -z $inbound ]] || inbound_exists "$inbound" || die "找不到入站：$inbound"
+  [[ $context == --menu ]] && hide_templates=1
+  rows=$(jq -r --arg inbound "$inbound" --arg hideTemplates "$hide_templates" "$(_xrayctl_domain_rule_jq)
+    ([.routing.rules[]? |
+       select(xrayctl_domain_rule and (\$hideTemplates!=\"1\" or (.template // \"\")==\"\")) |
+      (if (.inboundTag|type)==\"array\" then (.inboundTag[0] // \"?\") else \"?\" end) as \$rule_inbound |
+      (if (.domain|type)==\"array\" then (.domain[0] // \"\") else \"\" end) as \$domain_value |
+      (if (\$domain_value|startswith(\"full:\")) then \"exact\" elif (\$domain_value|startswith(\"domain:\")) then \"suffix\" else \"?\" end) as \$match |
+      (if \$match==\"exact\" then \$domain_value[5:] elif \$match==\"suffix\" then \$domain_value[7:] else \$domain_value end) as \$domain |
+      [\$rule_inbound,\$match,\$domain,(.outboundTag // \"?\")]] ) as \$rows |
+    [.inbounds[].tag] as \$inbound_order |
+    \$inbound_order[] as \$group |
+    select(\$inbound==\"\" or \$group==\$inbound) |
+    (\$rows |
+      map(select(.[0]==\$group)) |
+      sort_by([(if .[1]==\"suffix\" then 0 else 1 end), .[3]]) |
+      group_by([.[1], .[3]])[] |
+      sort_by([(.[2] | ascii_downcase), .[2]]) |
+      to_entries[] |
+      .value + [(if .key==0 then \"first\" else \"\" end)]
+    ) | @tsv" "$CONFIG_FILE")
+  heading "域名分流规则"
+  [[ -n $rows ]] || { info "还没有直接域名规则。"; return 0; }
+  while IFS=$'\t' read -r inbound match domain outbound group_start; do
+    [[ -n $inbound ]] || continue
+    if [[ $inbound != "$group_inbound" ]]; then
+      group_inbound=$inbound
+      number=0
+      [[ $context == --menu ]] || printf '\n%s入站：%s%s\n' "$C_BOLD$C_CYAN" "$group_inbound" "$C_RESET"
+    fi
+    if [[ $group_start == first ]]; then
+      [[ $match == suffix ]] && display_match="子域名" || display_match="精确"
+      display=$(_outbound_display_name "$outbound")
+      printf '\n%s%s%s → %s%s%s\n' \
+        "$C_BOLD$C_CYAN" "$display_match" "$C_RESET" \
+        "$C_BOLD$C_GREEN" "$display" "$C_RESET"
+    fi
+    ((number+=1))
+    print_table_cell "$number" 4; printf '  '
+    print_table_cell "$domain" 24; printf '\n'
+  done <<<"$rows"
+}
+
+add_domain_rule() {
+  ensure_runtime_dependencies outbound-rule-add; ensure_config
+  local inbound=${1-} match=${2-} domain=${3-} outbound=${4-} prompt_details=${5-}
+  local choice normalized_domains rule_tag new_rule tmp candidate existing_domains existing_domains_json domains_json selected_local_ip=""
+  local -a domains=()
+  local cli=0
+  if [[ $prompt_details == --prompt ]]; then
+    [[ -n $inbound && -z $match && -z $domain && -z $outbound ]] || die "内部调用参数无效。"
+    inbound_exists "$inbound" || die "找不到入站：$inbound"
+    inbound_require_supported_configuration "$inbound"
+  elif [[ -n $inbound || -n $match || -n $domain || -n $outbound ]]; then
+    cli=1
+    [[ -n $inbound && -n $match && -n $domain && -n $outbound ]] || \
+      die "用法：xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>"
+    inbound_exists "$inbound" || die "找不到入站：$inbound"
+    inbound_require_supported_configuration "$inbound"
+    case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
+    normalized_domains=$(_normalize_domain_list "$domain") || die "域名格式无效。"
+    outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
+  else
+    select_inbound inbound '^(vless|socks|http)$' || return
+  fi
+  if ((cli == 0)); then
+    choose choice "匹配方式" "域名及所有子域名" "仅精确域名" || return
+    [[ $choice == 1 ]] && match=suffix || match=exact
+    while true; do
+      prompt_value domain "域名（多个请用英文逗号分隔）" || return
+      if normalized_domains=$(_normalize_domain_list "$domain"); then
+        break
+      fi
+    done
+    # Domain rules intentionally share the existing outbound selector with
+    # default outbound assignment, including direct, local IP, SOCKS and HTTP.
+    select_outbound outbound 1 1 selected_local_ip || return
+  fi
+
+  while IFS= read -r domain; do
+    [[ -n $domain ]] && domains+=("$domain")
+  done <<<"$normalized_domains"
+  ((${#domains[@]} > 0)) || die "域名格式无效。"
+
+  domains_json=$(printf '%s\n' "${domains[@]}" | jq -Rsc '
+    split("\n") | map(select(length > 0)) |
+    reduce .[] as $domain ([]; if index($domain) then . else . + [$domain] end)')
+  existing_domains_json=$(jq -c --arg inbound "$inbound" --arg match "$match" --argjson domains "$domains_json" "$(_xrayctl_domain_rule_jq)
+    [.routing.rules[]? |
+      select(xrayctl_domain_rule and ((.inboundTag // []) == [\$inbound])) |
+      .domain[0] as \$rule_domain |
+      select(any(\$domains[]; \$rule_domain == ((if \$match==\"suffix\" then \"domain:\" else \"full:\" end) + .))) |
+      if \$match==\"suffix\" then \$rule_domain[7:] else \$rule_domain[5:] end] |
+      unique" "$CONFIG_FILE")
+  existing_domains=$(jq -r 'join(",")' <<<"$existing_domains_json")
+  if [[ -n $existing_domains ]]; then
+    warn "已跳过已有域名规则：${inbound} ${match} ${existing_domains}。"
+  fi
+
+  domains=()
+  while IFS= read -r domain; do
+    [[ -n $domain ]] && domains+=("$domain")
+  done < <(jq -r --argjson existing "$existing_domains_json" '
+    .[] as $domain | select(($existing | index($domain)) == null) | $domain' <<<"$domains_json")
+  if ((${#domains[@]} == 0)); then
+    info "没有需要添加的新域名规则。"
+    return 0
+  fi
+
+  candidate=$(temp_file)
+  cp "$CONFIG_FILE" "$candidate"
+  for domain in "${domains[@]}"; do
+    rule_tag="xrayctl-domain:$(generate_domain_rule_id "$candidate")"
+    new_rule=$(jq -n --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
+      --arg outbound "$outbound" --arg ruleTag "$rule_tag" '
+      {type:"field",inboundTag:[$inbound],
+       domain:(if $match=="suffix" then ["domain:"+$domain] else ["full:"+$domain] end),
+       outboundTag:$outbound,ruleTag:$ruleTag}')
+
+    tmp=$(temp_file)
+    jq --arg inbound "$inbound" --arg match "$match" --arg domain "$domain" \
+      --arg outbound "$outbound" --argjson new_rule "$new_rule" "$(_xrayctl_domain_rule_jq)
+    def domain_value:
+      if (.domain|type)==\"array\" and (.domain|length)==1 and (.domain[0]|type)==\"string\" then .domain[0] else \"\" end;
+    def managed_for_inbound:
+      xrayctl_domain_rule and ((.inboundTag // []) == [\$inbound]);
+    def managed_suffix:
+      managed_for_inbound and (domain_value|startswith(\"domain:\"));
+    def lower_priority_suffix:
+      managed_suffix and
+      (((domain_value[7:]|split(\".\")|length) < (\$domain|split(\".\")|length)) or
+       (((domain_value[7:]|split(\".\")|length) == (\$domain|split(\".\")|length)) and
+        ((domain_value[7:]|length) < (\$domain|length))));
+    .routing=(.routing // {domainStrategy:\"IPIfNonMatch\",rules:[]}) |
+    (.routing.rules // []) as \$rules |
+    ([range(0; (\$rules|length)) as \$i |
+      select(\$rules[\$i] | (if \$match==\"exact\" then managed_suffix else lower_priority_suffix end)) |
+      \$i] | .[0] // null) as \$priority_index |
+    ([range(0; (\$rules|length)) as \$i |
+      select(((\$rules[\$i].ruleTag // \"\") == (\"xrayctl-outbound:\"+\$inbound)) or
+        (((\$rules[\$i].ruleTag // \"\")|startswith(\"xrayctl-user-outbound:\")) and ((\$rules[\$i].inboundTag // [])==[\$inbound]))) |
+      \$i] | .[0] // null) as \$default_index |
+    ([range(0; (\$rules|length)) as \$i |
+      select(\$rules[\$i] | managed_for_inbound) |
+      \$i] | .[-1] // null) as \$last_domain_index |
+    (if \$priority_index==null then
+       \$default_index
+     elif \$default_index==null then
+       \$priority_index
+     elif \$priority_index < \$default_index then
+       \$priority_index
+     else
+       \$default_index
+     end) as \$boundary_index |
+    (if \$boundary_index!=null then \$boundary_index
+     elif \$last_domain_index!=null then \$last_domain_index+1
+     else \$rules|length
+     end) as \$insert_index |
+    .routing.rules=[range(0; ((\$rules|length)+1)) as \$i |
+      if \$i==\$insert_index then \$new_rule
+      elif \$i < \$insert_index then \$rules[\$i]
+      else \$rules[\$i-1]
+      end]" "$candidate" >"$tmp"
+    rm -f "$candidate"
+    candidate=$tmp
+  done
+  _stage_local_outbound "$candidate" "$selected_local_ip" || { rm -f "$candidate"; return 1; }
+  state_apply_candidate_file "$candidate" apply_candidate >/dev/null || return
+  info "已添加域名规则：${inbound} ${match}（${#domains[@]} 条） -> ${outbound}。"
+}
+
+delete_domain_rule() {
+  ensure_runtime_dependencies outbound-rule-delete; ensure_config
+  local inbound=${1-} match=${2-} domain=${3-} scope=${4-} rows choice selected_inbound tmp selection token idx
+  local row_inbound row_match row_domain row_outbound template_owned
+  [[ -n $scope ]] || scope=--direct-only
+  local -a rule_matches=() rule_domains=() rule_outbounds=() delete_indices=()
+  local -a inbound_tags=() inbound_labels=() inbound_counts=()
+
+  if [[ -n $match || -n $domain ]]; then
+    [[ -n $inbound && -n $match && -n $domain ]] || \
+      die "用法：xrayctl outbound rule delete [入站] [suffix|exact] [域名]"
+    case $match in suffix|exact) ;; *) die "匹配方式只能是 suffix 或 exact。";; esac
+    _normalize_domain_input domain "$domain" || die "域名格式无效。"
+    inbound_exists "$inbound" || die "找不到入站：$inbound"
+    selected_inbound=$inbound
+  elif [[ -n $inbound ]]; then
+    inbound_exists "$inbound" || die "找不到入站：$inbound"
+    selected_inbound=$inbound
+  fi
+
+  rows=$(jq -r --arg inbound "${selected_inbound:-$inbound}" --arg scope "$scope" "$(_xrayctl_domain_rule_jq)
+    [.routing.rules[]? |
+       select(xrayctl_domain_rule and (\$scope!=\"--direct-only\" or (.template // \"\")==\"\")) |
+      select(\$inbound==\"\" or ((.inboundTag // [])|index(\$inbound))!=null) |
+      (if (.inboundTag|type)==\"array\" then (.inboundTag[0] // \"?\") else \"?\" end) as \$rule_inbound |
+      (if (.domain|type)==\"array\" then (.domain[0] // \"\") else \"\" end) as \$domain_value |
+      (if (\$domain_value|startswith(\"full:\")) then \"exact\" elif (\$domain_value|startswith(\"domain:\")) then \"suffix\" else \"?\" end) as \$rule_match |
+      (if \$rule_match==\"exact\" then \$domain_value[5:] elif \$rule_match==\"suffix\" then \$domain_value[7:] else \$domain_value end) as \$rule_domain |
+      [\$rule_inbound,\$rule_match,\$rule_domain,(.outboundTag // \"?\")] | @tsv] | .[]" "$CONFIG_FILE")
+
+  if [[ -n $match ]]; then
+    local matching_count=0
+    while IFS=$'\t' read -r row_inbound row_match row_domain row_outbound; do
+      [[ $row_inbound == "$selected_inbound" && $row_match == "$match" && $row_domain == "$domain" ]] || continue
+      ((matching_count+=1))
+    done <<<"$rows"
+    if ((matching_count == 0)); then
+      template_owned=$(jq -r --arg inbound "$selected_inbound" --arg match "$match" --arg domain "$domain" "$(_xrayctl_domain_rule_jq)
+        [.routing.rules[]? |
+          select(xrayctl_domain_rule and (.inboundTag // [])==[\$inbound] and ((.template // \"\") != \"\")) |
+          select(.domain == [(if \$match==\"suffix\" then \"domain:\" else \"full:\" end) + \$domain])] | length" "$CONFIG_FILE")
+      if ((template_owned > 0)); then
+        die '该域名规则由模板管理，请在“管理模板”中调整模板或移除模板。'
+      fi
+      die "找不到域名规则：${selected_inbound} ${match} ${domain}"
+    fi
+    ((matching_count == 1)) || die "域名规则存在重复项，请先使用交互菜单处理。"
+    delete_indices=(1)
+    rule_matches=("$match")
+    rule_domains=("$domain")
+    rule_outbounds=("$(jq -r --arg inbound "$selected_inbound" --arg match "$match" --arg domain "$domain" "$(_xrayctl_domain_rule_jq)
+      [.routing.rules[]? | select(xrayctl_domain_rule and (.inboundTag // [])==[\$inbound]) |
+       select((if \$match==\"suffix\" then .domain else .domain end)==(if \$match==\"suffix\" then [\"domain:\"+\$domain] else [\"full:\"+\$domain] end)) | .outboundTag][0] // \"?\"" "$CONFIG_FILE")")
+  else
+    if [[ -z $selected_inbound ]]; then
+      while IFS=$'\t' read -r row_inbound row_match row_domain row_outbound; do
+        [[ -n $row_inbound ]] || continue
+        local found=0 i
+        for ((i=0; i<${#inbound_tags[@]}; i++)); do
+          if [[ ${inbound_tags[$i]} == "$row_inbound" ]]; then
+            inbound_counts[i]=$((inbound_counts[i]+1)); found=1; break
+          fi
+        done
+        if (( !found )); then
+          inbound_tags+=("$row_inbound"); inbound_counts+=(1)
+        fi
+      done <<<"$rows"
+      ((${#inbound_tags[@]})) || { warn "没有可删除的域名分流规则。"; return 0; }
+      for ((i=0; i<${#inbound_tags[@]}; i++)); do
+        inbound_labels+=("${inbound_tags[$i]}（${inbound_counts[$i]} 条）")
+      done
+      if ((${#inbound_tags[@]} == 1)); then
+        selected_inbound=${inbound_tags[0]}
+      else
+        choose choice "选择入站" "${inbound_labels[@]}" || return
+        selected_inbound=${inbound_tags[$((choice-1))]}
+      fi
+      rows=$(jq -r --arg inbound "$selected_inbound" --arg scope "$scope" "$(_xrayctl_domain_rule_jq)
+        [.routing.rules[]? | select(xrayctl_domain_rule and (.inboundTag // [])==[\$inbound]) |
+         select(\$scope!=\"--direct-only\" or (.template // \"\")==\"\") |
+         (if .domain[0]|startswith(\"full:\") then \"exact\" else \"suffix\" end) as \$match |
+         (if \$match==\"exact\" then .domain[0][5:] else .domain[0][7:] end) as \$domain |
+         [\$match,\$domain,(.outboundTag // \"?\")]] as \$rules |
+        (\$rules |
+          sort_by([(if .[0]==\"suffix\" then 0 else 1 end), .[2]]) |
+          group_by([.[0], .[2]])[] |
+          sort_by([(.[1] | ascii_downcase), .[1]])[]
+        ) | @tsv" "$CONFIG_FILE")
+    else
+      rows=$(jq -r --arg inbound "$selected_inbound" --arg scope "$scope" "$(_xrayctl_domain_rule_jq)
+        [.routing.rules[]? | select(xrayctl_domain_rule and (.inboundTag // [])==[\$inbound]) |
+         select(\$scope!=\"--direct-only\" or (.template // \"\")==\"\") |
+         (if .domain[0]|startswith(\"full:\") then \"exact\" else \"suffix\" end) as \$match |
+         (if \$match==\"exact\" then .domain[0][5:] else .domain[0][7:] end) as \$domain |
+         [\$match,\$domain,(.outboundTag // \"?\")]] as \$rules |
+        (\$rules |
+          sort_by([(if .[0]==\"suffix\" then 0 else 1 end), .[2]]) |
+          group_by([.[0], .[2]])[] |
+          sort_by([(.[1] | ascii_downcase), .[1]])[]
+        ) | @tsv" "$CONFIG_FILE")
+    fi
+
+    while IFS=$'\t' read -r row_match row_domain row_outbound; do
+      [[ -n $row_domain ]] || continue
+      rule_matches+=("$row_match"); rule_domains+=("$row_domain"); rule_outbounds+=("$row_outbound")
+    done <<<"$rows"
+    ((${#rule_domains[@]})) || { warn "没有可删除的域名分流规则。"; return 0; }
+    printf '\n入站：%s\n\n' "$selected_inbound"
+    for ((idx=0; idx<${#rule_domains[@]}; idx++)); do
+      printf '%d) %s\n' "$((idx+1))" "${rule_domains[$idx]}"
+    done
+    while true; do
+      read -r -p '请选择要删除的规则（支持 1,3,2）: ' selection || { cancel_input; return 1; }
+      selection=$(printf '%s' "$selection" | tr -d '[:space:]')
+      delete_indices=()
+      IFS=',' read -r -a tokens <<<"$selection"
+      local valid=1
+      for token in "${tokens[@]}"; do
+        if [[ ! $token =~ ^[0-9]+$ ]] || ((10#$token < 1 || 10#$token > ${#rule_domains[@]})); then
+          valid=0; break
+        fi
+        idx=$((10#$token))
+        if ((${#delete_indices[@]})); then
+          for choice in "${delete_indices[@]}"; do
+            if ((choice == idx)); then valid=0; break 2; fi
+          done
+        fi
+        delete_indices+=("$idx")
+      done
+      ((valid)) && ((${#delete_indices[@]})) && break
+      warn "请输入有效且不重复的序号，例如 1,3,2。"
+    done
+
+    printf '\n将删除：\n'
+    local match_label display selected_json='[]'
+    for choice in "${delete_indices[@]}"; do
+      idx=$((choice-1))
+      [[ ${rule_matches[$idx]} == suffix ]] && match_label=子域名 || match_label=精确
+      display=$(_outbound_display_name "${rule_outbounds[$idx]}")
+      printf -- '- %s（%s → %s）\n' "${rule_domains[$idx]}" "$match_label" "$display"
+      selected_json=$(jq -c --arg match "${rule_matches[$idx]}" --arg domain "${rule_domains[$idx]}" \
+        '. + [{match:$match,domain:$domain}]' <<<"$selected_json")
+    done
+    confirm "确认删除这些规则？" N || return
+  fi
+
+  if [[ -n $match ]]; then
+    local selected_json='[]'
+    selected_json=$(jq -c --arg match "$match" --arg domain "$domain" '. + [{match:$match,domain:$domain}]' <<<"$selected_json")
+  fi
+  tmp=$(temp_file)
+  jq --arg inbound "$selected_inbound" --argjson selected "$selected_json" "$(_xrayctl_domain_rule_jq)
+    def selected_rule(\$rule; \$selected):
+      any(\$selected[]; . as \$target |
+        (\$rule | if \$target.match==\"suffix\" then .domain == [\"domain:\"+\$target.domain] else .domain == [\"full:\"+\$target.domain] end));
+    .routing=(.routing // {}) |
+    .routing.rules=[(.routing.rules // [])[] |
+      (.) as \$rule |
+      select(((\$rule | xrayctl_domain_rule) and
+        (\$rule.inboundTag // [])==[\$inbound] and
+        selected_rule(\$rule;\$selected)) | not)]" "$CONFIG_FILE" >"$tmp"
+  if state_apply_candidate_file "$tmp" apply_candidate >/dev/null; then
+    if [[ -n $match ]]; then
+      info "已删除域名规则：${selected_inbound} ${match} ${domain}。"
+    else
+      info "已删除 ${#delete_indices[@]} 条域名规则（入站：${selected_inbound}）。"
+    fi
+  fi
+}
+
+_ensure_freedom_outbound() {
+  # 确保指定 IP 的 freedom 出站存在，返回其 tag
+  local ip=$1 tag tmp
+  tag=$(_freedom_tag_for_ip "$ip")
+  outbound_exists "$tag" && { printf '%s' "$tag"; return 0; }
+  tmp=$(temp_file)
+  # Xray's equivalent of an address-family-bound direct outbound is
+  # sendThrough + UseIP: the core infers IPv4/IPv6 from the source address.
+  jq --arg tag "$tag" --arg ip "$ip" \
+    '.outbounds += [{tag:$tag,protocol:"freedom",sendThrough:$ip,settings:{domainStrategy:"UseIP"}}]' \
+    "$CONFIG_FILE" >"$tmp"
+  if state_apply_candidate_file "$tmp" apply_candidate >&2; then
+    printf '%s' "$tag"
+  else
+    return 1
+  fi
 }
 
 # --- src/service.sh ---
@@ -6198,7 +6976,7 @@ depend() {
 }
 
 start_pre() {
-  checkpath --directory --mode 0750 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}"
+  checkpath --directory --mode 0750 --owner ${RUNTIME_OWNER}:${RUNTIME_GROUP} "${LOG_DIR}"
   "${XRAY_BIN}" run -test -format json -config "${CONFIG_FILE}"
   checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/access.log"
   checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/error.log"
@@ -6290,6 +7068,17 @@ _service_install_output() {
 }
 
 install_or_update_xray() {
+  # The upstream systemd installer controls fixed binary/unit/log paths. A
+  # custom manager layout must never silently install over the default Xray.
+  if [[ $(platform_init_system) == systemd ]] &&
+     [[ $XRAY_BIN != /usr/local/bin/xray || $SERVICE_NAME != xray ||
+        $SYSTEMD_UNIT_DIR != /etc/systemd/system ||
+        $SYSTEMD_OVERRIDE_DIR != /etc/systemd/system/xray.service.d ||
+        $CONFIG_DIR != /usr/local/etc/xray || $CONFIG_FILE != /usr/local/etc/xray/config.json ||
+        $XRAY_SHARE_DIR != /usr/local/share/xray || $LOG_DIR != /var/log/xray ]]; then
+    error "systemd 官方安装器仅支持默认核心、服务、配置和日志路径；已取消安装，未操作默认 Xray。"
+    return 1
+  fi
   ensure_runtime_dependencies install
   local version=${1:-$XRAY_CORE_PINNED_VERSION} installer install_log status preserved_config=""
   if service_is_active && traffic_user_managed_config; then
@@ -6306,7 +7095,8 @@ install_or_update_xray() {
     install_log=$(temp_file)
     local -a installer_args=(install)
     [[ -z $version ]] || installer_args+=(--version "${version#v}")
-    if TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" "${installer_args[@]}" 2>&1 | tee "$install_log" | _service_install_output; then
+    if JSON_PATH="$CONFIG_DIR" JSONS_PATH="" DAT_PATH="$XRAY_SHARE_DIR" \
+       TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" "${installer_args[@]}" 2>&1 | tee "$install_log" | _service_install_output; then
       rm -f "$installer" "$install_log"
     else
       status=$?
@@ -6455,31 +7245,48 @@ bbr_manager() {
 }
 
 bbr_remove_known_persistence() {
-  rm -f -- "$BBR_CONFIG" "$SBCTL_BBR_CONFIG"
+  rm -f -- "$BBR_CONFIG" "$SBCTL_BBR_CONFIG" || return 1
   meta_resource_remove_existing "bbrConfig"
 }
 
 _enable_bbr() {
-  local qdisc_enabled=0 config=$BBR_CONFIG
+  local qdisc_enabled=0 config=$BBR_CONFIG staged previous_cc previous_qdisc=""
+  if [[ -L $config || ( -e $config && ! -f $config ) ]]; then
+    error "BBR 持久化路径必须是普通文件：$config"
+    return 1
+  fi
+  staged=$(mktemp "${config}.tmp.XXXXXX") || return 1
+  previous_cc=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  if [[ -e /proc/sys/net/core/default_qdisc ]]; then
+    previous_qdisc=$(< /proc/sys/net/core/default_qdisc)
+  fi
+  if ! { printf '%s\n' '# managed by xrayctl' 'net.ipv4.tcp_congestion_control=bbr' >"$staged" && chmod 644 "$staged"; }; then
+    rm -f "$staged"; return 1
+  fi
   if command_exists modprobe; then run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true; fi
   if [[ -e /proc/sys/net/core/default_qdisc ]]; then
+    # Prepare the complete persistence file before changing any kernel setting.
+    if ! printf '%s\n' 'net.core.default_qdisc=fq' >>"$staged"; then rm -f "$staged"; return 1; fi
     if run_bounded 5 sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then qdisc_enabled=1;
     else warn "无法设置 net.core.default_qdisc，跳过 fq。"; fi
+    if ((qdisc_enabled == 0)); then
+      if ! printf '%s\n' '# managed by xrayctl' 'net.ipv4.tcp_congestion_control=bbr' >"$staged"; then rm -f "$staged"; return 1; fi
+    fi
   fi
   if ! run_bounded 5 sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
+    if ((qdisc_enabled)); then run_bounded 5 sysctl -w net.core.default_qdisc="$previous_qdisc" >/dev/null 2>&1 || warn "无法恢复原队列算法。"; fi
+    rm -f "$staged"
     error "无法写入拥塞控制参数或操作超时。"
     return 1
   fi
-  rm -f -- "$SBCTL_BBR_CONFIG"
-  if ((qdisc_enabled)); then
-    printf '%s\n' '# managed by xrayctl' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' >"$config"
-  else
-    printf '%s\n' '# managed by xrayctl' 'net.ipv4.tcp_congestion_control=bbr' >"$config"
-  fi
-  if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) != bbr ]]; then
-    error "BBR 校验失败。"
+  if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) != bbr ]] || ! mv -fT "$staged" "$config"; then
+    run_bounded 5 sysctl -w net.ipv4.tcp_congestion_control="$previous_cc" >/dev/null 2>&1 || warn "无法恢复原拥塞控制算法。"
+    if ((qdisc_enabled)); then run_bounded 5 sysctl -w net.core.default_qdisc="$previous_qdisc" >/dev/null 2>&1 || warn "无法恢复原队列算法。"; fi
+    rm -f "$staged"
+    error "BBR 校验或持久化失败，已尝试恢复原内核设置。"
     return 1
   fi
+  rm -f -- "$SBCTL_BBR_CONFIG" || return 1
   info "BBR 已启用。"
   meta_resource_register "bbrConfig" "$config"
 }
@@ -6488,7 +7295,7 @@ _disable_bbr() {
   local current default_cc
   current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
   if [[ $current != bbr ]]; then
-    bbr_remove_known_persistence
+    bbr_remove_known_persistence || return 1
     info "BBR 当前未启用；已清理 xrayctl/sbctl 的已知持久化配置。"
     return 0
   fi
@@ -6499,7 +7306,7 @@ _disable_bbr() {
     return 1
   fi
   run_bounded 5 sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
-  bbr_remove_known_persistence
+  bbr_remove_known_persistence || return 1
   if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) == bbr ]]; then
     error "BBR 关闭失败，当前仍为 bbr。"
     return 1
@@ -6615,6 +7422,18 @@ cleanup_step() {
   fi
 }
 
+_safe_remove_path() {
+  local path=$1 canonical
+  [[ -n $path && $path == /* && ! -L $path ]] || return 1
+  canonical=$(readlink -f -- "$path") || return 1
+  # Reject traversal and symlinked parents before applying the allowlist.
+  [[ $canonical == "${path%/}" ]] || { warn "拒绝删除未规范化或经过符号链接的路径：$path"; return 1; }
+  case $canonical in
+    /|/usr|/usr/local|/etc|/var|/var/lib|/var/log|/opt|/home|/root)
+      warn "拒绝删除危险路径：$path"; return 1 ;;
+  esac
+}
+
 safe_remove_dir() {
   local path=$1 allowed matched=0
   [[ -n $path ]] || return 1
@@ -6629,6 +7448,7 @@ safe_remove_dir() {
   done
   ((matched)) || { warn "路径不在允许删除列表：$path"; return 1; }
   [[ -e $path ]] || return 0
+  _safe_remove_path "$path" || return 1
   rm -rf -- "$path"
 }
 
@@ -6643,6 +7463,7 @@ safe_remove_managed_dir() {
   recorded=$(_snapshot_meta_resource_get "$resource_key")
   [[ -n $recorded ]] || { warn "缺少资产登记，拒绝删除：$path"; return 1; }
   [[ $recorded == "$path" ]] || { warn "资产路径不匹配，拒绝删除：$path (登记: $recorded)"; return 1; }
+  _safe_remove_path "$path" || return 1
   rm -rf -- "$path"
 }
 
@@ -6657,6 +7478,7 @@ safe_remove_managed_file() {
   recorded=$(_snapshot_meta_resource_get "$resource_key")
   [[ -n $recorded ]] || { warn "缺少资产登记，拒绝删除：$path"; return 1; }
   [[ $recorded == "$path" ]] || { warn "资产路径不匹配，拒绝删除：$path (登记: $recorded)"; return 1; }
+  _safe_remove_path "$path" || return 1
   rm -f -- "$path"
 }
 
@@ -6735,10 +7557,10 @@ _uninstall_remove_managed_certs() {
 _uninstall_remove_certbot() {
   if can_remove_certbot_venv; then
     if is_xrayctl_certbot_symlink; then rm -f /usr/local/bin/certbot; fi
-    safe_remove_managed_dir "certbotConfigDir" "$CERTBOT_CONFIG_DIR"
-    safe_remove_managed_dir "certbotWorkDir" "$CERTBOT_WORK_DIR"
-    safe_remove_managed_dir "certbotLogsDir" "$CERTBOT_LOGS_DIR"
-    safe_remove_managed_dir "certbotVenv" "$CERTBOT_VENV"
+    safe_remove_managed_dir "certbotConfigDir" "$CERTBOT_CONFIG_DIR" || return 1
+    safe_remove_managed_dir "certbotWorkDir" "$CERTBOT_WORK_DIR" || return 1
+    safe_remove_managed_dir "certbotLogsDir" "$CERTBOT_LOGS_DIR" || return 1
+    safe_remove_managed_dir "certbotVenv" "$CERTBOT_VENV" || return 1
     meta_resource_remove_existing "certbotVenv"; meta_resource_remove_existing "certbotConfigDir"
     meta_resource_remove_existing "certbotWorkDir"; meta_resource_remove_existing "certbotLogsDir"
   elif [[ ! -d $CERTBOT_VENV ]]; then
@@ -6750,15 +7572,15 @@ _uninstall_remove_certbot() {
 }
 
 _uninstall_remove_cloudflare() {
-  safe_remove_managed_file "cloudflareCredentials" "$CLOUDFLARE_INI"
+  safe_remove_managed_file "cloudflareCredentials" "$CLOUDFLARE_INI" || return 1
   rmdir "$(dirname "$CLOUDFLARE_INI")" 2>/dev/null || true
   meta_resource_remove_existing "cloudflareCredentials"
 }
 
 _uninstall_remove_config() {
-  [[ -f $CONFIG_FILE ]] && rm -f "$CONFIG_FILE"
-  [[ -d $CERT_DIR ]] && safe_remove_managed_dir "certDir" "$CERT_DIR"
-  [[ -f $META_FILE ]] && rm -f "$META_FILE"
+  if [[ -f $CONFIG_FILE ]]; then rm -f "$CONFIG_FILE" || return 1; fi
+  if [[ -d $CERT_DIR ]]; then safe_remove_managed_dir "certDir" "$CERT_DIR" || return 1; fi
+  if [[ -f $META_FILE ]]; then rm -f "$META_FILE" || return 1; fi
   if [[ -d $CONFIG_DIR ]]; then rmdir "$CONFIG_DIR" 2>/dev/null || true; fi
 }
 
@@ -6832,34 +7654,49 @@ _cleanup_legacy_resources() {
 
 _uninstall_xray_core_fallback() {
   platform_service_stop >/dev/null 2>&1 || true
+  if service_is_active; then error "Xray 服务未能停止，拒绝删除运行中的核心。"; return 1; fi
   platform_service_disable >/dev/null 2>&1 || true
   if [[ $(platform_init_system) == openrc ]]; then
-    rm -f "$OPENRC_SERVICE"
+    rm -f "$OPENRC_SERVICE" || return 1
   else
-    systemctl disable --now xray@.service >/dev/null 2>&1 || true
-    rm -f /etc/systemd/system/xray.service /etc/systemd/system/xray@.service
-    rm -rf /etc/systemd/system/xray.service.d 2>/dev/null || true
+    rm -f "${SYSTEMD_UNIT_DIR}/${SYSTEMD_UNIT}" || return 1
+    if [[ $SERVICE_NAME == xray ]]; then
+      systemctl disable --now xray@.service >/dev/null 2>&1 || true
+      rm -f "${SYSTEMD_UNIT_DIR}/xray@.service" || return 1
+    fi
   fi
-  rm -f /usr/local/bin/xray /usr/local/bin/xray-linux-*
-  rm -rf /usr/local/share/xray 2>/dev/null || true
+  if [[ -e $XRAY_BIN ]]; then
+    _safe_remove_path "$XRAY_BIN" || return 1
+    rm -f -- "$XRAY_BIN" || return 1
+  fi
+  if [[ $XRAY_BIN == /usr/local/bin/xray ]]; then rm -f /usr/local/bin/xray-linux-*; fi
+  if [[ -e $XRAY_SHARE_DIR ]]; then safe_remove_dir "$XRAY_SHARE_DIR" "$XRAY_SHARE_DIR" || return 1; fi
   platform_daemon_reload
 }
 
 _uninstall_xray_core() {
   local installer
-  if [[ $(platform_init_system) == openrc ]]; then _uninstall_xray_core_fallback; return 0; fi
+  if [[ $(platform_init_system) == openrc || $XRAY_BIN != /usr/local/bin/xray || $SERVICE_NAME != xray || $SYSTEMD_UNIT_DIR != /etc/systemd/system || $XRAY_SHARE_DIR != /usr/local/share/xray ]]; then
+    _uninstall_xray_core_fallback
+    return $?
+  fi
   installer=$(temp_file)
   if curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
     "$OFFICIAL_INSTALLER_URL" -o "$installer" 2>/dev/null; then
     chmod 700 "$installer"
-    TERM="${TERM:-xterm}" bash "$installer" remove --purge >/dev/null 2>&1 || true
+    if ! JSON_PATH="$CONFIG_DIR" JSONS_PATH="" DAT_PATH="$XRAY_SHARE_DIR" \
+         TERM="${TERM:-xterm}" bash "$installer" remove --purge >/dev/null 2>&1; then
+      rm -f "$installer"
+      error "Xray 官方卸载脚本执行失败，请检查残留。"
+      return 1
+    fi
     rm -f "$installer"
     return 0
   else
     rm -f "$installer"
     warn "无法下载 Xray 官方卸载脚本，使用本地安全回退。"
     _uninstall_xray_core_fallback
-    return 0
+    return $?
   fi
 }
 
@@ -6867,8 +7704,8 @@ _uninstall_remove_bbr() {
   local bbr_config
   bbr_config=$(_snapshot_meta_resource_get "bbrConfig")
   if [[ -n $bbr_config && -f $bbr_config ]]; then
-    _disable_bbr >/dev/null 2>&1 || true
-    rm -f "$bbr_config"
+    _disable_bbr || return 1
+    rm -f "$bbr_config" || return 1
     meta_resource_remove_existing "bbrConfig"
   fi
 }
@@ -7000,6 +7837,15 @@ EOF
   fi
   echo
 
+  # No managed data may disappear while the core still uses it. The fallback
+  # core remover's check is too late: certificates and counters go first.
+  if service_is_active; then
+    if ! platform_service_stop || service_is_active; then
+      error "Xray 服务未能停止，已取消删除，保留配置和数据。"
+      return 1
+    fi
+  fi
+
   _uninstall_snapshot_metadata
   local step_failures=0 residual_count=0
 
@@ -7011,13 +7857,22 @@ EOF
   cleanup_step "卸载 Xray 核心"         _uninstall_xray_core               || ((step_failures+=1))
   cleanup_step "清理 systemd 覆盖"      _uninstall_remove_systemd_overrides || ((step_failures+=1))
   cleanup_step "删除运行用户组"         _uninstall_remove_runtime_group    || ((step_failures+=1))
-  cleanup_step "删除快捷命令"           _uninstall_remove_quick_command    || ((step_failures+=1))
   cleanup_step "撤销 BBR 设置"          _uninstall_remove_bbr              || ((step_failures+=1))
-  cleanup_step "删除独立安装的 jq"      _uninstall_remove_owned_jq         || ((step_failures+=1))
   cleanup_step "清理旧版本残留"         _cleanup_legacy_resources          || ((step_failures+=1))
-  cleanup_step "删除 xrayctl 配置"      _uninstall_remove_config           || ((step_failures+=1))
   cleanup_step "删除日志"               _uninstall_remove_logs             || ((step_failures+=1))
   cleanup_step "删除备份"               _uninstall_remove_backups          || ((step_failures+=1))
+  if ((step_failures == 0)); then
+    cleanup_step "删除 xrayctl 配置"    _uninstall_remove_config           || ((step_failures+=1))
+  else
+    warn "部分资源未能删除，保留配置和资产登记以便重试。"
+  fi
+  # Keep the command and jq available for retry after any cleanup failure.
+  if ((step_failures == 0)); then
+    cleanup_step "删除快捷命令"         _uninstall_remove_quick_command    || ((step_failures+=1))
+  fi
+  if ((step_failures == 0)); then
+    cleanup_step "删除独立安装的 jq"    _uninstall_remove_owned_jq         || ((step_failures+=1))
+  fi
 
   echo
   heading "残留检查"
@@ -7028,6 +7883,7 @@ EOF
   echo
   printf '未修改：\n  - 系统 Certbot\n  - /etc/letsencrypt\n  - 其他网站证书\n  - 系统软件包\n'
   rm -f "$SNAPSHOT_META"
+  ((step_failures == 0 && residual_count == 0))
 }
 
 # --- src/menu.sh ---
@@ -7226,25 +8082,23 @@ user_template_menu() {
 }
 
 user_outbound_detail_menu() {
-  local inbound=$1 label=$2 choice identity default display_default
+  local inbound=$1 label=$2 choice identity default
   while true; do
     clear_screen
     _outbound_user_identity identity "$inbound" "$label" || return 1
     default=$(_outbound_user_default "$inbound" "$identity")
-    [[ -n $default ]] || default=$(_outbound_inbound_default "$inbound")
-    display_default=$(_outbound_display_name "$default")
     heading "用户出站管理 · ${label}"
-    printf '默认出站：%s\n模板：\n' "$display_default"
-    user_template_bindings_display "$inbound" "$identity"
-    heading '域名分流规则'
-    printf '\n'
-    _outbound_user_domain_rules_display "$inbound" "$identity"
-    printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    printf '用户：%s\n当前默认出站：%s\n入站默认出站：%s\n继承入站出站：%s\n独立域名规则：%s 条\n\n' \
+      "$label" "${default:-继承入站}" "$(_outbound_inbound_default "$inbound")" \
+      "$([[ -z $default ]] && printf 是 || printf 否)" "$(_outbound_user_domain_count "$inbound" "$identity")"
+    printf '1) 设置默认出站\n2) 取消独立默认出站\n3) 管理域名分流\n4) 恢复继承入站规则\n5) 管理用户模板\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
-      1) user_template_menu "$inbound" "$label";;
-      2) user_domain_add_menu "$inbound" "$label";;
-      3) user_domain_delete_menu "$inbound" "$label";;
+      1) run_menu_action outbound_user_default_set "$inbound" "$label" ""; pause;;
+      2) run_menu_action outbound_user_default_unset "$inbound" "$label"; pause;;
+      3) user_domain_rule_menu "$inbound" "$label";;
+      4) run_menu_action outbound_user_restore "$inbound" "$label"; pause;;
+      5) user_template_menu "$inbound" "$label";;
       0) return;; *) warn '无效选项。'; pause;;
     esac
   done
@@ -7290,11 +8144,12 @@ inbound_outbound_detail_menu() {
     else
       printf '  无\n'
     fi
-    printf '\n1) 设置默认出站\n2) 用户出站管理\n0) 返回\n'
+    printf '\n1) 设置默认出站\n2) 入站公共域名分流\n3) 用户出站管理\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action assign_outbound "$inbound" ""; pause;;
-      2) inbound_user_outbound_menu "$inbound";;
+      2) domain_rule_detail_menu "$inbound";;
+      3) inbound_user_outbound_menu "$inbound";;
       0) return;; *) warn '无效选项。'; pause;;
     esac
   done
@@ -7816,8 +8671,6 @@ xrayctl - Xray Linux 管理脚本
   xrayctl inbound rename <旧标签> <新标签>
   xrayctl inbound modify <标签>   修改监听端口/地址
   xrayctl inbound transport <标签> 修改传输与安全方式
-  xrayctl inbound disable <标签> [--yes] 禁用入站
-  xrayctl inbound enable <标签> [--yes] 启用入站
   xrayctl inbound delete <标签> [--yes]
   xrayctl outbound list
   xrayctl outbound add
@@ -7831,6 +8684,9 @@ xrayctl - Xray Linux 管理脚本
   xrayctl outbound user rule delete <入站> <用户> <suffix|exact> <域名[,域名...]>
   xrayctl outbound user restore <入站> <用户>
   xrayctl outbound delete <出站标签>
+  xrayctl outbound rule list [入站]
+  xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>
+  xrayctl outbound rule delete [入站] [suffix|exact] [域名]
   xrayctl client list [标签]
   xrayctl client add [标签]
   xrayctl client rename [标签] [旧名称] [新名称]
@@ -7947,6 +8803,14 @@ dispatch() {
             *) die "未知 outbound user 子命令：${2}";;
           esac
           ;;
+        rule)
+          case ${2:-list} in
+            list) list_domain_rules "${3-}";;
+            add) add_domain_rule "${3-}" "${4-}" "${5-}" "${6-}";;
+            delete|remove) delete_domain_rule "${3-}" "${4-}" "${5-}";;
+            *) die "未知 outbound rule 子命令：${2}";;
+          esac
+          ;;
         *) die "未知 outbound 子命令：${1}";; esac;;
     client)
       case ${1:-list} in
@@ -7976,6 +8840,177 @@ dispatch() {
     internal-traffic-watch) internal_traffic_watch;;
     *) error "未知命令：$command"; show_help; return 2;;
   esac
+}
+
+# Management of existing inbound domain rules and template bindings.
+
+user_domain_rule_menu() {
+  local inbound=$1 label=$2 choice match domains outbound selected_local_ip=""
+  while true; do
+    clear_screen
+    heading "用户域名分流 · ${label}"
+    outbound_user_domain_list "$inbound" "$label" || return 1
+    printf '\n1) 查看规则\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
+    case $choice in
+      1) pause;;
+      2)
+        choose match '匹配方式' '域名及所有子域名' '仅精确域名' || continue
+        [[ $match == 1 ]] && match=suffix || match=exact
+        prompt_value domains '域名（多个请用英文逗号分隔）' || continue
+        selected_local_ip=""
+        select_outbound outbound 1 1 selected_local_ip 1 || continue
+        if [[ -n $selected_local_ip ]]; then
+          run_menu_action outbound_user_domain_add "$inbound" "$label" "$match" "$domains" "$outbound" "$selected_local_ip"
+        else
+          run_menu_action outbound_user_domain_add "$inbound" "$label" "$match" "$domains" "$outbound"
+        fi
+        pause
+        ;;
+      3)
+        choose match '删除匹配方式' '域名及所有子域名' '仅精确域名' || continue
+        [[ $match == 1 ]] && match=suffix || match=exact
+        prompt_value domains '要删除的域名（多个请用英文逗号分隔）' || continue
+        run_menu_action outbound_user_domain_delete "$inbound" "$label" "$match" "$domains"; pause
+        ;;
+      0) return;; *) warn '无效选项。'; pause;;
+    esac
+  done
+}
+
+domain_rule_detail_menu() {
+  local tag=$1 choice template outbound has_binding=0
+  while inbound_exists "$tag"; do
+    clear_screen
+    heading "域名分流 · ${tag}"
+    printf '模板：\n'
+    has_binding=0
+    while IFS=$'\t' read -r template outbound; do
+      [[ -n $template ]] || continue
+      printf '  %s → %s\n' "$template" "$outbound"
+      has_binding=1
+    done < <(list_inbound_template_bindings "$tag")
+    ((has_binding)) || printf '  无\n'
+    printf '\n'
+    list_domain_rules "$tag" --menu
+    printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    case $choice in
+      1) inbound_template_manage_menu "$tag";;
+      2) if run_menu_action add_domain_rule "$tag" "" "" "" --prompt; then pause; fi;;
+      3) if run_menu_action delete_domain_rule "$tag" "" "" --direct-only; then pause; fi;;
+      0) return;; *) warn "无效选项。"; pause;;
+    esac
+  done
+}
+
+domain_rule_inbound_templates() {
+  local tag=$1 template outbound summary=''
+  while IFS=$'\t' read -r template outbound; do
+    [[ -n $template ]] || continue
+    [[ -n $summary ]] && summary+=', '
+    summary+="$template"
+  done < <(list_inbound_template_bindings "$tag")
+  printf '%s' "${summary:-无}"
+}
+
+domain_rule_inbound_count() {
+  local tag=$1
+  jq -r --arg tag "$tag" "$(_xrayctl_domain_rule_jq)
+    [.routing.rules[]? | select(xrayctl_domain_rule and (.inboundTag // [])==[\$tag])] | length" \
+    "$CONFIG_FILE"
+}
+
+domain_rule_menu() {
+  local choice tag number=0
+  local -a tags=()
+  ensure_config
+  while true; do
+    clear_screen
+    heading '域名分流'
+    printf '入站列表\n\n'
+    tags=()
+    while IFS= read -r tag; do
+      [[ -n $tag ]] && tags+=("$tag")
+    done < <(jq -r '.inbounds[] | select(.protocol|test("^(vless|socks|http)$")) | .tag' "$CONFIG_FILE")
+    if ((${#tags[@]} == 0)); then
+      info '还没有可管理的入站。'
+    else
+      for ((number=0; number<${#tags[@]}; number++)); do
+        tag=${tags[$number]}
+        printf '%d) %s\n' "$((number + 1))" "$tag"
+        printf '   模板：%s\n' "$(domain_rule_inbound_templates "$tag")"
+        printf '   域名规则：%s 条\n\n' "$(domain_rule_inbound_count "$tag")"
+      done
+    fi
+    printf '操作：\n'
+    printf '  [%d] 管理模板\n' "$(( ${#tags[@]} + 1 ))"
+    printf '  [0] 返回\n'
+    read -r -p '请选择: ' choice || { cancel_selection; return 1; }
+    case $choice in
+      0) return;;
+      ''|*[!0-9]*) warn '无效选项。'; pause;;
+      *)
+        if ((choice == ${#tags[@]} + 1)); then
+          template_library_menu
+        elif ((choice >= 1 && choice <= ${#tags[@]})); then
+          domain_rule_detail_menu "${tags[$((choice-1))]}"
+        else
+          warn '无效选项。'
+          pause
+        fi
+        ;;
+    esac
+  done
+}
+
+select_inbound_template() {
+  local inbound=$1 __var=$2 answer template_name
+  local -a names=()
+  while IFS=$'\t' read -r template_name _; do
+    [[ -n $template_name ]] && names+=("$template_name")
+  done < <(list_inbound_template_bindings "$inbound")
+  ((${#names[@]})) || { warn "当前入站还没有应用模板。"; return 1; }
+  choose answer "选择模板" "${names[@]}" || return 1
+  printf -v "$__var" '%s' "${names[$((answer-1))]}"
+}
+
+inbound_template_manage_menu() {
+  local inbound=$1 choice name outbound
+  while inbound_exists "$inbound"; do
+    clear_screen
+    heading "入站模板 · ${inbound}"
+    printf '已应用模板：\n'
+    while IFS=$'\t' read -r name outbound; do
+      [[ -n $name ]] || continue
+      printf '  %s → %s\n' "$name" "$outbound"
+    done < <(list_inbound_template_bindings "$inbound")
+    printf '\n1) 添加模板\n2) 移除模板\n3) 修改出站\n0) 返回\n'
+    read -r -p '请选择: ' choice || { cancel_selection; return 1; }
+    case $choice in
+      1) if apply_domain_template_menu "$inbound"; then :; fi; pause;;
+      2)
+        select_inbound_template "$inbound" name || { pause; continue; }
+        confirm "从入站 ${inbound} 移除模板 ${name}？" N || continue
+        run_menu_action remove_domain_template "$inbound" "$name"
+        pause
+        ;;
+      3)
+        select_inbound_template "$inbound" name || { pause; continue; }
+        select_outbound outbound 1 || continue
+        run_menu_action update_domain_template_outbound "$inbound" "$name" "$outbound"
+        pause
+        ;;
+      0) return;; *) warn '无效选项。'; pause;;
+    esac
+  done
+}
+
+apply_domain_template_menu() {
+  local inbound=$1 name outbound
+  select_domain_template name || return 1
+  select_outbound outbound 1 || return 1
+  run_menu_action apply_domain_template "$inbound" "$name" "$outbound"
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

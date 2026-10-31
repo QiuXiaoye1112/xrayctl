@@ -8,8 +8,11 @@ export XRAYCTL_TESTING=1
 export XRAYCTL_TRAFFIC_FILE="$tmp/traffic.json"
 export XRAYCTL_CONFIG_FILE="$tmp/config.json"
 export XRAYCTL_LOCK_FILE="$tmp/lock"
+export XRAYCTL_CONFIG_DIR="$tmp/config-dir" XRAYCTL_META_FILE="$tmp/meta.json"
+export XRAYCTL_CERTBOT_VENV="$tmp/certbot"
 source "$root/xrayctl.sh"
 trap - ERR
+traffic_rules_restore() { :; }
 jq -n '{inbounds:[{tag:"a",protocol:"vless",settings:{clients:[{email:"alice",id:"123e4567-e89b-12d3-a456-426614174000"}]}},{tag:"b",protocol:"vless",settings:{clients:[{email:"alice",id:"123e4567-e89b-12d3-a456-426614174001"}]}}],outbounds:[{protocol:"freedom",tag:"direct"}],routing:{rules:[{type:"field",user:["alice"],outboundTag:"direct"}]}}' >"$tmp/input"
 traffic_user_prepare_identities "$tmp/input" "$tmp/output"
 jq -e '

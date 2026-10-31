@@ -40,7 +40,7 @@ validate_certificate_pair_files() {
     || { warn "证书格式无效，请重新输入。"; return 1; }
   openssl x509 -in "$cert" -checkend 0 -noout >/dev/null 2>&1 \
     || { warn "证书已经过期，请重新选择。"; return 1; }
-  openssl pkey -in "$key" -noout >/dev/null 2>&1 \
+  openssl pkey -in "$key" -passin pass: -noout >/dev/null 2>&1 \
     || { warn "私钥格式无效，请重新输入。"; return 1; }
   cert_pub=$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | openssl sha256)
   key_pub=$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | openssl sha256)
@@ -73,7 +73,7 @@ ensure_certbot_environment() {
   local need_install=0
 
   if [[ ! -x $CERTBOT_BIN ]]; then need_install=1
-  elif ! "$CERTBOT_BIN" --help all 2>/dev/null | grep -q -- '--ip-address'; then need_install=1
+  elif ! "$CERTBOT_BIN" --help all 2>/dev/null | grep -- '--ip-address' >/dev/null; then need_install=1
   elif ! "$CERTBOT_VENV/bin/python" -c 'import certbot_dns_cloudflare' >/dev/null 2>&1; then need_install=1
   elif ! "$CERTBOT_VENV/bin/python" -c 'import certbot_nginx' >/dev/null 2>&1; then need_install=1
   fi
@@ -116,9 +116,9 @@ ensure_certbot_environment() {
     --timeout 15 --retries 2 --upgrade 'certbot>=5.4' certbot-dns-cloudflare certbot-nginx \
     || die "Certbot / 插件安装失败。"
 
-  "$CERTBOT_BIN" --help all 2>/dev/null | grep -q -- '--ip-address' \
+  "$CERTBOT_BIN" --help all 2>/dev/null | grep -- '--ip-address' >/dev/null \
     || die "当前安装的 Certbot 不支持 IP 证书。"
-  "$CERTBOT_VENV/bin/pip" list 2>/dev/null | grep -q 'certbot-dns-cloudflare' \
+  "$CERTBOT_VENV/bin/python" -c 'import certbot_dns_cloudflare' >/dev/null 2>&1 \
     || warn "certbot-dns-cloudflare 插件安装可能失败，Cloudflare DNS 验证不可用。"
   fi  # end of need_install == 1 block
 
@@ -286,6 +286,8 @@ replace_certificate_pair() {
   local had_cert=0 had_key=0 need_rollback=0
   local replace_changed=0
 
+  validate_certificate_pair_files "$source_cert" "$source_key" || return 1
+
   # --- Compute change BEFORE any replacement ---
   if ! cmp -s "$source_cert" "$cert_target" 2>/dev/null ||
      ! cmp -s "$source_key"  "$key_target"  2>/dev/null; then
@@ -297,7 +299,7 @@ replace_certificate_pair() {
     return 0
   fi
 
-  setup_certificate_access
+  setup_certificate_access || return 1
 
   install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$source_cert" "$cert_tmp" || return 1
   install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$source_key"  "$key_tmp"  || { rm -f "$cert_tmp"; return 1; }

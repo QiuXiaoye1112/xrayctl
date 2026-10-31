@@ -24,6 +24,10 @@ printf 'old key\n' >"$XRAYCTL_CERT_DIR/example.com.key"
 readonly REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 grep -Fq 'apk) install_packages python3 py3-pip py3-virtualenv' "$REPO_ROOT/src/certificate.sh"
 
+export XRAYCTL_TRAFFIC_FILE="$TEST_ROOT/traffic.json"
+export XRAYCTL_LOCK_FILE="$TEST_ROOT/lock"
+export XRAYCTL_CERTBOT_VENV="$TEST_ROOT/certbot"
+export XRAYCTL_CERTBOT_CONFIG_DIR="$TEST_ROOT/letsencrypt"
 source "$REPO_ROOT/xrayctl.sh"
 trap - ERR
 

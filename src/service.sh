@@ -138,7 +138,7 @@ depend() {
 }
 
 start_pre() {
-  checkpath --directory --mode 0750 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}"
+  checkpath --directory --mode 0750 --owner ${RUNTIME_OWNER}:${RUNTIME_GROUP} "${LOG_DIR}"
   "${XRAY_BIN}" run -test -format json -config "${CONFIG_FILE}"
   checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/access.log"
   checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/error.log"
@@ -230,6 +230,17 @@ _service_install_output() {
 }
 
 install_or_update_xray() {
+  # The upstream systemd installer controls fixed binary/unit/log paths. A
+  # custom manager layout must never silently install over the default Xray.
+  if [[ $(platform_init_system) == systemd ]] &&
+     [[ $XRAY_BIN != /usr/local/bin/xray || $SERVICE_NAME != xray ||
+        $SYSTEMD_UNIT_DIR != /etc/systemd/system ||
+        $SYSTEMD_OVERRIDE_DIR != /etc/systemd/system/xray.service.d ||
+        $CONFIG_DIR != /usr/local/etc/xray || $CONFIG_FILE != /usr/local/etc/xray/config.json ||
+        $XRAY_SHARE_DIR != /usr/local/share/xray || $LOG_DIR != /var/log/xray ]]; then
+    error "systemd 官方安装器仅支持默认核心、服务、配置和日志路径；已取消安装，未操作默认 Xray。"
+    return 1
+  fi
   ensure_runtime_dependencies install
   local version=${1:-$XRAY_CORE_PINNED_VERSION} installer install_log status preserved_config=""
   if service_is_active && traffic_user_managed_config; then
@@ -246,7 +257,8 @@ install_or_update_xray() {
     install_log=$(temp_file)
     local -a installer_args=(install)
     [[ -z $version ]] || installer_args+=(--version "${version#v}")
-    if TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" "${installer_args[@]}" 2>&1 | tee "$install_log" | _service_install_output; then
+    if JSON_PATH="$CONFIG_DIR" JSONS_PATH="" DAT_PATH="$XRAY_SHARE_DIR" \
+       TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" "${installer_args[@]}" 2>&1 | tee "$install_log" | _service_install_output; then
       rm -f "$installer" "$install_log"
     else
       status=$?
@@ -395,31 +407,48 @@ bbr_manager() {
 }
 
 bbr_remove_known_persistence() {
-  rm -f -- "$BBR_CONFIG" "$SBCTL_BBR_CONFIG"
+  rm -f -- "$BBR_CONFIG" "$SBCTL_BBR_CONFIG" || return 1
   meta_resource_remove_existing "bbrConfig"
 }
 
 _enable_bbr() {
-  local qdisc_enabled=0 config=$BBR_CONFIG
+  local qdisc_enabled=0 config=$BBR_CONFIG staged previous_cc previous_qdisc=""
+  if [[ -L $config || ( -e $config && ! -f $config ) ]]; then
+    error "BBR 持久化路径必须是普通文件：$config"
+    return 1
+  fi
+  staged=$(mktemp "${config}.tmp.XXXXXX") || return 1
+  previous_cc=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  if [[ -e /proc/sys/net/core/default_qdisc ]]; then
+    previous_qdisc=$(< /proc/sys/net/core/default_qdisc)
+  fi
+  if ! { printf '%s\n' '# managed by xrayctl' 'net.ipv4.tcp_congestion_control=bbr' >"$staged" && chmod 644 "$staged"; }; then
+    rm -f "$staged"; return 1
+  fi
   if command_exists modprobe; then run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true; fi
   if [[ -e /proc/sys/net/core/default_qdisc ]]; then
+    # Prepare the complete persistence file before changing any kernel setting.
+    if ! printf '%s\n' 'net.core.default_qdisc=fq' >>"$staged"; then rm -f "$staged"; return 1; fi
     if run_bounded 5 sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then qdisc_enabled=1;
     else warn "无法设置 net.core.default_qdisc，跳过 fq。"; fi
+    if ((qdisc_enabled == 0)); then
+      if ! printf '%s\n' '# managed by xrayctl' 'net.ipv4.tcp_congestion_control=bbr' >"$staged"; then rm -f "$staged"; return 1; fi
+    fi
   fi
   if ! run_bounded 5 sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
+    if ((qdisc_enabled)); then run_bounded 5 sysctl -w net.core.default_qdisc="$previous_qdisc" >/dev/null 2>&1 || warn "无法恢复原队列算法。"; fi
+    rm -f "$staged"
     error "无法写入拥塞控制参数或操作超时。"
     return 1
   fi
-  rm -f -- "$SBCTL_BBR_CONFIG"
-  if ((qdisc_enabled)); then
-    printf '%s\n' '# managed by xrayctl' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' >"$config"
-  else
-    printf '%s\n' '# managed by xrayctl' 'net.ipv4.tcp_congestion_control=bbr' >"$config"
-  fi
-  if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) != bbr ]]; then
-    error "BBR 校验失败。"
+  if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) != bbr ]] || ! mv -fT "$staged" "$config"; then
+    run_bounded 5 sysctl -w net.ipv4.tcp_congestion_control="$previous_cc" >/dev/null 2>&1 || warn "无法恢复原拥塞控制算法。"
+    if ((qdisc_enabled)); then run_bounded 5 sysctl -w net.core.default_qdisc="$previous_qdisc" >/dev/null 2>&1 || warn "无法恢复原队列算法。"; fi
+    rm -f "$staged"
+    error "BBR 校验或持久化失败，已尝试恢复原内核设置。"
     return 1
   fi
+  rm -f -- "$SBCTL_BBR_CONFIG" || return 1
   info "BBR 已启用。"
   meta_resource_register "bbrConfig" "$config"
 }
@@ -428,7 +457,7 @@ _disable_bbr() {
   local current default_cc
   current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
   if [[ $current != bbr ]]; then
-    bbr_remove_known_persistence
+    bbr_remove_known_persistence || return 1
     info "BBR 当前未启用；已清理 xrayctl/sbctl 的已知持久化配置。"
     return 0
   fi
@@ -439,7 +468,7 @@ _disable_bbr() {
     return 1
   fi
   run_bounded 5 sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
-  bbr_remove_known_persistence
+  bbr_remove_known_persistence || return 1
   if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) == bbr ]]; then
     error "BBR 关闭失败，当前仍为 bbr。"
     return 1

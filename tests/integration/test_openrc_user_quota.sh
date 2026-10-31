@@ -5,11 +5,15 @@ if [[ ${XRAYCTL_TEST_OPENRC:-0} != 1 ]]; then printf 'ok - real OpenRC quota tes
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 bin=${XRAYCTL_REAL_XRAY_BIN:?set XRAYCTL_REAL_XRAY_BIN}
 for cmd in jq rc-service rc-update; do command -v "$cmd" >/dev/null || exit 1; done
+# CI/container networking is supplied by the caller. Exercise the generated
+# Xray service without booting unrelated host networking/mount dependencies.
+rc-service() { command rc-service --nodeps "$@"; }
 TEST_ROOT=$(mktemp -d /tmp/xrayctl-openrc-test.XXXXXXXX)
 name="xrayctl-user-test-${TEST_ROOT##*.}"
 unit="/etc/init.d/$name"
 cleanup_test() {
   rc-service "$name" stop >/dev/null 2>&1 || true
+  rc-update del "$name" default >/dev/null 2>&1 || true
   rm -f "$unit" "/run/$name.pid"
   rm -rf "$TEST_ROOT"
 }
@@ -19,7 +23,7 @@ openrc_diagnostics() {
   rc-status --servicelist >&2 2>&1 || true
   rc-service "$name" status >&2 2>&1 || true
   ls -la /run/openrc >&2 2>&1 || true
-  for log in "$TEST_ROOT/server.log" "$TEST_ROOT/error.log"; do
+  for log in "$TEST_ROOT/logs/openrc.log" "$TEST_ROOT/logs/openrc-error.log" "$TEST_ROOT/logs/error.log"; do
     if [[ -f $log ]]; then printf '%s:\n' "$log" >&2; cat "$log" >&2; fi
   done
   if [[ -f /run/$name.pid ]]; then printf 'pidfile: ' >&2; cat "/run/$name.pid" >&2; fi
@@ -30,6 +34,7 @@ export XRAYCTL_TMP_DIR="$TEST_ROOT/state" XRAYCTL_CONFIG_DIR="$TEST_ROOT/config"
 export XRAYCTL_CONFIG_FILE="$TEST_ROOT/config/config.json" XRAYCTL_META_FILE="$TEST_ROOT/config/meta.json"
 export XRAYCTL_TRAFFIC_FILE="$TEST_ROOT/state/traffic.json" XRAYCTL_LOCK_FILE="$TEST_ROOT/lock/xrayctl.lock"
 export XRAYCTL_XRAY_BIN="$bin" XRAYCTL_RUNTIME_OWNER=root XRAYCTL_RUNTIME_GROUP=root XRAYCTL_SERVICE_NAME="$name"
+export XRAYCTL_RUNTIME_USER=root XRAYCTL_LOG_DIR="$TEST_ROOT/logs"
 export XRAYCTL_PLATFORM=openrc
 source "$root/xrayctl.sh"
 trap - ERR
@@ -40,17 +45,11 @@ traffic_user_prepare_config "$TEST_ROOT/input.json" "$CONFIG_FILE" "127.0.0.1:$a
 printf '%s\n' '{"schema":4,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{}}' > "$META_FILE"
 id=$(jq -r '.inbounds[0].settings.clients[0].email' "$CONFIG_FILE")
 traffic_default_json | jq --arg id "$id" '.enabled=true | .inbounds.a={daily:{},users:{($id):{label:"alice",limit:{enabled:true,quotaBytes:1,usedBytes:1,anchorDay:1,anchorTime:"00:00:00",cycleStart:"2026-01-01 00:00:00",cycleEnd:"2099-01-01 00:00:00"}}}}' > "$TRAFFIC_FILE"
-cat >"$unit" <<UNIT
-#!/sbin/openrc-run
-command="$bin"
-command_args="run -config $CONFIG_FILE"
-command_background=true
-pidfile="/run/$name.pid"
-output_log="$TEST_ROOT/server.log"
-error_log="$TEST_ROOT/error.log"
-UNIT
-chmod 755 "$unit"
+setup_runtime_access
+write_openrc_service
 if ! rc-service "$name" start; then openrc_diagnostics; exit 1; fi
+platform_service_enable
+platform_service_is_enabled || { openrc_diagnostics; exit 1; }
 [[ -f /run/$name.pid ]] || { openrc_diagnostics; exit 1; }
 pid_before=$(cat "/run/$name.pid")
 for _ in {1..50}; do

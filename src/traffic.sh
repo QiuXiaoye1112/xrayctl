@@ -1164,8 +1164,21 @@ traffic_samples_json() {
   '
 }
 
+traffic_backend_test_guard() {
+  local command=$1
+  [[ ${XRAYCTL_TESTING:-0} == 1 ]] || return 0
+  # Unit tests supply shell-function backends. Real packet-rule tests must
+  # explicitly opt in and use their own network namespace, as CI already does.
+  declare -F "$command" >/dev/null && return 0
+  if [[ ${XRAYCTL_TEST_FIREWALL:-0} == 1 && -r /proc/self/ns/net && -r /proc/1/ns/net ]] &&
+    [[ $(readlink /proc/self/ns/net) != "$(readlink /proc/1/ns/net)" ]]; then return 0; fi
+  error "测试模式拒绝修改主机防火墙；请提供 ${command} 测试桩或显式使用专用网络命名空间。"
+  return 1
+}
+
 traffic_clear_nft_rules() {
   command_exists nft || return 0
+  traffic_backend_test_guard nft || return 1
   local payload
   payload=$(nft -j list table inet "$TRAFFIC_NFT_TABLE" 2>/dev/null) || return 0
   if ! jq -e '
@@ -1182,6 +1195,7 @@ traffic_clear_iptables_rules() {
   local command parent chain rules rc=0
   for command in iptables ip6tables; do
     command_exists "$command" || continue
+    traffic_backend_test_guard "$command" || return 1
     for chain in "$TRAFFIC_IPTABLES_IN_CHAIN" "$TRAFFIC_IPTABLES_OUT_CHAIN"; do
       rules=$("$command" -t filter -S "$chain" 2>/dev/null) || continue
       if awk -v chain="$chain" '$1=="-A" && $2==chain && index($0,"xrayctl-traffic:")==0 {bad=1} END{exit bad}' <<<"$rules"; then :
@@ -1215,6 +1229,7 @@ traffic_protocols_for_inbound() {
 }
 
 traffic_restore_nft_rules() {
+  traffic_backend_test_guard nft || return 1
   local tag inbound_protocol port transport_protocol count_comment count=0
   command_exists nft || return 1
   traffic_clear_nft_rules || return 1
@@ -1238,6 +1253,7 @@ traffic_restore_iptables_rules() {
   traffic_clear_iptables_rules || return 1
   for command in iptables ip6tables; do
     command_exists "$command" || continue
+    traffic_backend_test_guard "$command" || return 1
     "$command" -t filter -N "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -N "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -C INPUT -j "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I INPUT 1 -j "$TRAFFIC_IPTABLES_IN_CHAIN"

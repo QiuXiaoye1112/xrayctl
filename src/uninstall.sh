@@ -12,6 +12,18 @@ cleanup_step() {
   fi
 }
 
+_safe_remove_path() {
+  local path=$1 canonical
+  [[ -n $path && $path == /* && ! -L $path ]] || return 1
+  canonical=$(readlink -f -- "$path") || return 1
+  # Reject traversal and symlinked parents before applying the allowlist.
+  [[ $canonical == "${path%/}" ]] || { warn "拒绝删除未规范化或经过符号链接的路径：$path"; return 1; }
+  case $canonical in
+    /|/usr|/usr/local|/etc|/var|/var/lib|/var/log|/opt|/home|/root)
+      warn "拒绝删除危险路径：$path"; return 1 ;;
+  esac
+}
+
 safe_remove_dir() {
   local path=$1 allowed matched=0
   [[ -n $path ]] || return 1
@@ -26,6 +38,7 @@ safe_remove_dir() {
   done
   ((matched)) || { warn "路径不在允许删除列表：$path"; return 1; }
   [[ -e $path ]] || return 0
+  _safe_remove_path "$path" || return 1
   rm -rf -- "$path"
 }
 
@@ -40,6 +53,7 @@ safe_remove_managed_dir() {
   recorded=$(_snapshot_meta_resource_get "$resource_key")
   [[ -n $recorded ]] || { warn "缺少资产登记，拒绝删除：$path"; return 1; }
   [[ $recorded == "$path" ]] || { warn "资产路径不匹配，拒绝删除：$path (登记: $recorded)"; return 1; }
+  _safe_remove_path "$path" || return 1
   rm -rf -- "$path"
 }
 
@@ -54,6 +68,7 @@ safe_remove_managed_file() {
   recorded=$(_snapshot_meta_resource_get "$resource_key")
   [[ -n $recorded ]] || { warn "缺少资产登记，拒绝删除：$path"; return 1; }
   [[ $recorded == "$path" ]] || { warn "资产路径不匹配，拒绝删除：$path (登记: $recorded)"; return 1; }
+  _safe_remove_path "$path" || return 1
   rm -f -- "$path"
 }
 
@@ -132,10 +147,10 @@ _uninstall_remove_managed_certs() {
 _uninstall_remove_certbot() {
   if can_remove_certbot_venv; then
     if is_xrayctl_certbot_symlink; then rm -f /usr/local/bin/certbot; fi
-    safe_remove_managed_dir "certbotConfigDir" "$CERTBOT_CONFIG_DIR"
-    safe_remove_managed_dir "certbotWorkDir" "$CERTBOT_WORK_DIR"
-    safe_remove_managed_dir "certbotLogsDir" "$CERTBOT_LOGS_DIR"
-    safe_remove_managed_dir "certbotVenv" "$CERTBOT_VENV"
+    safe_remove_managed_dir "certbotConfigDir" "$CERTBOT_CONFIG_DIR" || return 1
+    safe_remove_managed_dir "certbotWorkDir" "$CERTBOT_WORK_DIR" || return 1
+    safe_remove_managed_dir "certbotLogsDir" "$CERTBOT_LOGS_DIR" || return 1
+    safe_remove_managed_dir "certbotVenv" "$CERTBOT_VENV" || return 1
     meta_resource_remove_existing "certbotVenv"; meta_resource_remove_existing "certbotConfigDir"
     meta_resource_remove_existing "certbotWorkDir"; meta_resource_remove_existing "certbotLogsDir"
   elif [[ ! -d $CERTBOT_VENV ]]; then
@@ -147,15 +162,15 @@ _uninstall_remove_certbot() {
 }
 
 _uninstall_remove_cloudflare() {
-  safe_remove_managed_file "cloudflareCredentials" "$CLOUDFLARE_INI"
+  safe_remove_managed_file "cloudflareCredentials" "$CLOUDFLARE_INI" || return 1
   rmdir "$(dirname "$CLOUDFLARE_INI")" 2>/dev/null || true
   meta_resource_remove_existing "cloudflareCredentials"
 }
 
 _uninstall_remove_config() {
-  [[ -f $CONFIG_FILE ]] && rm -f "$CONFIG_FILE"
-  [[ -d $CERT_DIR ]] && safe_remove_managed_dir "certDir" "$CERT_DIR"
-  [[ -f $META_FILE ]] && rm -f "$META_FILE"
+  if [[ -f $CONFIG_FILE ]]; then rm -f "$CONFIG_FILE" || return 1; fi
+  if [[ -d $CERT_DIR ]]; then safe_remove_managed_dir "certDir" "$CERT_DIR" || return 1; fi
+  if [[ -f $META_FILE ]]; then rm -f "$META_FILE" || return 1; fi
   if [[ -d $CONFIG_DIR ]]; then rmdir "$CONFIG_DIR" 2>/dev/null || true; fi
 }
 
@@ -229,34 +244,49 @@ _cleanup_legacy_resources() {
 
 _uninstall_xray_core_fallback() {
   platform_service_stop >/dev/null 2>&1 || true
+  if service_is_active; then error "Xray 服务未能停止，拒绝删除运行中的核心。"; return 1; fi
   platform_service_disable >/dev/null 2>&1 || true
   if [[ $(platform_init_system) == openrc ]]; then
-    rm -f "$OPENRC_SERVICE"
+    rm -f "$OPENRC_SERVICE" || return 1
   else
-    systemctl disable --now xray@.service >/dev/null 2>&1 || true
-    rm -f /etc/systemd/system/xray.service /etc/systemd/system/xray@.service
-    rm -rf /etc/systemd/system/xray.service.d 2>/dev/null || true
+    rm -f "${SYSTEMD_UNIT_DIR}/${SYSTEMD_UNIT}" || return 1
+    if [[ $SERVICE_NAME == xray ]]; then
+      systemctl disable --now xray@.service >/dev/null 2>&1 || true
+      rm -f "${SYSTEMD_UNIT_DIR}/xray@.service" || return 1
+    fi
   fi
-  rm -f /usr/local/bin/xray /usr/local/bin/xray-linux-*
-  rm -rf /usr/local/share/xray 2>/dev/null || true
+  if [[ -e $XRAY_BIN ]]; then
+    _safe_remove_path "$XRAY_BIN" || return 1
+    rm -f -- "$XRAY_BIN" || return 1
+  fi
+  if [[ $XRAY_BIN == /usr/local/bin/xray ]]; then rm -f /usr/local/bin/xray-linux-*; fi
+  if [[ -e $XRAY_SHARE_DIR ]]; then safe_remove_dir "$XRAY_SHARE_DIR" "$XRAY_SHARE_DIR" || return 1; fi
   platform_daemon_reload
 }
 
 _uninstall_xray_core() {
   local installer
-  if [[ $(platform_init_system) == openrc ]]; then _uninstall_xray_core_fallback; return 0; fi
+  if [[ $(platform_init_system) == openrc || $XRAY_BIN != /usr/local/bin/xray || $SERVICE_NAME != xray || $SYSTEMD_UNIT_DIR != /etc/systemd/system || $XRAY_SHARE_DIR != /usr/local/share/xray ]]; then
+    _uninstall_xray_core_fallback
+    return $?
+  fi
   installer=$(temp_file)
   if curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
     "$OFFICIAL_INSTALLER_URL" -o "$installer" 2>/dev/null; then
     chmod 700 "$installer"
-    TERM="${TERM:-xterm}" bash "$installer" remove --purge >/dev/null 2>&1 || true
+    if ! JSON_PATH="$CONFIG_DIR" JSONS_PATH="" DAT_PATH="$XRAY_SHARE_DIR" \
+         TERM="${TERM:-xterm}" bash "$installer" remove --purge >/dev/null 2>&1; then
+      rm -f "$installer"
+      error "Xray 官方卸载脚本执行失败，请检查残留。"
+      return 1
+    fi
     rm -f "$installer"
     return 0
   else
     rm -f "$installer"
     warn "无法下载 Xray 官方卸载脚本，使用本地安全回退。"
     _uninstall_xray_core_fallback
-    return 0
+    return $?
   fi
 }
 
@@ -264,8 +294,8 @@ _uninstall_remove_bbr() {
   local bbr_config
   bbr_config=$(_snapshot_meta_resource_get "bbrConfig")
   if [[ -n $bbr_config && -f $bbr_config ]]; then
-    _disable_bbr >/dev/null 2>&1 || true
-    rm -f "$bbr_config"
+    _disable_bbr || return 1
+    rm -f "$bbr_config" || return 1
     meta_resource_remove_existing "bbrConfig"
   fi
 }
@@ -397,6 +427,15 @@ EOF
   fi
   echo
 
+  # No managed data may disappear while the core still uses it. The fallback
+  # core remover's check is too late: certificates and counters go first.
+  if service_is_active; then
+    if ! platform_service_stop || service_is_active; then
+      error "Xray 服务未能停止，已取消删除，保留配置和数据。"
+      return 1
+    fi
+  fi
+
   _uninstall_snapshot_metadata
   local step_failures=0 residual_count=0
 
@@ -408,13 +447,22 @@ EOF
   cleanup_step "卸载 Xray 核心"         _uninstall_xray_core               || ((step_failures+=1))
   cleanup_step "清理 systemd 覆盖"      _uninstall_remove_systemd_overrides || ((step_failures+=1))
   cleanup_step "删除运行用户组"         _uninstall_remove_runtime_group    || ((step_failures+=1))
-  cleanup_step "删除快捷命令"           _uninstall_remove_quick_command    || ((step_failures+=1))
   cleanup_step "撤销 BBR 设置"          _uninstall_remove_bbr              || ((step_failures+=1))
-  cleanup_step "删除独立安装的 jq"      _uninstall_remove_owned_jq         || ((step_failures+=1))
   cleanup_step "清理旧版本残留"         _cleanup_legacy_resources          || ((step_failures+=1))
-  cleanup_step "删除 xrayctl 配置"      _uninstall_remove_config           || ((step_failures+=1))
   cleanup_step "删除日志"               _uninstall_remove_logs             || ((step_failures+=1))
   cleanup_step "删除备份"               _uninstall_remove_backups          || ((step_failures+=1))
+  if ((step_failures == 0)); then
+    cleanup_step "删除 xrayctl 配置"    _uninstall_remove_config           || ((step_failures+=1))
+  else
+    warn "部分资源未能删除，保留配置和资产登记以便重试。"
+  fi
+  # Keep the command and jq available for retry after any cleanup failure.
+  if ((step_failures == 0)); then
+    cleanup_step "删除快捷命令"         _uninstall_remove_quick_command    || ((step_failures+=1))
+  fi
+  if ((step_failures == 0)); then
+    cleanup_step "删除独立安装的 jq"    _uninstall_remove_owned_jq         || ((step_failures+=1))
+  fi
 
   echo
   heading "残留检查"
@@ -425,4 +473,5 @@ EOF
   echo
   printf '未修改：\n  - 系统 Certbot\n  - /etc/letsencrypt\n  - 其他网站证书\n  - 系统软件包\n'
   rm -f "$SNAPSHOT_META"
+  ((step_failures == 0 && residual_count == 0))
 }

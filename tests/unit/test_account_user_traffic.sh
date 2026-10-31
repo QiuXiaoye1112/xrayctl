@@ -5,8 +5,11 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export XRAYCTL_TMP_DIR="$tmp" XRAYCTL_TESTING=1
 export XRAYCTL_TRAFFIC_FILE="$tmp/traffic.json" XRAYCTL_CONFIG_FILE="$tmp/config.json" XRAYCTL_LOCK_FILE="$tmp/lock"
+export XRAYCTL_CONFIG_DIR="$tmp/config-dir" XRAYCTL_META_FILE="$tmp/meta.json"
+export XRAYCTL_CERTBOT_VENV="$tmp/certbot"
 source "$root/xrayctl.sh"
 trap - ERR
+traffic_rules_restore() { :; }
 
 jq -n '{
   log:{loglevel:"warning"},
