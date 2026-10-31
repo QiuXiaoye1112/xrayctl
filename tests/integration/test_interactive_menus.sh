@@ -113,7 +113,7 @@ menu_output=$(inbound_outbound_menu)
 [[ $menu_output == *'默认出站：direct'* ]] || fail 'outbound menu did not show the default outbound'
 [[ $menu_output != *'入站默认出站：'* ]] || fail 'outbound menu retained the old default label'
 inbound_summary=${menu_output%%用户：*}
-[[ $inbound_summary == *'分流规则：0 条'* && $inbound_summary == *'模板：无'* ]] || fail 'empty inbound routing summary was missing'
+[[ $inbound_summary == *'分流规则：0 条'* && $inbound_summary == *$'模板：\n  无'* ]] || fail 'empty inbound routing summary was missing'
 check_inbound_routing_summary() {
   local CONFIG_FILE="$TEST_ROOT/summary-config.json" META_FILE="$TEST_ROOT/summary-meta.json"
   local menu_output inbound_summary
@@ -138,9 +138,9 @@ check_inbound_routing_summary() {
   set_inputs 0
   menu_output=$(inbound_outbound_detail_menu node)
   inbound_summary=${menu_output%%用户：*}
-  [[ $inbound_summary == *'分流规则：2 条'* && $inbound_summary == *'模板：public-openai, public-other'* ]] || fail 'inbound routing summary included the wrong scope'
+  [[ $inbound_summary == *'分流规则：2 条'* && $inbound_summary == *$'模板：\n  public-openai → direct\n  public-other → direct'* ]] || fail 'inbound routing summary included the wrong scope'
   [[ $inbound_summary != *'user-only'* && $inbound_summary != *'other-only'* ]] || fail 'inbound summary included another scope template'
-  [[ $menu_output == *'分流规则：1 条'* && $menu_output == *'模板：user-only'* ]] || fail 'user routing summary was changed'
+  [[ $menu_output == *'分流规则：1 条'* && $menu_output == *$'  模板：\n    user-only → direct'* ]] || fail 'user routing summary was changed'
 }
 check_inbound_routing_summary
 : >"$EVENT_LOG"; set_inputs 1 0; inbound_outbound_menu >/dev/null

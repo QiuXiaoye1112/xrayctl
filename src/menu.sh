@@ -139,23 +139,19 @@ user_domain_delete_menu() {
   pause
 }
 
-user_template_names() {
-  local inbound=$1 identity=$2
-  ensure_meta
-  jq -r --arg inbound "$inbound" --arg user "$identity" \
-    '[.domainTemplates.userBindings[]? | select(.inbound==$inbound and .user==$user) | .template] | if length==0 then "无" else join(", ") end' "$META_FILE"
-}
-
-user_template_bindings_display() {
-  local inbound=$1 identity=$2 name outbound found=0
+template_bindings_display() {
+  local inbound=$1 identity=${2-} name outbound found=0
+  local indent="${3-  }"
   ensure_meta
   while IFS=$'\t' read -r name outbound; do
     [[ -n $name ]] || continue
-    printf '  %s → %s\n' "$name" "$( _outbound_display_name "$outbound" )"
+    printf '%s%s → %s\n' "$indent" "$name" "$(_outbound_display_name "$outbound")"
     found=1
-  done < <(jq -r --arg inbound "$inbound" --arg user "$identity" \
-    '.domainTemplates.userBindings[]? | select(.inbound==$inbound and .user==$user) | [.template,.outbound] | @tsv' "$META_FILE")
-  if ((found == 0)); then printf '  无\n'; fi
+  done < <(jq -r --arg inbound "$inbound" --arg user "$identity" '
+    (if $user=="" then .domainTemplates.bindings[]? | select(.inbound==$inbound)
+     else .domainTemplates.userBindings[]? | select(.inbound==$inbound and .user==$user) end) |
+    [.template,.outbound] | @tsv' "$META_FILE")
+  if ((found == 0)); then printf '%s无\n' "$indent"; fi
 }
 
 user_template_remove_menu() {
@@ -177,7 +173,7 @@ user_template_menu() {
     clear_screen
     heading "用户模板 · ${label}"
     printf '已应用模板：\n'
-    user_template_bindings_display "$inbound" "$identity"
+    template_bindings_display "$inbound" "$identity"
     printf '\n1) 应用模板\n2) 移除模板\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
@@ -203,7 +199,7 @@ user_outbound_detail_menu() {
     display_default=$(_outbound_display_name "$default")
     heading "用户出站管理 · ${label}"
     printf '默认出站：%s\n模板：\n' "$display_default"
-    user_template_bindings_display "$inbound" "$identity"
+    template_bindings_display "$inbound" "$identity"
     heading '域名分流规则'
     printf '\n'
     _outbound_user_domain_rules_display "$inbound" "$identity"
@@ -233,7 +229,7 @@ inbound_user_outbound_menu() {
 }
 
 inbound_outbound_detail_menu() {
-  local inbound=$1 choice label identity default display_default count inbound_default first_user inbound_rule_count inbound_templates
+  local inbound=$1 choice label identity default display_default count inbound_default first_user inbound_rule_count
   local -a labels=()
   while inbound_exists "$inbound"; do
     clear_screen
@@ -243,13 +239,10 @@ inbound_outbound_detail_menu() {
     inbound_rule_count=$(jq -r --arg inbound "$inbound" '
       [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-domain:")) and .inboundTag==[$inbound])] | length
     ' "$CONFIG_FILE") || return 1
-    ensure_meta
-    inbound_templates=$(jq -r --arg inbound "$inbound" '
-      [.domainTemplates.bindings[]? | select(.inbound==$inbound) | .template] |
-      if length==0 then "无" else join(", ") end
-    ' "$META_FILE") || return 1
-    printf '默认出站：%s\n分流规则：%s 条\n模板：%s\n\n用户：\n' \
-      "$(_outbound_display_name "$inbound_default")" "$inbound_rule_count" "$inbound_templates"
+    printf '默认出站：%s\n分流规则：%s 条\n模板：\n' \
+      "$(_outbound_display_name "$inbound_default")" "$inbound_rule_count"
+    template_bindings_display "$inbound"
+    printf '\n用户：\n'
     if ((${#labels[@]})); then
       first_user=1
       for label in "${labels[@]}"; do
@@ -259,10 +252,11 @@ inbound_outbound_detail_menu() {
           count=$(_outbound_user_domain_count "$inbound" "$identity")
           [[ -n $default ]] || default=$inbound_default
           display_default=$(_outbound_display_name "$default")
-          printf '  %s\n  默认出站：%s\n  分流规则：%s 条\n  模板：%s\n' \
-            "$label" "$display_default" "$count" "$(user_template_names "$inbound" "$identity")"
+          printf '  %s\n  默认出站：%s\n  分流规则：%s 条\n  模板：\n' \
+            "$label" "$display_default" "$count"
+          template_bindings_display "$inbound" "$identity" '    '
         else
-          printf '  %s\n  默认出站：未知\n  分流规则：未知\n  模板：无\n' "$label"
+          printf '  %s\n  默认出站：未知\n  分流规则：未知\n  模板：\n    无\n' "$label"
         fi
       done
     else
@@ -986,18 +980,12 @@ dispatch() {
 }
 
 domain_rule_detail_menu() {
-  local tag=$1 choice template outbound has_binding=0
+  local tag=$1 choice
   while inbound_exists "$tag"; do
     clear_screen
     heading "域名分流 · ${tag}"
     printf '模板：\n'
-    has_binding=0
-    while IFS=$'\t' read -r template outbound; do
-      [[ -n $template ]] || continue
-      printf '  %s → %s\n' "$template" "$outbound"
-      has_binding=1
-    done < <(list_inbound_template_bindings "$tag")
-    ((has_binding)) || printf '  无\n'
+    template_bindings_display "$tag"
     printf '\n'
     list_domain_rules "$tag" --menu
     printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
@@ -1028,10 +1016,7 @@ inbound_template_manage_menu() {
     clear_screen
     heading "入站模板 · ${inbound}"
     printf '已应用模板：\n'
-    while IFS=$'\t' read -r name outbound; do
-      [[ -n $name ]] || continue
-      printf '  %s → %s\n' "$name" "$outbound"
-    done < <(list_inbound_template_bindings "$inbound")
+    template_bindings_display "$inbound"
     printf '\n1) 添加模板\n2) 移除模板\n3) 修改出站\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 1; }
     case $choice in
