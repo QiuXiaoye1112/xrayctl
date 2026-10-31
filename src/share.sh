@@ -29,7 +29,7 @@ link_query_for_stream() {
     reality)
       sni=$(jq -r '.realitySettings.serverNames[0]' <<<"$stream")
       sid=$(jq -r '.realitySettings.shortIds[0]' <<<"$stream")
-      pbk=$(reality_public_key "$tag") || { warn "无法获得 REALITY 公钥。"; return 0; }
+      pbk=$(reality_public_key "$tag") || { warn "无法获得 REALITY 公钥。"; return 1; }
       query+="&sni=$(url_encode "$sni")&fp=chrome&pbk=$(url_encode "$pbk")&sid=$(url_encode "$sid")&spx=%2F"
       ;;
   esac
@@ -42,7 +42,7 @@ link_query_for_stream() {
 
 print_links() {
   ensure_config; init_meta
-  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link
+  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link flow
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
@@ -53,12 +53,14 @@ print_links() {
   heading "${tag} 分享信息"
   case $protocol in
     vless)
-      query=$(link_query_for_stream "$tag" "$protocol")
-      while IFS= read -r -d '' label && IFS= read -r -d '' id; do
+      query=$(link_query_for_stream "$tag" "") || return 1
+      while IFS= read -r -d '' label && IFS= read -r -d '' id && IFS= read -r -d '' flow; do
         [[ -z $filter || $label == "$filter" ]] || continue
-        link="vless://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")"
+        link="vless://${id}@${uri_host}:${port}?${query}"
+        [[ -z $flow ]] || link+="&flow=$(url_encode "$flow")"
+        link+="#$(url_encode "${tag}-${label}")"
         print_share_entry "$label" "链接" "$link"
-      done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", (.id // ""), "\u0000"' "$CONFIG_FILE")
+      done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", (.id // ""), "\u0000", (.flow // ""), "\u0000"' "$CONFIG_FILE")
       ;;
     socks)
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then

@@ -17,6 +17,21 @@ assert_success validate_port 65535
 assert_failure validate_port 0
 assert_failure validate_port 65536
 assert_failure validate_port abc
+assert_failure validate_port 18446744073709551617
+assert_success validate_port 00080
+
+for address in 127.0.0.1 255.255.255.255 :: ::1 2001:db8::1 2001:db8:0:0:0:0:0:1 ::ffff:192.0.2.1; do
+  assert_success validate_ip_literal "$address"
+done
+for address in 127.0.0.1. 256.1.1.1 : ::: :1::2 1::2: 1::2::3 1:2:3:4:5:6:7 1:2:3:4:5:6:7:8:9 1:2:3:4:5:6:7::8 12345::1 ::ffff:999.0.0.1; do
+  assert_failure validate_ip_literal "$address"
+done
+assert_failure validate_ipv4 $'127.0.0.1\nextra'
+
+# Menu choices are decimal, so a leading zero must not invoke Bash octal math.
+choice=''
+choose choice test one two three four five six seven eight <<<'08' >/dev/null
+assert_eq 8 "$choice" 'decimal menu choice was not normalized'
 
 assert_success validate_domain example.com
 assert_success validate_domain sub.example.com

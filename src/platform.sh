@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 validate_ipv4() {
   local value=$1 a b c d extra
+  [[ $value =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
   IFS=. read -r a b c d extra <<<"$value"
   [[ -z ${extra:-} && $a =~ ^[0-9]{1,3}$ && $b =~ ^[0-9]{1,3}$ && $c =~ ^[0-9]{1,3}$ && $d =~ ^[0-9]{1,3}$ ]] \
     && ((10#$a <= 255 && 10#$b <= 255 && 10#$c <= 255 && 10#$d <= 255))
@@ -36,7 +37,7 @@ platform_require_supported() {
 
 platform_service_exists() {
   case $(platform_init_system) in
-    systemd) systemctl list-unit-files "$SYSTEMD_UNIT" --no-legend 2>/dev/null | grep -q "$SYSTEMD_UNIT" ;;
+    systemd) systemctl list-unit-files "$SYSTEMD_UNIT" --no-legend 2>/dev/null | grep -F "$SYSTEMD_UNIT" >/dev/null ;;
     openrc) [[ -x $OPENRC_SERVICE ]] ;;
   esac
 }
@@ -57,7 +58,7 @@ platform_service_is_active() {
 platform_service_is_enabled() {
   case $(platform_init_system) in
     systemd) systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null ;;
-    openrc) rc-update show default 2>/dev/null | grep -Eq "[[:space:]]${SERVICE_NAME}([[:space:]]|$)" ;;
+    openrc) rc-update show default 2>/dev/null | grep -E "[[:space:]]${SERVICE_NAME}([[:space:]]|$)" >/dev/null ;;
   esac
 }
 
@@ -134,7 +135,34 @@ platform_daemon_reload() {
 }
 
 validate_ip_literal() {
-  validate_ipv4 "$1" || [[ $1 == *:* && $1 =~ ^[0-9A-Fa-f:]+$ && ${#1} -le 45 ]]
+  validate_ipv4 "$1" && return 0
+  local value=$1 rest group count=0 compressed=0
+  [[ $value == *:* && ${#value} -le 45 ]] || return 1
+  # An embedded IPv4 address occupies the final two IPv6 groups.
+  if [[ $value == *.* ]]; then
+    validate_ipv4 "${value##*:}" || return 1
+    value="${value%:*}:0:0"
+  fi
+  [[ $value =~ ^[0-9A-Fa-f:]+$ && $value != *:::* ]] || return 1
+  [[ $value != :* || $value == ::* ]] || return 1
+  [[ $value != *: || $value == *:: ]] || return 1
+  if [[ $value == *::* ]]; then
+    rest=${value#*::}
+    [[ $rest != *::* ]] || return 1
+    compressed=1
+    value=${value/::/:}
+    value=${value#:}; value=${value%:}
+  else
+    [[ $value != :* && $value != *: ]] || return 1
+  fi
+  rest=$value
+  while [[ -n $rest ]]; do
+    group=${rest%%:*}
+    [[ $group =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+    count=$((count + 1))
+    if [[ $rest == *:* ]]; then rest=${rest#*:}; else rest=""; fi
+  done
+  if ((compressed)); then ((count < 8)); else ((count == 8)); fi
 }
 
 detect_public_ipv4() {

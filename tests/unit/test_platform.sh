@@ -53,6 +53,17 @@ assert_eq "rc-service ${SERVICE_NAME} start" "$PLATFORM_CALL" "OpenRC start rout
 platform_service_enable
 assert_eq "rc-update add ${SERVICE_NAME} default" "$PLATFORM_CALL" "OpenRC enable routing changed"
 
+# rc-update can still be writing its service list when grep finds our entry.
+# Consuming the entire stream avoids SIGPIPE becoming an erroneous status 141.
+original_rc_update=$(declare -f rc-update)
+rc-update() {
+  printf '  %s | default\n' "$SERVICE_NAME"
+  local i
+  for ((i=0;i<4000;i++)); do printf '  unrelated-%s | default\n' "$i"; done
+}
+assert_success platform_service_is_enabled
+eval "$original_rc_update"
+
 pass "platform service API routes systemd and OpenRC operations"
 
 # OpenRC can keep rc-service descriptors in supervise-daemon after the manager

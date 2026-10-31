@@ -423,6 +423,8 @@ state_commit() {
   fi
 
   if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$CONFIG_FILE"; then
+    error "配置写入失败，正在恢复原配置和 metadata。"
+    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
     ((traffic_locked == 0)) || traffic_lock_release
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
@@ -554,7 +556,8 @@ _state_build_inbound_meta_delete() {
   jq --arg tag "$tag" '
     del(.inbounds[$tag]) |
     .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
-    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? | select(.inbound != $tag)]' \
+    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? | select(.inbound != $tag)] |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? | select(.inbound != $tag)]' \
     "$current" >"$candidate"
 }
 
@@ -566,6 +569,8 @@ _state_build_inbound_meta_rename() {
     else . end |
     .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
     .domainTemplates.userBindings = [.domainTemplates.userBindings[]? |
+      if .inbound==$old then .inbound=$new else . end] |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? |
       if .inbound==$old then .inbound=$new else . end]' \
     "$current" >"$candidate"
 }
@@ -616,9 +621,15 @@ check_config() {
 }
 
 backup_all() {
-  require_root backup; ensure_config
+  ensure_runtime_dependencies backup; ensure_config
   local target=${1:-${BACKUP_DIR}/xrayctl-$(timestamp).tar.gz}
-  local paths=("${CONFIG_FILE#/}")
+  local paths=("${CONFIG_FILE#/}") path resolved_target
+  [[ ! -e $target && ! -L $target ]] || die "备份目标已存在，拒绝覆盖：$target"
+  mkdir -p "$(dirname "$target")"
+  resolved_target=$(readlink -f -- "$target") || die "无法解析备份目标路径。"
+  for path in "$CONFIG_DIR" "$CERT_DIR"; do
+    [[ $resolved_target != "$(readlink -f -- "$path" 2>/dev/null || true)/"* ]] || die "备份目标不能位于受备份的数据目录内。"
+  done
   if traffic_is_enabled; then traffic_collect || true; fi
   ensure_backup_dir
   mkdir -p "$(dirname "$target")"
@@ -630,25 +641,61 @@ backup_all() {
   info "备份已创建：$target（包含 Xray 配置、metadata、流量记录和证书副本，不含 Certbot 账户/lineage 数据）。"
 }
 
+_restore_backup_payload() {
+  local root=$1 extract_config=$2 __restored_traffic=$3
+  mkdir -p "$(dirname "$CONFIG_FILE")" "$(dirname "$META_FILE")" || return 1
+  [[ ! -L $CONFIG_FILE && ! -L $META_FILE ]] || return 1
+  cp -a "$root/$extract_config" "$CONFIG_FILE" || return 1
+  if [[ -f "$root/${META_FILE#/}" ]]; then
+    cp -a "$root/${META_FILE#/}" "$META_FILE" || return 1
+  else
+    rm -f "$META_FILE" || return 1
+  fi
+  if [[ -e $CERT_DIR ]]; then _safe_remove_path "$CERT_DIR" || return 1; fi
+  rm -rf "$CERT_DIR" || return 1
+  mkdir -p "$CERT_DIR" || return 1
+  if [[ -d "$root/${CERT_DIR#/}" ]]; then cp -a "$root/${CERT_DIR#/}/." "$CERT_DIR/" || return 1; fi
+  if [[ -f "$root/${TRAFFIC_FILE#/}" ]]; then
+    mkdir -p "$(dirname "$TRAFFIC_FILE")" || return 1
+    traffic_write_file "$root/${TRAFFIC_FILE#/}" || return 1
+    printf -v "$__restored_traffic" '%s' 1
+  fi
+}
+
 restore_backup() {
   ensure_runtime_dependencies restore
   local archive=${1-} temp extract_config snapshot had_meta=0 had_certs=0 had_traffic=0 restored_traffic=0
-  local metadata_source traffic_source
+  local metadata_source traffic_source validation_config snapshot_failed=0 rollback_failed=0
   [[ -n $archive ]] || prompt_value archive "备份文件路径" || return 1
   [[ -r $archive ]] || die "无法读取备份：$archive"
   tar -tzf "$archive" >/dev/null || die "不是有效的 tar.gz 备份。"
   if tar -tzf "$archive" | awk 'BEGIN{bad=0} /^\// || /(^|\/)\.\.($|\/)/ {bad=1} END{exit !bad}'; then
     die "备份包含不安全的路径。"
   fi
+  # Reject links/devices before extraction: a post-extraction symlink scan is
+  # too late to protect against hard links and special archive members.
+  if ! tar -tvzf "$archive" | awk 'substr($0,1,1)!~/^[-d]$/ {bad=1} END{exit bad}'; then
+    die "备份只允许普通文件和目录，不能包含链接或设备。"
+  fi
   extract_config="${CONFIG_FILE#/}"
   tar -tzf "$archive" | grep -Fx "$extract_config" >/dev/null || die "备份中没有 ${extract_config}。"
   temp=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-restore.XXXXXX")
-  tar -xzf "$archive" -C "$temp"
+  tar -xzf "$archive" -C "$temp" || { rm -rf "$temp"; die "备份解包失败，未修改当前配置。"; }
   if find "$temp" -type l -print -quit | grep -q .; then rm -rf "$temp"; die "备份中不允许包含符号链接。"; fi
   [[ -f "$temp/$extract_config" ]] || { rm -rf "$temp"; die "备份配置不是普通文件。"; }
   jq -e 'type=="object" and (.inbounds|type=="array") and (.outbounds|type=="array")' \
     "$temp/$extract_config" >/dev/null || { rm -rf "$temp"; die "备份配置 JSON 结构无效。"; }
-  validate_restore_config "$temp/$extract_config" || { rm -rf "$temp"; die "备份配置未通过检查。"; }
+  # During disaster recovery the live certificates may be missing. Validate
+  # against the archived copies before writing any production file.
+  validation_config="$temp/validate.json"
+  jq --arg certDir "$CERT_DIR/" --arg root "$temp" '
+    (.inbounds[]?.streamSettings.tlsSettings.certificates[]?) |=
+      (if (.certificateFile|type)=="string" and (.certificateFile|startswith($certDir))
+       then .certificateFile=($root+.certificateFile) else . end |
+       if (.keyFile|type)=="string" and (.keyFile|startswith($certDir))
+       then .keyFile=($root+.keyFile) else . end)
+  ' "$temp/$extract_config" >"$validation_config" || { rm -rf "$temp"; die "无法准备备份配置校验。"; }
+  validate_restore_config "$validation_config" || { rm -rf "$temp"; die "备份配置未通过检查。"; }
   metadata_source="$temp/${META_FILE#/}"
   traffic_source="$temp/${TRAFFIC_FILE#/}"
   if [[ -f $metadata_source ]]; then
@@ -659,47 +706,50 @@ restore_backup() {
     jq -e 'type=="object" and ((.inbounds // {})|type)=="object"' "$traffic_source" >/dev/null \
       || { rm -rf "$temp"; die "备份流量记录无效，未修改当前配置。"; }
   fi
+  if [[ -L $CONFIG_FILE || -L $META_FILE || -L $CERT_DIR ]] ||
+    { [[ -e $CERT_DIR ]] && ! _safe_remove_path "$CERT_DIR"; }; then
+    rm -rf "$temp"; die "恢复目标路径不安全，未修改当前配置。"
+  fi
   confirm "恢复会覆盖当前配置和托管证书，继续吗？" N || { rm -rf "$temp"; return; }
 
   if traffic_is_enabled; then
     traffic_collect || true
-    traffic_runtime_stop || { rm -rf "$temp"; die "无法安全停止现有流量统计规则，已取消恢复。"; }
   fi
   backup_config_quiet >/dev/null || true
-  snapshot="$temp/.current"
-  mkdir -p "$snapshot"
-  [[ ! -f $CONFIG_FILE ]] || cp -a "$CONFIG_FILE" "$snapshot/config.json"
-  if [[ -f $META_FILE ]]; then cp -a "$META_FILE" "$snapshot/meta.json"; had_meta=1; fi
-  if [[ -d $CERT_DIR ]]; then cp -a "$CERT_DIR" "$snapshot/certs"; had_certs=1; fi
-  if [[ -f $TRAFFIC_FILE ]]; then cp -a "$TRAFFIC_FILE" "$snapshot/traffic.json"; had_traffic=1; fi
-
-  cp -a "$temp/$extract_config" "$CONFIG_FILE"
-  if [[ -f "$temp/${META_FILE#/}" ]]; then cp -a "$temp/${META_FILE#/}" "$META_FILE"; else rm -f "$META_FILE"; fi
-  rm -rf "$CERT_DIR"
-  mkdir -p "$CERT_DIR"
-  if [[ -d "$temp/${CERT_DIR#/}" ]]; then cp -a "$temp/${CERT_DIR#/}/." "$CERT_DIR/"; fi
-  if [[ -f "$temp/${TRAFFIC_FILE#/}" ]]; then
-    mkdir -p "$(dirname "$TRAFFIC_FILE")"
-    traffic_write_file "$temp/${TRAFFIC_FILE#/}"
-    restored_traffic=1
+  snapshot=$(mktemp -d "$temp/.current.XXXXXX") || { rm -rf "$temp"; die "无法创建恢复前快照。"; }
+  if [[ -f $CONFIG_FILE ]]; then cp -a "$CONFIG_FILE" "$snapshot/config.json" || snapshot_failed=1; fi
+  if [[ -f $META_FILE ]]; then cp -a "$META_FILE" "$snapshot/meta.json" || snapshot_failed=1; had_meta=1; fi
+  if [[ -d $CERT_DIR ]]; then cp -a "$CERT_DIR" "$snapshot/certs" || snapshot_failed=1; had_certs=1; fi
+  if [[ -f $TRAFFIC_FILE ]]; then cp -a "$TRAFFIC_FILE" "$snapshot/traffic.json" || snapshot_failed=1; had_traffic=1; fi
+  if ((snapshot_failed)); then
+    rm -rf "$temp"; die "无法保存恢复前快照，未修改当前配置。"
   fi
-  if ! init_meta || ! setup_runtime_access || \
+  if traffic_is_enabled; then
+    traffic_runtime_stop || { rm -rf "$temp"; die "无法安全停止现有流量统计规则，已取消恢复。"; }
+  fi
+  if ! _restore_backup_payload "$temp" "$extract_config" restored_traffic || ! init_meta || ! setup_runtime_access || \
     ! validate_restore_config "$CONFIG_FILE" || ! restart_service || ! traffic_runtime_ensure; then
     error "恢复后配置、服务或流量统计运行时失败，正在整体回滚。"
-    if [[ -f "$snapshot/config.json" ]]; then cp -a "$snapshot/config.json" "$CONFIG_FILE"; else rm -f "$CONFIG_FILE"; fi
-    if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE"; else rm -f "$META_FILE"; fi
-    rm -rf "$CERT_DIR"
-    mkdir -p "$CERT_DIR"
-    if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/"; fi
+    if [[ -f "$snapshot/config.json" ]]; then cp -a "$snapshot/config.json" "$CONFIG_FILE" || rollback_failed=1
+    else rm -f "$CONFIG_FILE" || rollback_failed=1; fi
+    if ((had_meta)); then cp -a "$snapshot/meta.json" "$META_FILE" || rollback_failed=1
+    else rm -f "$META_FILE" || rollback_failed=1; fi
+    rm -rf "$CERT_DIR" || rollback_failed=1
+    mkdir -p "$CERT_DIR" || rollback_failed=1
+    if ((had_certs)); then cp -a "$snapshot/certs/." "$CERT_DIR/" || rollback_failed=1; fi
     if ((had_traffic)); then
-      mkdir -p "$(dirname "$TRAFFIC_FILE")"; traffic_write_file "$snapshot/traffic.json"
+      mkdir -p "$(dirname "$TRAFFIC_FILE")" || rollback_failed=1
+      traffic_write_file "$snapshot/traffic.json" || rollback_failed=1
     elif ((restored_traffic)); then
-      rm -f "$TRAFFIC_FILE"
+      rm -f "$TRAFFIC_FILE" || rollback_failed=1
     fi
-    init_meta || true
-    setup_runtime_access || true
-    restart_service || true
-    traffic_runtime_ensure || true
+    init_meta || rollback_failed=1
+    setup_runtime_access || rollback_failed=1
+    restart_service || rollback_failed=1
+    traffic_runtime_ensure || rollback_failed=1
+    if ((rollback_failed)); then
+      die "恢复失败，回滚未完全成功；原始快照保留在 ${snapshot}，请检查服务并手动恢复。"
+    fi
     rm -rf "$temp"
     die "恢复失败，已回滚配置、元数据、证书、流量记录和运行时规则。"
   fi

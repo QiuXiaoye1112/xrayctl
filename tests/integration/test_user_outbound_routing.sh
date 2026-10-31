@@ -48,6 +48,10 @@ cat >"$XRAYCTL_CONFIG_FILE" <<'JSON'
 }
 JSON
 
+export XRAYCTL_TRAFFIC_FILE="$TEST_ROOT/traffic.json"
+export XRAYCTL_LOCK_FILE="$TEST_ROOT/lock"
+export XRAYCTL_CERTBOT_VENV="$TEST_ROOT/certbot"
+export XRAYCTL_CERTBOT_CONFIG_DIR="$TEST_ROOT/letsencrypt"
 source "$REPO_ROOT/xrayctl.sh"
 mv() {
   if [[ ${1-} == -T ]]; then
@@ -225,6 +229,7 @@ if outbound_user_domain_add renamed-a alice-renamed exact unsafe.example.com dir
 fi
 assert_eq "$before" "$(jq -S . "$XRAYCTL_CONFIG_FILE")" 'unsafe domain change left custom config untouched'
 
+selected=''
 selector_options=()
 selector_pick=direct
 choose() {

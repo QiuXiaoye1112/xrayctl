@@ -8,6 +8,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 XRAYCTL_TESTING=1 \
+XRAYCTL_XRAY_BIN="$TMP/missing-xray" \
 XRAYCTL_TRAFFIC_NOW='2026-08-24 12:00:00' \
 XRAYCTL_CONFIG_DIR="$TMP/cfg" \
 XRAYCTL_CONFIG_FILE="$TMP/cfg/config.json" \

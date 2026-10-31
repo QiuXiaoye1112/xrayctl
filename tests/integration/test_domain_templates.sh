@@ -34,6 +34,10 @@ printf '%s\n' '{
   "routing": {"domainStrategy": "IPIfNonMatch", "rules": []}
 }' >"$XRAYCTL_CONFIG_FILE"
 
+export XRAYCTL_TRAFFIC_FILE="$TEST_ROOT/traffic.json"
+export XRAYCTL_LOCK_FILE="$TEST_ROOT/lock"
+export XRAYCTL_CERTBOT_VENV="$TEST_ROOT/certbot"
+export XRAYCTL_CERTBOT_CONFIG_DIR="$TEST_ROOT/letsencrypt"
 source "${REPO_ROOT}/xrayctl.sh"
 
 ensure_runtime_dependencies() { :; }

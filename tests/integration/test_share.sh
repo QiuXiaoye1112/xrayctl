@@ -45,6 +45,10 @@ cat >"$XRAYCTL_META_FILE" <<'JSON'
 JSON
 
 # shellcheck source=../helpers/assert.sh
+export XRAYCTL_TRAFFIC_FILE="$TEST_ROOT/traffic.json"
+export XRAYCTL_LOCK_FILE="$TEST_ROOT/lock"
+export XRAYCTL_CERTBOT_VENV="$TEST_ROOT/certbot"
+export XRAYCTL_CERTBOT_CONFIG_DIR="$TEST_ROOT/letsencrypt"
 source "${REPO_ROOT}/tests/helpers/assert.sh"
 # shellcheck source=../../xrayctl.sh
 source "${REPO_ROOT}/xrayctl.sh"
@@ -57,5 +61,28 @@ assert_eq "$expected" "$decoded" "single-inbound subscription did not contain th
 
 decoded=$(print_subscription | base64 --decode)
 assert_eq "$expected" "$decoded" "all-inbound subscription did not contain the generated share URI"
+
+# Flow is per credential, so exporting the second user cannot copy the first
+# user's Vision setting. IPv6 and reserved label characters must survive too.
+jq '.inbounds[0].settings.clients[0].flow="xtls-rprx-vision" |
+    .inbounds[0].settings.clients += [{id:"123e4567-e89b-12d3-a456-426614174001",email:"bob + test"}]' \
+  "$CONFIG_FILE" >"$TEST_ROOT/changed.json"
+mv "$TEST_ROOT/changed.json" "$CONFIG_FILE"
+jq '.inbounds["vless-node"].host="2001:db8::1"' "$META_FILE" >"$TEST_ROOT/changed.json"
+mv "$TEST_ROOT/changed.json" "$META_FILE"
+links=$(print_links vless-node)
+alice_link=$(awk '/^链接:.*alice$/ {print}' <<<"$links")
+bob_link=$(awk '/^链接:.*bob%20%2B%20test$/ {print}' <<<"$links")
+[[ $alice_link == *'&flow=xtls-rprx-vision#'* ]] || fail 'first credential lost its flow'
+[[ $bob_link == *'@[2001:db8::1]:443?'* && $bob_link != *'&flow='* ]] || fail 'second credential inherited the wrong flow or lost IPv6 brackets'
+
+jq '.inbounds[0].streamSettings.security="reality" |
+    .inbounds[0].streamSettings.realitySettings={serverNames:["example.com"],shortIds:[""]}' \
+  "$CONFIG_FILE" >"$TEST_ROOT/changed.json"
+mv "$TEST_ROOT/changed.json" "$CONFIG_FILE"
+if print_links vless-node >"$TEST_ROOT/missing-key.out" 2>/dev/null; then
+  fail 'REALITY export silently accepted a missing public key'
+fi
+if grep -q '^链接:' "$TEST_ROOT/missing-key.out"; then fail 'REALITY export printed an unusable link'; fi
 
 pass "subscription contains raw proxy URIs instead of encoded display formatting"

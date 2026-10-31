@@ -13,6 +13,7 @@ while IFS= read -r file; do
 done < <(
   find "$REPO_ROOT" \
     -path "$REPO_ROOT/.git" -prune -o \
+    -path "$REPO_ROOT/.local-test-results" -prune -o \
     -type f -name '*.sh' -print | sort
 )
 
@@ -25,16 +26,20 @@ if [[ -f ${REPO_ROOT}/dist/xrayctl ]]; then
 fi
 
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -x \
+  for file in \
     "${REPO_ROOT}/dist/xrayctl" \
     "${REPO_ROOT}/xrayctl.sh" \
     "${REPO_ROOT}/install.sh" \
     "${REPO_ROOT}/alpine/install.sh" \
     "${REPO_ROOT}/scripts/build.sh" \
-    "${REPO_ROOT}/scripts/lint.sh"
+    "${REPO_ROOT}/scripts/lint.sh"; do
+    shellcheck -x "$file"
+  done
   test_files=()
   while IFS= read -r file; do test_files+=("$file"); done < <(find "${REPO_ROOT}/tests" -type f -name '*.sh' | sort)
-  shellcheck -x -e SC1091,SC2034,SC2155,SC2218,SC2317,SC2329 "${test_files[@]}"
+  # Production modules are checked above. Following the complete manager again
+  # from every test needlessly multiplies analysis time and memory usage.
+  shellcheck -e SC1091,SC2034,SC2155,SC2218,SC2317,SC2329 "${test_files[@]}"
 elif [[ ${REQUIRE_SHELLCHECK:-0} == 1 ]]; then
   printf 'shellcheck is required but not installed\n' >&2
   exit 1

@@ -4,7 +4,9 @@ set -Eeuo pipefail
 
 readonly TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 readonly REPO_ROOT=$(cd "${TEST_DIR}/../.." && pwd)
-readonly TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-runtime-access.XXXXXX")
+# The unprivileged service user must be able to traverse every parent. A caller's
+# TMPDIR can live below /root, where chmod on TEST_ROOT alone cannot help.
+readonly TEST_ROOT=$(mktemp -d /tmp/xrayctl-runtime-access.XXXXXX)
 cleanup_test_root() { rm -rf "$TEST_ROOT"; }
 trap cleanup_test_root EXIT
 chmod 755 "$TEST_ROOT"
@@ -20,6 +22,10 @@ if [[ $(id -u) == 0 ]]; then XRAYCTL_RUNTIME_GROUP=$(id -gn nobody); fi
 export XRAYCTL_TMP_DIR="$TEST_ROOT/tmp"
 
 # shellcheck source=../helpers/assert.sh
+export XRAYCTL_TRAFFIC_FILE="$TEST_ROOT/traffic.json"
+export XRAYCTL_LOCK_FILE="$TEST_ROOT/lock"
+export XRAYCTL_CERTBOT_VENV="$TEST_ROOT/certbot"
+export XRAYCTL_CERTBOT_CONFIG_DIR="$TEST_ROOT/letsencrypt"
 source "$REPO_ROOT/tests/helpers/assert.sh"
 # shellcheck source=../../xrayctl.sh
 source "$REPO_ROOT/xrayctl.sh"

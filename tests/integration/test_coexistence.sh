@@ -23,6 +23,8 @@ cat >"$XRAYCTL_CONFIG_FILE" <<'JSON'
 JSON
 
 # shellcheck source=../helpers/assert.sh
+export XRAYCTL_TRAFFIC_FILE="$TEST_ROOT/traffic.json"
+export XRAYCTL_LOCK_FILE="$TEST_ROOT/lock"
 source "${REPO_ROOT}/tests/helpers/assert.sh"
 # shellcheck source=../../xrayctl.sh
 source "${REPO_ROOT}/xrayctl.sh"
