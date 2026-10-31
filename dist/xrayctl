@@ -7805,6 +7805,7 @@ _outbound_user_domain_rules_display() {
     ($group[] | ["rule",.domain] | @tsv)
   ' "$CONFIG_FILE") || return 1
   if [[ -z $rows ]]; then info '还没有直接域名规则。'; return 0; fi
+  printf '\n'
   while IFS=$'\t' read -r type match outbound domain; do
     case $type in
       group)
@@ -7938,7 +7939,6 @@ user_outbound_detail_menu() {
     printf '默认出站：%s\n模板：\n' "$display_default"
     template_bindings_display "$inbound" "$identity"
     heading '域名分流规则'
-    printf '\n'
     _outbound_user_domain_rules_display "$inbound" "$identity"
     printf '\n1) 设置默认出站\n2) 管理模板\n3) 添加规则\n4) 删除规则\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
@@ -8723,7 +8723,6 @@ domain_rule_detail_menu() {
     heading "域名分流 · ${tag}"
     printf '模板：\n'
     template_bindings_display "$tag"
-    printf '\n'
     list_domain_rules "$tag" --menu
     printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
