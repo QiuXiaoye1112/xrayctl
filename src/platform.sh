@@ -112,11 +112,24 @@ platform_service_status() {
 }
 
 platform_service_logs() {
-  local lines=$1
+  local lines=$1 service_rc=0 error_log="${LOG_DIR}/error.log"
+  heading "服务日志"
   case $(platform_init_system) in
-    systemd) journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager ;;
-    openrc) tail -n "$lines" "${LOG_DIR}/openrc-error.log" "${LOG_DIR}/openrc.log" ;;
+    systemd) journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager || service_rc=$? ;;
+    openrc) tail -n "$lines" "${LOG_DIR}/openrc-error.log" "${LOG_DIR}/openrc.log" || service_rc=$? ;;
+    *) warn "无法识别服务管理器。"; service_rc=1 ;;
   esac
+  printf '\n'
+  heading "Xray 错误日志 · ${error_log}"
+  if [[ -f $error_log && -r $error_log ]]; then
+    tail -n "$lines" -- "$error_log" || return $?
+  elif [[ -e $error_log ]]; then
+    warn "无法读取 Xray 错误日志：${error_log}"
+    return 1
+  else
+    info "尚未生成 Xray 错误日志。"
+  fi
+  return "$service_rc"
 }
 
 platform_service_hook_command() {

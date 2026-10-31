@@ -119,8 +119,6 @@ xrayctl inbound add              # 新建入站
 xrayctl inbound rename OLD NEW   # 修改入站名称
 xrayctl inbound modify TAG       # 修改监听地址/端口/公网地址
 xrayctl inbound transport TAG    # 修改传输和安全方式
-xrayctl inbound disable TAG --yes # 暂停该入站，保留配置和流量额度
-xrayctl inbound enable TAG       # 恢复入站
 xrayctl inbound delete TAG       # 删除入站
 xrayctl outbound list            # 查看入站与出站规则
 xrayctl outbound add             # 添加 SOCKS5/HTTP 出站
@@ -133,16 +131,16 @@ xrayctl outbound user unset TAG USER # 仅取消用户默认，保留域名规�
 xrayctl outbound user rule list TAG USER
 xrayctl outbound user rule add TAG USER suffix|exact DOMAIN[,DOMAIN...] OUT
 xrayctl outbound user rule delete TAG USER suffix|exact DOMAIN[,DOMAIN...]
-xrayctl outbound user restore TAG USER # 清除用户专属规则并恢复继承
+xrayctl outbound user restore TAG USER --yes # 清除用户专属规则并恢复继承
 xrayctl outbound delete OUT      # 删除出站
 xrayctl client add TAG           # 添加用户
 xrayctl client rename TAG OLD NEW
-xrayctl client rotate TAG USER   # 重置 UUID/密码
+xrayctl client rotate TAG USER --yes # 自动生成并更新 UUID/密码
 xrayctl client delete TAG USER
 xrayctl link TAG                 # 分享链接
 xrayctl subscription [TAG]      # Base64 订阅内容
 xrayctl config check             # JSON + Xray 核心检查
-xrayctl logs 100                 # 最近 100 行日志
+xrayctl logs 100                 # 服务日志和 Xray 错误日志各最近 100 行
 xrayctl traffic                  # 查看当前月度周期各入站总流量
 xrayctl traffic period set 22 18:30 # 每月 22 日 18:30 开始新的统计周期
 xrayctl traffic period show      # 查看当前周期起止时间
@@ -153,6 +151,8 @@ xrayctl traffic user remove TAG USER --yes # 取消用户额度
 xrayctl traffic user reset TAG USER --yes  # 清零用户流量和当前额度周期
 xrayctl cert issue example.com admin@example.com
 ```
+
+非交互执行凭据轮换和用户路由恢复时必须显式添加 `--yes`，否则命令报错并返回非零状态。入站默认出站和用户默认出站的设置命令支持出站标签，也支持已配置本机出站的完整 IPv4/IPv6 地址；同一 IP 对应多个出站时需使用明确的标签。非交互执行 `xrayctl bbr` 只显示状态，不修改内核或持久化配置。
 
 完整命令帮助：
 

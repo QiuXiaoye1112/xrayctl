@@ -132,7 +132,6 @@ cancel_input() {
 
 cancel_selection() {
   cancel_input
-  pause
 }
 
 prompt_value() {
@@ -287,7 +286,10 @@ run_menu_action() {
   else
     trap - ERR
   fi
-  return "$action_status"
+  if ((action_status != 0)); then
+    warn "操作未完成，脚本仍在运行，请检查输入后重试。"
+  fi
+  return 0
 }
 
 url_encode() { jq -rn --arg value "$1" '$value|@uri'; }

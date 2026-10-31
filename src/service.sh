@@ -467,7 +467,7 @@ manage_bbr() {
         _enable_bbr
       fi
     else
-      _enable_bbr
+      info "非交互模式下跳过 BBR 配置；请在终端运行 xrayctl bbr 进行管理。"
     fi
   fi
 }

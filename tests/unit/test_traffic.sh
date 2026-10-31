@@ -593,4 +593,22 @@ for collecting in false true; do
 done
 BASH_CLEAR_DELETED
 
+# Switching backends must refuse a pre-existing table before touching the old one.
+XRAYCTL_TESTING=1 COLLISION_MARKER="$TMP/backend-mutated" bash <<'BASH_BACKEND_COLLISION'
+set -Eeuo pipefail
+source ./xrayctl.sh
+traffic_backend() { printf nft; }
+traffic_recorded_backend() { printf iptables; }
+command_exists() { [[ $1 == nft ]]; }
+nft() { [[ $1 == list && $2 == table ]]; }
+traffic_rules_clear() { touch "$COLLISION_MARKER"; }
+traffic_set_backend() { touch "$COLLISION_MARKER"; }
+traffic_restore_nft_rules() { touch "$COLLISION_MARKER"; }
+if traffic_rules_restore 2>/dev/null; then
+  printf 'existing unowned backend table was accepted\n' >&2
+  exit 1
+fi
+[[ ! -e $COLLISION_MARKER ]] || { printf 'backend collision changed existing state\n' >&2; exit 1; }
+BASH_BACKEND_COLLISION
+
 printf 'traffic accounting unit checks passed.\n'

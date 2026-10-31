@@ -203,7 +203,8 @@ jq -e --arg id "$id_a" '.inbounds.a.users[$id].label=="charlie" and .inbounds.a.
 jq '.inbounds[0].settings.clients[0].email="manually-edited"' "$CONFIG_FILE" >"$tmp/edited"
 traffic_user_recover_identities "$tmp/edited" "$tmp/recovered"
 jq -e --arg id "$id_a" '.inbounds[0].settings.clients[0].email==$id' "$tmp/recovered" >/dev/null
-rotate_client_credential a charlie
+generate_uuid() { printf '%s\n' '123e4567-e89b-12d3-a456-426614174099'; }
+rotate_client_credential a charlie 1
 jq -e --arg id "$id_a" '.inbounds[0].settings.clients[0].email==$id and .inbounds[0].settings.clients[0].id=="123e4567-e89b-12d3-a456-426614174099"' "$CONFIG_FILE" >/dev/null
 jq --arg a "$id_a" '.inbounds.a.users[$a].limit.usedBytes=10' "$TRAFFIC_FILE" >"$tmp/state"
 cp "$tmp/state" "$TRAFFIC_FILE"

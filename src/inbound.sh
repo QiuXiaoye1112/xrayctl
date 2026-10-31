@@ -457,21 +457,45 @@ delete_client() {
 }
 
 rotate_client_credential() {
+  local tag=${1-} label=${2-} assume_yes=${3:-0} protocol value generated tmp
+  if [[ $label == --yes ]]; then label=""; assume_yes=1; fi
+  if [[ ! -t 0 ]]; then
+    if [[ -z $tag || -z $label ]]; then
+      error "非交互模式必须指定入站和用户：xrayctl client rotate <入站> <用户> --yes"
+      return 2
+    fi
+    if [[ $assume_yes != 1 ]]; then
+      error "非交互凭据轮换必须显式添加 --yes；未修改任何凭据。"
+      return 2
+    fi
+  fi
   ensure_runtime_dependencies client-rotate; ensure_config
-  local tag=${1-} label=${2-} protocol value generated tmp
   [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  inbound_exists "$tag" || die "找不到入站：$tag"
   [[ -n $label ]] || select_client label "$tag" || return
+  client_label_exists "$tag" "$label" || die "找不到入站 ${tag} 的用户 ${label}。"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
-  confirm "旧凭据会立即失效，继续吗？" N || return 0
+  [[ $assume_yes == 1 ]] || confirm "旧凭据会立即失效，继续吗？" N || return 0
   tmp=$(temp_file)
   case $protocol in
     vless)
-      generated=$(generate_uuid)
-      prompt_validated_value value "新 UUID" "$generated" validate_uuid "UUID 格式无效，请重新输入。" || { rm -f "$tmp"; return 1; }
+      generated=$(generate_uuid) || { rm -f "$tmp"; error "无法生成新 UUID，未修改凭据。"; return 1; }
+      validate_uuid "$generated" || { rm -f "$tmp"; error "生成的 UUID 无效，未修改凭据。"; return 1; }
+      if [[ $assume_yes == 1 ]]; then
+        value=$generated
+      else
+        prompt_validated_value value "新 UUID" "$generated" validate_uuid "UUID 格式无效，请重新输入。" || { rm -f "$tmp"; return 1; }
+      fi
       jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
     socks|http)
-      prompt_secret value "新密码" "$(random_password)" || { rm -f "$tmp"; return 1; }
+      generated=$(random_password) || { rm -f "$tmp"; error "无法生成新密码，未修改凭据。"; return 1; }
+      [[ -n $generated ]] || { rm -f "$tmp"; error "无法生成新密码，未修改凭据。"; return 1; }
+      if [[ $assume_yes == 1 ]]; then
+        value=$generated
+      else
+        prompt_secret value "新密码" "$generated" || { rm -f "$tmp"; return 1; }
+      fi
       jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '
         (.inbounds[]|select(.tag==$tag)|.settings) |= (
           ((.accounts // .users // [])|map(if .user==$client_label then .pass=$value else . end)) as $all |

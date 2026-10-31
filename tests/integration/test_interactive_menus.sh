@@ -108,19 +108,23 @@ exercise_menu_route inbound_menu 2 'manage_inbound_menu node'
 source "${REPO_ROOT}/src/menu.sh"
 
 jq -n '{inbounds:[{tag:"node",protocol:"vless",settings:{clients:[{email:"alice",id:"11111111-1111-4111-8111-111111111111"}]}}],outbounds:[{tag:"direct",protocol:"freedom"}],routing:{rules:[]}}' >"$CONFIG_FILE"
+set_inputs 0
+menu_output=$(inbound_outbound_menu)
+[[ $menu_output == *'默认出站：direct'* ]] || fail 'outbound menu did not show the default outbound'
+[[ $menu_output != *'入站默认出站：'* ]] || fail 'outbound menu retained the old default label'
 : >"$EVENT_LOG"; set_inputs 1 0; inbound_outbound_menu >/dev/null
 assert_recorded 'assign_outbound node '
-: >"$EVENT_LOG"; set_inputs 3 1 1 0; inbound_outbound_menu >/dev/null
+: >"$EVENT_LOG"; set_inputs 3 1 0 0; inbound_outbound_menu >/dev/null
 assert_recorded 'outbound_user_default_set node alice '
 select_outbound() {
   local destination=$1 include_blocked=${5:-0}
   if ((include_blocked)); then printf -v "$destination" '%s' blocked; else printf -v "$destination" '%s' direct; fi
 }
-: >"$EVENT_LOG"; set_inputs 3 1 3 2 1 example.com 0 0; inbound_outbound_menu >/dev/null
-assert_recorded 'outbound_user_domain_add node alice suffix example.com blocked'
-: >"$EVENT_LOG"; set_inputs 1 2 0 0; domain_rule_menu >/dev/null
+: >"$EVENT_LOG"; set_inputs 3 3 1 example.com 0 0; inbound_outbound_menu >/dev/null
+assert_recorded 'outbound_user_domain_add node alice suffix example.com blocked '
+: >"$EVENT_LOG"; set_inputs 2 2 0 0; inbound_outbound_menu >/dev/null
 assert_recorded 'add_domain_rule node    --prompt'
-: >"$EVENT_LOG"; set_inputs 1 3 0 0; domain_rule_menu >/dev/null
+: >"$EVENT_LOG"; set_inputs 2 3 0 0; inbound_outbound_menu >/dev/null
 assert_recorded 'delete_domain_rule node   --direct-only'
 
 # An empty inbound list should report its state and still allow returning.
@@ -128,7 +132,7 @@ jq -n '{inbounds:[],outbounds:[{tag:"direct",protocol:"freedom"}],routing:{rules
 info() { record info "$@"; }
 : >"$EVENT_LOG"
 set_inputs 0
-domain_rule_menu >/dev/null
+inbound_outbound_menu >/dev/null
 assert_recorded 'info 还没有可管理的入站。'
 info() { :; }
 

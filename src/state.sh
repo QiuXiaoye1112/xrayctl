@@ -21,7 +21,8 @@ init_meta_base() {
      ((.migrations // {})|type)=="object" and
      ((.domainTemplates // {templates:[],userBindings:[]})|type)=="object" and
      ((.domainTemplates.templates // [])|type)=="array" and
-      ((.domainTemplates.userBindings // [])|type)=="array"
+      ((.domainTemplates.userBindings // [])|type)=="array" and
+      ((.domainTemplates.bindings // [])|type)=="array"
   ' "$META_FILE" >/dev/null 2>&1; then
     chmod 600 "$META_FILE"
     return 0
@@ -38,7 +39,8 @@ init_meta_base() {
      .migrations = (.migrations // {}) |
      .domainTemplates = (.domainTemplates // {}) |
      .domainTemplates.templates = (.domainTemplates.templates // []) |
-     .domainTemplates.userBindings = (.domainTemplates.userBindings // [])
+     .domainTemplates.userBindings = (.domainTemplates.userBindings // []) |
+     .domainTemplates.bindings = (.domainTemplates.bindings // [])
   ' "$META_FILE" >"$tmp" || {
     rm -f "$tmp"
     return 1
@@ -355,7 +357,8 @@ state_validate_metadata_candidate() {
     ((.migrations // {}) | type=="object") and
     ((.domainTemplates // {templates:[],userBindings:[]}) | type=="object") and
     ((.domainTemplates.templates // []) | type=="array") and
-    ((.domainTemplates.userBindings // []) | type=="array")
+    ((.domainTemplates.userBindings // []) | type=="array") and
+    ((.domainTemplates.bindings // []) | type=="array")
   ' "$candidate" 2>&1); then
     error "metadata JSON 结构检查失败。" "$validation_output"
     return 1
@@ -554,7 +557,8 @@ _state_build_inbound_meta_delete() {
   jq --arg tag "$tag" '
     del(.inbounds[$tag]) |
     .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
-    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? | select(.inbound != $tag)]' \
+    .domainTemplates.userBindings = [.domainTemplates.userBindings[]? | select(.inbound != $tag)] |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? | select(.inbound != $tag)]' \
     "$current" >"$candidate"
 }
 
@@ -566,6 +570,8 @@ _state_build_inbound_meta_rename() {
     else . end |
     .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
     .domainTemplates.userBindings = [.domainTemplates.userBindings[]? |
+      if .inbound==$old then .inbound=$new else . end] |
+    .domainTemplates.bindings = [.domainTemplates.bindings[]? |
       if .inbound==$old then .inbound=$new else . end]' \
     "$current" >"$candidate"
 }
@@ -632,8 +638,9 @@ backup_all() {
 
 restore_backup() {
   ensure_runtime_dependencies restore
-  local archive=${1-} temp extract_config snapshot had_meta=0 had_certs=0 had_traffic=0 restored_traffic=0
+  local archive=${1-} assume_yes=${2:-0} temp extract_config snapshot had_meta=0 had_certs=0 had_traffic=0 restored_traffic=0
   local metadata_source traffic_source
+  if [[ $archive == --yes ]]; then archive=""; assume_yes=1; fi
   [[ -n $archive ]] || prompt_value archive "备份文件路径" || return 1
   [[ -r $archive ]] || die "无法读取备份：$archive"
   tar -tzf "$archive" >/dev/null || die "不是有效的 tar.gz 备份。"
@@ -659,7 +666,7 @@ restore_backup() {
     jq -e 'type=="object" and ((.inbounds // {})|type)=="object"' "$traffic_source" >/dev/null \
       || { rm -rf "$temp"; die "备份流量记录无效，未修改当前配置。"; }
   fi
-  confirm "恢复会覆盖当前配置和托管证书，继续吗？" N || { rm -rf "$temp"; return; }
+  [[ $assume_yes == 1 ]] || confirm "恢复会覆盖当前配置和托管证书，继续吗？" N || { rm -rf "$temp"; return 0; }
 
   if traffic_is_enabled; then
     traffic_collect || true

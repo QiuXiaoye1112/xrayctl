@@ -1258,6 +1258,10 @@ traffic_rules_restore() {
   local selected
   selected=$(traffic_backend)
   [[ $selected != none ]] || return 1
+  if traffic_backend_conflicts "$selected"; then
+    warn "目标防火墙后端存在同名资源，拒绝覆盖；请先检查资源归属。"
+    return 1
+  fi
   traffic_rules_clear || return 1
   [[ $(traffic_recorded_backend) == "$selected" ]] || traffic_set_backend "$selected"
   [[ -f $CONFIG_FILE ]] || return 0
@@ -1518,11 +1522,12 @@ traffic_select_record_tag() {
 }
 
 traffic_clear_tag_records() {
-  local tag=${1-} tmp rc=0
+  local tag=${1-} assume_yes=${2:-0} tmp rc=0
+  if [[ $tag == --yes ]]; then tag=""; assume_yes=1; fi
   [[ -n $tag ]] || traffic_select_record_tag tag || return 0
   traffic_collect || true; traffic_init_file
   jq -e --arg tag "$tag" '.inbounds[$tag] != null' "$TRAFFIC_FILE" >/dev/null || { warn "没有入站 ${tag} 的流量记录。"; return 1; }
-  confirm "清空入站 ${tag} 当前周期的流量记录；已删除的入站将移除整条记录（保留全部入站总流量）？" N || return 0
+  [[ $assume_yes == 1 ]] || confirm "清空入站 ${tag} 当前周期的流量记录；已删除的入站将移除整条记录（保留全部入站总流量）？" N || return 0
   traffic_lock_acquire || return 1
   # Statistics may be stopped: seed legacy totals before deleting any record.
   traffic_update_file '{}' false || { traffic_lock_release; return 1; }
@@ -1542,11 +1547,13 @@ traffic_clear_tag_records() {
 }
 
 traffic_clear_all_records() {
-  local answer tmp rc=0
+  local assume_yes=${1:-0} answer tmp rc=0
   traffic_collect || true; traffic_init_file
-  printf '输入 RESET 确认清空全部入站流量记录（不清空用户流量）：'
-  read -r answer || { cancel_input; return 0; }
-  [[ $answer == RESET ]] || { info "已取消。"; return 0; }
+  if [[ $assume_yes != 1 ]]; then
+    printf '输入 RESET 确认清空全部入站流量记录（不清空用户流量）：'
+    read -r answer || { cancel_input; return 0; }
+    [[ $answer == RESET ]] || { info "已取消。"; return 0; }
+  fi
   traffic_lock_acquire || return 1
   tmp=$(temp_file); jq '
     .totals={daily:{},cycles:{}} |

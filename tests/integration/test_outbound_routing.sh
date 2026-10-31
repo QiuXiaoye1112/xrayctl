@@ -269,8 +269,21 @@ detect_local_ips() {
   printf '%s\t%s\t%s\n' '203.0.113.10 (IPv4)' 203.0.113.10 eth0
   printf '%s\t%s\t%s\n' '2001:db8::1 (IPv6)' 2001:db8::1 eth0
 }
-local_ipv4_tag=$(_ensure_freedom_outbound 203.0.113.10)
-local_ipv6_tag=$(_ensure_freedom_outbound 2001:db8::1)
+local_ipv4_tag=$(_freedom_tag_for_ip 203.0.113.10)
+local_ipv6_tag=$(_freedom_tag_for_ip 2001:db8::1)
+candidate=$(temp_file)
+jq '.outbounds += [{tag:"local-198-51-100-1",protocol:"socks",settings:{address:"192.0.2.10",port:1080}}]' "$CONFIG_FILE" >"$candidate"
+before_collision=$(jq -S . "$candidate")
+if _stage_local_outbound "$candidate" 198.51.100.1 >/dev/null 2>&1; then
+  fail 'local IP selection accepted an existing proxy tag'
+fi
+assert_eq "$before_collision" "$(jq -S . "$candidate")" 'local IP collision changed the proxy'
+rm -f "$candidate"
+candidate=$(temp_file)
+cp "$CONFIG_FILE" "$candidate"
+_stage_local_outbound "$candidate" 203.0.113.10
+_stage_local_outbound "$candidate" 2001:db8::1
+state_apply_candidate_file "$candidate" apply_candidate >/dev/null
 add_domain_rule vless-443 suffix ipv4.example.com "$local_ipv4_tag" >/dev/null
 add_domain_rule vless-443 suffix ipv6.example.com "$local_ipv6_tag" >/dev/null
 assert_eq 203.0.113.10 "$(jq -r --arg tag "$local_ipv4_tag" '.outbounds[]|select(.tag==$tag)|.sendThrough' "$CONFIG_FILE")" \
@@ -283,7 +296,7 @@ assert_eq UseIP "$(jq -r --arg tag "$local_ipv6_tag" '.outbounds[]|select(.tag==
   'IPv6 freedom outbound domainStrategy changed'
 assert_domain_rules_before_default vless-443
 listing=$(list_domain_rules vless-443)
-[[ $listing == *'2001:...:1'* ]] || fail 'domain rule list did not compact the IPv6 sendThrough address'
+[[ $listing == *'2001:db8::1'* ]] || fail 'domain rule list did not show the reusable full IPv6 sendThrough address'
 [[ $listing == *'入站：vless-443'* ]] || fail 'domain rule list was not grouped by inbound'
 [[ $listing == *'子域名 →'* ]] || fail 'domain rule list did not group repeated match and outbound values'
 [[ $listing != *'序号  | 匹配   | 域名'* ]] || fail 'domain rule list still repeated table columns'

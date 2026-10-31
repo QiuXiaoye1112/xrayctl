@@ -92,7 +92,7 @@ user_domain_add_menu() {
   choose match '匹配方式' '域名及所有子域名' '仅精确域名' || return 0
   [[ $match == 1 ]] && match=suffix || match=exact
   prompt_domain_list domains '域名（多个请用英文逗号分隔）' || return 0
-  select_outbound outbound 1 1 local_ip 0 || return 0
+  select_outbound outbound 1 1 local_ip 1 || return 0
   run_menu_action outbound_user_domain_add "$inbound" "$label" "$match" "$domains" "$outbound" "$local_ip"
   pause
 }
@@ -207,12 +207,13 @@ user_outbound_detail_menu() {
     heading '域名分流规则'
     printf '\n'
     _outbound_user_domain_rules_display "$inbound" "$identity"
-    printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    printf '\n1) 设置默认出站\n2) 管理模板\n3) 添加规则\n4) 删除规则\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
-      1) user_template_menu "$inbound" "$label";;
-      2) user_domain_add_menu "$inbound" "$label";;
-      3) user_domain_delete_menu "$inbound" "$label";;
+      1) run_menu_action outbound_user_default_set "$inbound" "$label" ""; pause;;
+      2) user_template_menu "$inbound" "$label";;
+      3) user_domain_add_menu "$inbound" "$label";;
+      4) user_domain_delete_menu "$inbound" "$label";;
       0) return;; *) warn '无效选项。'; pause;;
     esac
   done
@@ -236,10 +237,10 @@ inbound_outbound_detail_menu() {
   local -a labels=()
   while inbound_exists "$inbound"; do
     clear_screen
-    heading "入站出站管理 · ${inbound}"
+    heading "出站管理 · ${inbound}"
     mapfile -t labels < <(_outbound_user_labels "$inbound")
     inbound_default=$(_outbound_inbound_default "$inbound")
-    printf '入站默认出站：%s\n\n用户：\n' "$(_outbound_display_name "$inbound_default")"
+    printf '默认出站：%s\n\n用户：\n' "$(_outbound_display_name "$inbound_default")"
     if ((${#labels[@]})); then
       first_user=1
       for label in "${labels[@]}"; do
@@ -258,11 +259,12 @@ inbound_outbound_detail_menu() {
     else
       printf '  无\n'
     fi
-    printf '\n1) 设置默认出站\n2) 用户出站管理\n0) 返回\n'
+    printf '\n1) 设置默认出站\n2) 公共域名分流\n3) 用户出站管理\n0) 返回\n'
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action assign_outbound "$inbound" ""; pause;;
-      2) inbound_user_outbound_menu "$inbound";;
+      2) domain_rule_detail_menu "$inbound";;
+      3) inbound_user_outbound_menu "$inbound";;
       0) return;; *) warn '无效选项。'; pause;;
     esac
   done
@@ -770,9 +772,10 @@ xrayctl - Xray Linux 管理脚本
   xrayctl install [版本]              安装/修复 Xray
   xrayctl status                  查看状态
   xrayctl start|stop|restart      服务控制
-  xrayctl logs [行数]             查看服务日志
+  xrayctl logs [行数]             查看服务日志和 Xray 错误日志
   xrayctl traffic [开始日期] [结束日期] 查看当前周期内按入站累计流量
   xrayctl traffic period [show|set <日期> <HH:MM>] 查看/设置统一月度统计起点
+  xrayctl traffic reset [标签|--all] [--yes]
   xrayctl traffic user enable
   xrayctl traffic user show
   xrayctl traffic user set <入站> <用户> <GB> <重置日> [HH:MM]
@@ -784,8 +787,6 @@ xrayctl - Xray Linux 管理脚本
   xrayctl inbound rename <旧标签> <新标签>
   xrayctl inbound modify <标签>   修改监听端口/地址
   xrayctl inbound transport <标签> 修改传输与安全方式
-  xrayctl inbound disable <标签> [--yes] 禁用入站
-  xrayctl inbound enable <标签> [--yes] 启用入站
   xrayctl inbound delete <标签> [--yes]
   xrayctl outbound list
   xrayctl outbound add
@@ -797,18 +798,21 @@ xrayctl - Xray Linux 管理脚本
   xrayctl outbound user rule list <入站> <用户>
   xrayctl outbound user rule add <入站> <用户> <suffix|exact> <域名[,域名...]> <出站>
   xrayctl outbound user rule delete <入站> <用户> <suffix|exact> <域名[,域名...]>
-  xrayctl outbound user restore <入站> <用户>
+  xrayctl outbound user restore <入站> <用户> [--yes]
   xrayctl outbound delete <出站标签>
+  xrayctl outbound rule list [入站]
+  xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>
+  xrayctl outbound rule delete [入站] [suffix|exact] [域名]
   xrayctl client list [标签]
   xrayctl client add [标签]
   xrayctl client rename [标签] [旧名称] [新名称]
-  xrayctl client rotate [标签] [用户]
+  xrayctl client rotate [标签] [用户] [--yes]
   xrayctl client delete [标签] [用户] [--yes]
   xrayctl link [标签] [用户]      输出分享链接
   xrayctl subscription [标签]     输出 Base64 订阅内容
   xrayctl config check|show|edit
   xrayctl backup [文件.tar.gz]
-  xrayctl restore [文件.tar.gz]
+  xrayctl restore [文件.tar.gz] [--yes]
   xrayctl cert list                 列出托管证书
   xrayctl cert issue [域名] [邮箱]   Let's Encrypt 自动签发
   xrayctl cert import [标识] [证书] [私钥]  导入已有证书
@@ -861,7 +865,11 @@ dispatch() {
               esac
               ;;
             reset)
-              if [[ ${2-} == --all ]]; then traffic_clear_all_records; else traffic_clear_tag_records "${2-}"; fi
+              if [[ ${2-} == --all ]]; then
+                traffic_clear_all_records "$([[ ${3-} == --yes ]] && printf 1 || printf 0)"
+              else
+                traffic_clear_tag_records "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)"
+              fi
               ;;
             user)
               case ${2:-show} in
@@ -890,6 +898,14 @@ dispatch() {
       case ${1:-list} in
         list) list_outbound_overview;; add) add_outbound;; assign|set) assign_outbound "${2-}" "${3-}";;
         delete|remove) delete_outbound "${2-}";;
+        rule)
+          case ${2:-list} in
+            list) list_domain_rules "${3-}";;
+            add) add_domain_rule "${3-}" "${4-}" "${5-}" "${6-}";;
+            delete|remove) delete_domain_rule "${3-}" "${4-}" "${5-}";;
+            *) die "未知 outbound rule 子命令：${2}";;
+          esac
+          ;;
         inbound)
           case ${2:-list} in
             list) list_inbound_outbound_status;;
@@ -903,7 +919,14 @@ dispatch() {
             list) outbound_user_list "${3-}";;
             set) outbound_user_default_set "${3-}" "${4-}" "${5-}";;
             unset) outbound_user_default_unset "${3-}" "${4-}";;
-            restore|inherit) outbound_user_restore "${3-}" "${4-}";;
+            restore|inherit)
+              (($# <= 5)) || die "用法：xrayctl outbound user restore <入站> <用户> [--yes]"
+              case ${5-} in
+                ''|--yes) ;;
+                *) die "不支持的恢复继承参数：${5}；可使用 --yes。";;
+              esac
+              outbound_user_restore "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)"
+              ;;
             rule)
               case ${3:-list} in
                 list) outbound_user_domain_list "${4-}" "${5-}";;
@@ -919,14 +942,21 @@ dispatch() {
     client)
       case ${1:-list} in
         list) ensure_config; list_clients "${2-}";; add) add_client "${2-}";; rename) rename_client "${2-}" "${3-}" "${4-}";;
-        rotate|reset) rotate_client_credential "${2-}" "${3-}";;
+        rotate|reset)
+          (($# <= 4)) || die "用法：xrayctl client rotate [入站] [用户] [--yes]"
+          case ${4-} in
+            ''|--yes) ;;
+            *) die "不支持的凭据轮换参数：${4}；可使用 --yes。";;
+          esac
+          rotate_client_credential "${2-}" "${3-}" "$([[ ${4-} == --yes ]] && printf 1 || printf 0)"
+          ;;
         delete|remove) delete_client "${2-}" "${3-}" "$([[ ${4-} == --yes ]] && printf 1 || printf 0)";;
         *) die "未知 client 子命令：${1}";; esac;;
     link|links|share) ensure_config; print_links "${1-}" "${2-}";;
     subscription|subscribe|sub) ensure_config; print_subscription "${1-}";;
     config)
       case ${1:-check} in check|test) check_config;; show) ensure_config; jq . "$CONFIG_FILE";; edit) edit_config;; *) die "未知 config 子命令。";; esac;;
-    backup) backup_all "${1-}";; restore) restore_backup "${1-}";;
+    backup) backup_all "${1-}";; restore) restore_backup "${1-}" "$([[ ${2-} == --yes ]] && printf 1 || printf 0)";;
     cert)
       case ${1:-list} in
         list) list_certificates;;
@@ -944,4 +974,79 @@ dispatch() {
     internal-traffic-watch) internal_traffic_watch;;
     *) error "未知命令：$command"; show_help; return 2;;
   esac
+}
+
+domain_rule_detail_menu() {
+  local tag=$1 choice template outbound has_binding=0
+  while inbound_exists "$tag"; do
+    clear_screen
+    heading "域名分流 · ${tag}"
+    printf '模板：\n'
+    has_binding=0
+    while IFS=$'\t' read -r template outbound; do
+      [[ -n $template ]] || continue
+      printf '  %s → %s\n' "$template" "$outbound"
+      has_binding=1
+    done < <(list_inbound_template_bindings "$tag")
+    ((has_binding)) || printf '  无\n'
+    printf '\n'
+    list_domain_rules "$tag" --menu
+    printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    case $choice in
+      1) inbound_template_manage_menu "$tag";;
+      2) if run_menu_action add_domain_rule "$tag" "" "" "" --prompt; then pause; fi;;
+      3) if run_menu_action delete_domain_rule "$tag" "" "" --direct-only; then pause; fi;;
+      0) return;; *) warn "无效选项。"; pause;;
+    esac
+  done
+}
+
+select_inbound_template() {
+  local inbound=$1 __var=$2 answer template_name
+  local -a names=()
+  while IFS=$'\t' read -r template_name _; do
+    [[ -n $template_name ]] && names+=("$template_name")
+  done < <(list_inbound_template_bindings "$inbound")
+  ((${#names[@]})) || { warn "当前入站还没有应用模板。"; return 1; }
+  choose answer "选择模板" "${names[@]}" || return 1
+  printf -v "$__var" '%s' "${names[$((answer-1))]}"
+}
+
+inbound_template_manage_menu() {
+  local inbound=$1 choice name outbound local_ip=""
+  while inbound_exists "$inbound"; do
+    clear_screen
+    heading "入站模板 · ${inbound}"
+    printf '已应用模板：\n'
+    while IFS=$'\t' read -r name outbound; do
+      [[ -n $name ]] || continue
+      printf '  %s → %s\n' "$name" "$outbound"
+    done < <(list_inbound_template_bindings "$inbound")
+    printf '\n1) 添加模板\n2) 移除模板\n3) 修改出站\n0) 返回\n'
+    read -r -p '请选择: ' choice || { cancel_selection; return 1; }
+    case $choice in
+      1) if apply_domain_template_menu "$inbound"; then :; fi; pause;;
+      2)
+        select_inbound_template "$inbound" name || { pause; continue; }
+        confirm "从入站 ${inbound} 移除模板 ${name}？" N || continue
+        run_menu_action remove_domain_template "$inbound" "$name"
+        pause
+        ;;
+      3)
+        select_inbound_template "$inbound" name || { pause; continue; }
+        select_outbound outbound 1 1 local_ip || continue
+        run_menu_action update_domain_template_outbound "$inbound" "$name" "$outbound" "$local_ip"
+        pause
+        ;;
+      0) return;; *) warn '无效选项。'; pause;;
+    esac
+  done
+}
+
+apply_domain_template_menu() {
+  local inbound=$1 name outbound local_ip=""
+  select_domain_template name || return 1
+  select_outbound outbound 1 1 local_ip || return 1
+  run_menu_action apply_domain_template "$inbound" "$name" "$outbound" "$local_ip"
 }

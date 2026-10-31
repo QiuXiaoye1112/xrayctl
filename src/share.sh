@@ -92,14 +92,14 @@ print_subscription() {
   ensure_config; init_meta
   local tag=${1-} links="" current_tag current_links
   if [[ -n $tag ]]; then
-    links=$(print_links "$tag" "" | awk '/^链接: vless:\/\// {sub(/^链接: /, ""); print}')
+    links=$(print_links "$tag" "" | awk '/^链接: (vless|socks5|http):\/\// {sub(/^链接: /, ""); print}')
   else
     while IFS= read -r current_tag; do
-      current_links=$(print_links "$current_tag" "" | awk '/^链接: vless:\/\// {sub(/^链接: /, ""); print}')
+      current_links=$(print_links "$current_tag" "" | awk '/^链接: (vless|socks5|http):\/\// {sub(/^链接: /, ""); print}')
       [[ -n $current_links ]] || continue
       [[ -z $links ]] || links+=$'\n'
       links+=$current_links
-    done < <(jq -r '.inbounds[]|select(.protocol=="vless")|.tag' "$CONFIG_FILE")
+    done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|socks|http)$"))|.tag' "$CONFIG_FILE")
   fi
   [[ -n $links ]] || die "没有可生成订阅的代理分享链接。"
   printf '%s' "$links" | base64_nowrap

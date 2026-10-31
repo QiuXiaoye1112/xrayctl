@@ -131,6 +131,11 @@ assert_eq "$((applies_before + 1))" "$apply_calls" 'batched personal rules were 
 outbound_user_domain_delete in-a alice exact batch-one.example.com,batch-two.example.com >/dev/null
 assert_eq 0 "$(jq '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-domain:"))|select(.inboundTag==["in-a"] and (.domain[0]|test("batch-")))]|length' "$XRAYCTL_CONFIG_FILE")" 'batched personal rule deletion left a rule behind'
 add_domain_rule in-a suffix google.com direct >/dev/null
+dispatch outbound rule add in-b exact public-cli.example.com direct >/dev/null
+public_cli=$(dispatch outbound rule list in-b)
+[[ $public_cli == *public-cli.example.com* ]] || { printf 'not ok - public rule CLI did not list the added domain\n' >&2; exit 1; }
+dispatch outbound rule delete in-b exact public-cli.example.com >/dev/null
+assert_eq 0 "$(jq '[.routing.rules[]? | select(.inboundTag==["in-b"] and .domain==["full:public-cli.example.com"])] | length' "$CONFIG_FILE")" 'public rule CLI did not delete the selected rule'
 outbound_user_default_set socks-in socks-alice proxy-us >/dev/null
 rename_client socks-in socks-alice socks-renamed >/dev/null
 assert_eq 1 "$(jq '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-outbound:"))|select(.inboundTag==["socks-in"] and .user==["socks-renamed"])]|length' "$XRAYCTL_CONFIG_FILE")" 'SOCKS username change detached its user route'
@@ -177,6 +182,11 @@ apply_domain_template in-a shared proxy-jp >/dev/null
 template_rule=$(jq -r '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-domain:"))|select(.template=="shared" and .inboundTag==["in-a"] and .domain==["full:google.com"])|.ruleTag][0]' "$XRAYCTL_CONFIG_FILE")
 assert_eq 1 "$(jq --arg id "$alice_a" '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-domain:"))|select(.inboundTag==["in-a"] and .user==[$id] and .domain==["full:google.com"])]|length' "$XRAYCTL_CONFIG_FILE")" 'template did not overwrite personal rule'
 assert_before "$exact" "$template_rule"
+user_template_apply in-a alice shared proxy-us >/dev/null
+add_domain_template_domains shared exact combined.example.com >/dev/null
+assert_eq 1 "$(jq '[.routing.rules[] | select(.template=="shared" and .inboundTag==["in-a"] and .domain==["full:combined.example.com"] and (.user // [])==[])] | length' "$CONFIG_FILE")" 'template edit updated the inbound binding'
+assert_eq 1 "$(jq --arg id "$alice_a" '[.routing.rules[] | select(.template=="shared" and .inboundTag==["in-a"] and .domain==["full:combined.example.com"] and .user==[$id])] | length' "$CONFIG_FILE")" 'template edit updated the user binding'
+user_template_remove in-a alice shared >/dev/null
 
 quota=$(jq -n --arg id "$alice_a" '{type:"field",ruleTag:("xrayctl-user-limit:"+$id),inboundTag:["in-a"],user:[$id],outboundTag:"blocked"}')
 tmp=$(temp_file)
@@ -188,7 +198,7 @@ assert_eq "xrayctl-user-limit:$alice_a" "$(jq -r '.routing.rules[0].ruleTag' "$X
 rename_client in-a alice alice-renamed >/dev/null
 assert_eq "$alice_a" "$(jq --arg tag "$user_default" -r '.routing.rules[]|select(.ruleTag==$tag)|.user[0]' "$XRAYCTL_CONFIG_FILE")" 'VLESS rename preserved Xray email identity'
 prompt_validated_value() { printf -v "$1" '%s' aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa; }
-rotate_client_credential in-a alice-renamed >/dev/null
+rotate_client_credential in-a alice-renamed 1 >/dev/null
 assert_eq "$alice_a" "$(jq --arg tag "$user_default" -r '.routing.rules[]|select(.ruleTag==$tag)|.user[0]' "$XRAYCTL_CONFIG_FILE")" 'UUID rotation preserved route identity'
 
 rename_inbound in-a renamed-a >/dev/null
@@ -206,7 +216,7 @@ assert_eq 1 "$(jq '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl
 
 outbound_user_default_unset renamed-a alice-renamed >/dev/null
 assert_eq 4 "$(jq --arg id "$alice_a" '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-domain:"))|select(.inboundTag==["renamed-a"] and .user==[$id])]|length' "$XRAYCTL_CONFIG_FILE")" 'cancel default retained personal domain rules'
-outbound_user_restore renamed-a alice-renamed >/dev/null
+outbound_user_restore renamed-a alice-renamed 1 >/dev/null
 assert_eq 0 "$(jq --arg id "$alice_a" '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-domain:"))|select(.inboundTag==["renamed-a"] and .user==[$id])]|length' "$XRAYCTL_CONFIG_FILE")" 'restore removed personal rules'
 delete_inbound socks-in 1 >/dev/null
 assert_eq 0 "$(jq '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-outbound:"))|select(.inboundTag==["socks-in"])]|length' "$XRAYCTL_CONFIG_FILE")" 'inbound deletion removed associated user route'
@@ -257,5 +267,8 @@ assert_eq blocked "$selected" 'user-domain selector selected blocked'
 if ! selector_has direct || ! selector_has blocked || ! selector_has proxy-us || ! selector_has proxy-jp; then
   printf 'not ok - user-domain selector changed the existing outbound choices\n' >&2; exit 1;
 fi
+selector_pick='继承入站默认出站'
+select_outbound selected 1 0 "" 0 1 || { printf 'not ok - user selector omitted inheritance\n' >&2; exit 1; }
+assert_eq '@inherit' "$selected" 'user selector chose inheritance'
 
 printf 'ok - per-inbound user outbound scope, priority, inheritance, blocked rules, identity lifecycle, rollback, and safe refusal pass\n'

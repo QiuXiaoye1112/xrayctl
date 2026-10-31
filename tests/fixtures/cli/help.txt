@@ -5,9 +5,10 @@ xrayctl - Xray Linux 管理脚本
   xrayctl install [版本]              安装/修复 Xray
   xrayctl status                  查看状态
   xrayctl start|stop|restart      服务控制
-  xrayctl logs [行数]             查看服务日志
+  xrayctl logs [行数]             查看服务日志和 Xray 错误日志
   xrayctl traffic [开始日期] [结束日期] 查看当前周期内按入站累计流量
   xrayctl traffic period [show|set <日期> <HH:MM>] 查看/设置统一月度统计起点
+  xrayctl traffic reset [标签|--all] [--yes]
   xrayctl traffic user enable
   xrayctl traffic user show
   xrayctl traffic user set <入站> <用户> <GB> <重置日> [HH:MM]
@@ -19,8 +20,6 @@ xrayctl - Xray Linux 管理脚本
   xrayctl inbound rename <旧标签> <新标签>
   xrayctl inbound modify <标签>   修改监听端口/地址
   xrayctl inbound transport <标签> 修改传输与安全方式
-  xrayctl inbound disable <标签> [--yes] 禁用入站
-  xrayctl inbound enable <标签> [--yes] 启用入站
   xrayctl inbound delete <标签> [--yes]
   xrayctl outbound list
   xrayctl outbound add
@@ -32,7 +31,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl outbound user rule list <入站> <用户>
   xrayctl outbound user rule add <入站> <用户> <suffix|exact> <域名[,域名...]> <出站>
   xrayctl outbound user rule delete <入站> <用户> <suffix|exact> <域名[,域名...]>
-  xrayctl outbound user restore <入站> <用户>
+  xrayctl outbound user restore <入站> <用户> [--yes]
   xrayctl outbound delete <出站标签>
   xrayctl outbound rule list [入站]
   xrayctl outbound rule add <入站> <suffix|exact> <域名[,域名...]> <出站>
@@ -40,13 +39,13 @@ xrayctl - Xray Linux 管理脚本
   xrayctl client list [标签]
   xrayctl client add [标签]
   xrayctl client rename [标签] [旧名称] [新名称]
-  xrayctl client rotate [标签] [用户]
+  xrayctl client rotate [标签] [用户] [--yes]
   xrayctl client delete [标签] [用户] [--yes]
   xrayctl link [标签] [用户]      输出分享链接
   xrayctl subscription [标签]     输出 Base64 订阅内容
   xrayctl config check|show|edit
   xrayctl backup [文件.tar.gz]
-  xrayctl restore [文件.tar.gz]
+  xrayctl restore [文件.tar.gz] [--yes]
   xrayctl cert list                 列出托管证书
   xrayctl cert issue [域名] [邮箱]   Let's Encrypt 自动签发
   xrayctl cert import [标识] [证书] [私钥]  导入已有证书
