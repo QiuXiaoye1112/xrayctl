@@ -7970,14 +7970,23 @@ inbound_user_outbound_menu() {
 }
 
 inbound_outbound_detail_menu() {
-  local inbound=$1 choice label identity default display_default count inbound_default first_user
+  local inbound=$1 choice label identity default display_default count inbound_default first_user inbound_rule_count inbound_templates
   local -a labels=()
   while inbound_exists "$inbound"; do
     clear_screen
     heading "出站管理 · ${inbound}"
     mapfile -t labels < <(_outbound_user_labels "$inbound")
     inbound_default=$(_outbound_inbound_default "$inbound")
-    printf '默认出站：%s\n\n用户：\n' "$(_outbound_display_name "$inbound_default")"
+    inbound_rule_count=$(jq -r --arg inbound "$inbound" '
+      [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-domain:")) and .inboundTag==[$inbound])] | length
+    ' "$CONFIG_FILE") || return 1
+    ensure_meta
+    inbound_templates=$(jq -r --arg inbound "$inbound" '
+      [.domainTemplates.bindings[]? | select(.inbound==$inbound) | .template] |
+      if length==0 then "无" else join(", ") end
+    ' "$META_FILE") || return 1
+    printf '默认出站：%s\n分流规则：%s 条\n模板：%s\n\n用户：\n' \
+      "$(_outbound_display_name "$inbound_default")" "$inbound_rule_count" "$inbound_templates"
     if ((${#labels[@]})); then
       first_user=1
       for label in "${labels[@]}"; do

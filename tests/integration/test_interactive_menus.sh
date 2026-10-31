@@ -112,6 +112,37 @@ set_inputs 0
 menu_output=$(inbound_outbound_menu)
 [[ $menu_output == *'默认出站：direct'* ]] || fail 'outbound menu did not show the default outbound'
 [[ $menu_output != *'入站默认出站：'* ]] || fail 'outbound menu retained the old default label'
+inbound_summary=${menu_output%%用户：*}
+[[ $inbound_summary == *'分流规则：0 条'* && $inbound_summary == *'模板：无'* ]] || fail 'empty inbound routing summary was missing'
+check_inbound_routing_summary() {
+  local CONFIG_FILE="$TEST_ROOT/summary-config.json" META_FILE="$TEST_ROOT/summary-meta.json"
+  local menu_output inbound_summary
+  cp "$XRAYCTL_CONFIG_FILE" "$CONFIG_FILE"
+  ensure_meta
+  jq '.routing.rules=[
+    {ruleTag:"xrayctl-domain:direct",inboundTag:["node"],domain:["domain:public.test"]},
+    {ruleTag:"xrayctl-domain:template",inboundTag:["node"],domain:["domain:template.test"],template:"public-openai"},
+    {ruleTag:"xrayctl-domain:other",inboundTag:["other"],domain:["domain:other.test"]},
+    {ruleTag:"xrayctl-user-domain:alice",inboundTag:["node"],user:["alice"],domain:["domain:personal.test"]},
+    {ruleTag:"xrayctl-user-outbound:alice",inboundTag:["node"],user:["alice"],outboundTag:"direct"},
+    {ruleTag:"xrayctl-outbound:node",inboundTag:["node"],outboundTag:"direct"}
+  ]' "$CONFIG_FILE" >"$TEST_ROOT/summary.tmp"
+  mv "$TEST_ROOT/summary.tmp" "$CONFIG_FILE"
+  jq '.domainTemplates.bindings=[
+    {inbound:"node",template:"public-openai",outbound:"direct"},
+    {inbound:"node",template:"public-other",outbound:"direct"},
+    {inbound:"other",template:"other-only",outbound:"direct"}
+  ] | .domainTemplates.userBindings=[{inbound:"node",user:"alice",template:"user-only",outbound:"direct"}]' \
+    "$META_FILE" >"$TEST_ROOT/summary-meta.tmp"
+  mv "$TEST_ROOT/summary-meta.tmp" "$META_FILE"
+  set_inputs 0
+  menu_output=$(inbound_outbound_detail_menu node)
+  inbound_summary=${menu_output%%用户：*}
+  [[ $inbound_summary == *'分流规则：2 条'* && $inbound_summary == *'模板：public-openai, public-other'* ]] || fail 'inbound routing summary included the wrong scope'
+  [[ $inbound_summary != *'user-only'* && $inbound_summary != *'other-only'* ]] || fail 'inbound summary included another scope template'
+  [[ $menu_output == *'分流规则：1 条'* && $menu_output == *'模板：user-only'* ]] || fail 'user routing summary was changed'
+}
+check_inbound_routing_summary
 : >"$EVENT_LOG"; set_inputs 1 0; inbound_outbound_menu >/dev/null
 assert_recorded 'assign_outbound node '
 : >"$EVENT_LOG"; set_inputs 3 1 0 0; inbound_outbound_menu >/dev/null
