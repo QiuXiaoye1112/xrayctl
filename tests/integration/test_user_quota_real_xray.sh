@@ -3,8 +3,8 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 bin=${XRAYCTL_REAL_XRAY_BIN:-}
 if [[ -z $bin ]]; then printf 'ok - real user quota test skipped (set XRAYCTL_REAL_XRAY_BIN)\n'; exit 0; fi
-for cmd in jq curl nc; do command -v "$cmd" >/dev/null || { printf 'not ok - missing %s\n' "$cmd" >&2; exit 1; }; done
-source "$root/tests/helpers/netcat.sh"
+for cmd in jq curl python3; do command -v "$cmd" >/dev/null || { printf 'not ok - missing %s\n' "$cmd" >&2; exit 1; }; done
+source "$root/tests/helpers/http.sh"
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-user-quota.XXXXXX")
 server_pid='' client_pid='' listener_pid=''
 cleanup_test() {
@@ -26,7 +26,7 @@ mkdir -p "$XRAYCTL_CONFIG_DIR"
 source "$root/xrayctl.sh"
 trap - ERR
 trap cleanup_test EXIT
-base=$((30000 + RANDOM % 20000)); api=$base; inbound=$((base+1)); alice=$((base+2)); bob=$((base+3)); target=$((base+4)); other_in=$((base+6)); other_socks=$((base+7))
+base=$((30000 + RANDOM % 20000)); api=$base; inbound=$((base+1)); alice=$((base+2)); bob=$((base+3)); other_in=$((base+6)); other_socks=$((base+7))
 jq --argjson port "$inbound" 'del(.api,.stats,.policy) | .inbounds[0].port=$port | .routing.rules=[]' "$root/tests/fixtures/user-traffic/server.json" >"$TEST_ROOT/input.json"
 if [[ ${XRAYCTL_TEST_DUPLICATE:-0} == 1 ]]; then
   jq --argjson port "$other_in" '.inbounds += [{tag:"b",listen:"127.0.0.1",port:$port,protocol:"vless",settings:{decryption:"none",clients:[{email:"alice",id:"123e4567-e89b-12d3-a456-426614174002"}]}}]' "$TEST_ROOT/input.json" >"$TEST_ROOT/duplicate.json"
@@ -98,34 +98,32 @@ else
 fi
 confirm() { return 0; }
 XRAYCTL_MANAGEMENT_LOCK_HELD=1
-respond() { printf 'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello' | test_nc_listen_loopback "$target" >/dev/null & listener_pid=$!; sleep .2; }
+test_http_server_start "$TEST_ROOT/http-port"
+listener_pid=$TEST_HTTP_SERVER_PID
+target=$TEST_HTTP_SERVER_PORT
 fetch() { curl -fsS --noproxy '' --max-time "${XRAYCTL_TEST_CURL_TIMEOUT:-20}" --socks5-hostname "127.0.0.1:$1" "http://127.0.0.1:$target/"; }
 fetch_blocked() { XRAYCTL_TEST_CURL_TIMEOUT=4 fetch "$1"; }
 traffic_user_limit_set a alice 0.00000001 1 00:00
-respond
 if [[ $(fetch "$alice") != hello ]]; then printf 'not ok - Alice could not connect before exhaustion\n' >&2; exit 1; fi
-wait "$listener_pid" || true; listener_pid=''
+
 traffic_collect
 id_a=$(traffic_user_id a alice)
 jq -e --arg id "$id_a" '.inbounds.a.users[$id] as $user | $user.limit.usedBytes > $user.limit.quotaBytes and $user.limit.usedBytes==2*($user.uplinkBytes+$user.downlinkBytes)' "$TRAFFIC_FILE" >/dev/null
 jq -e --arg id "$id_a" '.routing.rules[0].user==[$id] and .routing.rules[0].inboundTag==["a"]' "$CONFIG_FILE" >/dev/null
-respond
 if fetch_blocked "$alice" >/dev/null 2>&1; then printf 'not ok - exhausted user was not blocked\n' >&2; exit 1; fi
 if [[ $(fetch "$bob") != hello ]]; then printf 'not ok - Bob could not connect while Alice was blocked\n' >&2; exit 1; fi
-wait "$listener_pid" || true; listener_pid=''
+
 if [[ ${XRAYCTL_TEST_DUPLICATE:-0} == 1 ]]; then
   id_other=$(traffic_user_id b alice)
   [[ $id_other != "$id_a" ]]
-  respond
   if [[ $(fetch "$other_socks") != hello ]]; then printf 'not ok - same-named user in another inbound was blocked\n' >&2; exit 1; fi
-  wait "$listener_pid" || true; listener_pid=''
+
   traffic_user_collect_serialized
   jq -e --arg first "$id_a" --arg second "$id_other" '.inbounds.a.users[$first].limit.usedBytes>0 and .inbounds.b.users[$second].uplinkBytes>0 and .inbounds.b.users[$second].downlinkBytes>0' "$TRAFFIC_FILE" >/dev/null
 fi
 traffic_user_reset a alice
-respond
 if [[ $(fetch "$alice") != hello ]]; then printf 'not ok - Alice could not connect after reset\n' >&2; exit 1; fi
-wait "$listener_pid" || true; listener_pid=''
+
 jq -e '[.routing.rules[] | select((.ruleTag // "")|startswith("xrayctl-user-limit:"))] | length==0' "$CONFIG_FILE" >/dev/null
 # The previous successful request must be charged without duplicating earlier
 # samples. If the API disappears while the user is blocked, inbound
@@ -154,15 +152,13 @@ jq -e '[.routing.rules[] | select((.ruleTag // "")|startswith("xrayctl-user-limi
 traffic_user_limit_set a alice 0.00000001 1 00:00
 traffic_user_limit_set a bob 0.00000001 15 12:00
 id_b=$(traffic_user_id a bob)
-respond
 if [[ $(fetch "$alice") != hello ]]; then printf 'not ok - Alice could not use her new quota\n' >&2; exit 1; fi
-wait "$listener_pid" || true; listener_pid=''
+
 traffic_collect
 jq -e --arg a "$id_a" --arg b "$id_b" '[.routing.rules[] | select(.ruleTag==("xrayctl-user-limit:"+$a))] | length==1' "$CONFIG_FILE" >/dev/null
 jq -e --arg b "$id_b" '[.routing.rules[] | select(.ruleTag==("xrayctl-user-limit:"+$b))] | length==0' "$CONFIG_FILE" >/dev/null
-respond
 if [[ $(fetch "$bob") != hello ]]; then printf 'not ok - Bob was blocked by Alice quota\n' >&2; exit 1; fi
-wait "$listener_pid" || true; listener_pid=''
+
 traffic_collect
 jq -e --arg a "$id_a" --arg b "$id_b" '[.routing.rules[] | select(.ruleTag==("xrayctl-user-limit:"+$a) or .ruleTag==("xrayctl-user-limit:"+$b))] | length==2' "$CONFIG_FILE" >/dev/null
 traffic_user_reset a alice 1

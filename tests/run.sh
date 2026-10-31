@@ -13,6 +13,7 @@ tests=(
   "tests/unit/test_validators.sh"
   "tests/unit/test_notices.sh"
   "tests/unit/test_platform.sh"
+  "tests/unit/test_http_server.sh"
   "tests/unit/test_protocol_builders.sh"
   "tests/unit/test_interactive_builders.sh"
   "tests/unit/test_input_cancellation.sh"

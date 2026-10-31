@@ -78,7 +78,7 @@ jobs:
       - name: Run unified suite on Alpine
         run: |
           docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -ec '
-            apk add --no-cache bash curl jq openssl coreutils netcat-openbsd openrc python3 ripgrep unzip >/dev/null
+            apk add --no-cache bash curl jq openssl coreutils openrc python3 ripgrep unzip >/dev/null
             export TERM=xterm XRAYCTL_TESTING=1
             mkdir -p /run/openrc
             touch /run/openrc/softlevel
