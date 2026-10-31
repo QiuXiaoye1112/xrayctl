@@ -674,7 +674,7 @@ restore_backup() {
   fi
   # Reject links/devices before extraction: a post-extraction symlink scan is
   # too late to protect against hard links and special archive members.
-  if ! tar -tvzf "$archive" | awk 'substr($0,1,1)!~/^[-d]$/ || / link to / {bad=1} END{exit bad}'; then
+  if ! tar -tvzf "$archive" | awk 'substr($0,1,1)!~/^[-d]$/ || / link to / || / -> / {bad=1} END{exit bad}'; then
     die "备份只允许普通文件和目录，不能包含链接或设备。"
   fi
   extract_config="${CONFIG_FILE#/}"
