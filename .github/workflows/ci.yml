@@ -78,7 +78,7 @@ jobs:
       - name: Run unified suite on Alpine
         run: |
           docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -ec '
-            apk add --no-cache bash curl jq openssl coreutils openrc python3 ripgrep unzip >/dev/null
+            apk add --no-cache bash curl jq openssl coreutils netcat-openbsd openrc python3 ripgrep unzip >/dev/null
             export TERM=xterm XRAYCTL_TESTING=1
             mkdir -p /run/openrc
             touch /run/openrc/softlevel
@@ -96,6 +96,8 @@ jobs:
             mkdir -p "$xray_dir"
             unzip -q "$archive" -d "$xray_dir"
             chmod 755 "$xray_dir/xray"
+            export XRAYCTL_REAL_XRAY_BIN="$xray_dir/xray"
+            "$XRAYCTL_REAL_XRAY_BIN" version
             recorded_commit=$(sed -n "s/^readonly XRAYCTL_BUILD_COMMIT=\"\\([^\"]*\\)\"/\\1/p" dist/xrayctl | head -1)
             XRAYCTL_BUILD_COMMIT="$recorded_commit" bash scripts/build.sh
             sh -n alpine/install.sh
