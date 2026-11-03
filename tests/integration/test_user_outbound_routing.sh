@@ -261,14 +261,14 @@ done
 if selector_has blocked; then
   printf 'not ok - ordinary outbound selector exposed blocked\n' >&2; exit 1
 fi
+if selector_has '继承入站默认出站'; then
+  printf 'not ok - outbound selector exposed inheritance\n' >&2; exit 1
+fi
 selector_pick=blocked
 select_outbound selected 1 0 "" 1 || { printf 'not ok - user-domain selector did not offer blocked\n' >&2; exit 1; }
 assert_eq blocked "$selected" 'user-domain selector selected blocked'
 if ! selector_has direct || ! selector_has blocked || ! selector_has proxy-us || ! selector_has proxy-jp; then
   printf 'not ok - user-domain selector changed the existing outbound choices\n' >&2; exit 1;
 fi
-selector_pick='继承入站默认出站'
-select_outbound selected 1 0 "" 0 1 || { printf 'not ok - user selector omitted inheritance\n' >&2; exit 1; }
-assert_eq '@inherit' "$selected" 'user selector chose inheritance'
 
 printf 'ok - per-inbound user outbound scope, priority, inheritance, blocked rules, identity lifecycle, rollback, and safe refusal pass\n'

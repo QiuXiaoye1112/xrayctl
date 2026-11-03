@@ -395,10 +395,9 @@ add_outbound() {
 }
 
 select_outbound() {
-  local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} __ipvar=${4-} include_blocked=${5:-0} include_inherit=${6:-0} candidate_tag answer local_tag
+  local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} __ipvar=${4-} include_blocked=${5:-0} candidate_tag answer local_tag
   local label ip iface t i
   local tags=() local_ips=() local_ip_tags=() local_raw_ips=() proxy_tags=()
-  ((include_inherit == 0)) || tags+=("@inherit")
   ((include_direct == 0)) || tags+=("direct")
   ((include_blocked == 0)) || tags+=("blocked")
   while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || proxy_tags+=("$candidate_tag"); done < <(
@@ -423,9 +422,7 @@ select_outbound() {
   # 只显示 direct、代理标签和本机 IP，不显示协议/地址括号说明。
   local display_labels=()
   for t in "${tags[@]}"; do
-    if [[ $t == '@inherit' ]]; then
-      display_labels+=("继承入站默认出站")
-    elif [[ $t == direct ]]; then
+    if [[ $t == direct ]]; then
       display_labels+=("direct")
     elif [[ $t =~ ^local- ]]; then
       # 找到对应的原始 IP 标签
@@ -686,7 +683,7 @@ outbound_user_default_set() {
   inbound_require_supported_configuration "$inbound"
   client_label_exists "$inbound" "$label" || die "找不到入站 ${inbound} 的用户 ${label}。"
   _outbound_user_identity identity "$inbound" "$label" || return 1
-  [[ -n $outbound ]] || select_outbound outbound 1 1 local_ip 0 1 || return 1
+  [[ -n $outbound ]] || select_outbound outbound 1 1 local_ip || return 1
   if [[ $outbound == '@inherit' ]]; then
     outbound_user_default_unset "$inbound" "$label"
     return $?
