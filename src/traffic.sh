@@ -669,9 +669,10 @@ traffic_users_show() {
     if [[ $tag != "$current_tag" ]]; then
       printf '\n%s\n' "$tag"
       print_table_cell '用户名称' 20; printf ' | '
-      print_table_cell '已用流量 / 月度额度' 30; printf ' | '
+      print_table_cell_right '已用流量' 12; printf ' / '
+      print_table_cell '月度额度' 12; printf ' | '
       print_table_cell '状态' 6; printf '\n'
-      printf '%s\n' '---------------------------------------------------------------'
+      printf '%s\n' '-----------------------------------------------------------'
       current_tag=$tag
     fi
     if [[ -z $id || $id == '-' ]]; then
@@ -691,7 +692,8 @@ traffic_users_show() {
     elif [[ $user_state == '已配置' ]]; then used=$(traffic_format_bytes "$current_bytes")
     else used='未统计'; fi
     print_table_cell_clipped "$label" 20; printf ' | '
-    print_table_cell_clipped "$used / $quota" 30; printf ' | '
+    print_table_cell_right "$used" 12; printf ' / '
+    print_table_cell "$quota" 12; printf ' | '
     print_table_cell "$status" 6; printf '\n'
   done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --argjson inventory "$inventory" --arg periodStart "$period_start" --arg filter "$filter" '
     $state[0] as $s | .inbounds[]? | select($filter=="" or .tag==$filter) | .tag as $tag | .protocol as $protocol |

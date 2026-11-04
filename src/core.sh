@@ -254,6 +254,14 @@ print_table_cell() {
   printf '%s%*s' "$value" "$padding" ''
 }
 
+print_table_cell_right() {
+  local value=$1 target_width=$2 width padding
+  display_width width "$value"
+  padding=$((target_width-width))
+  ((padding > 0)) || padding=0
+  printf '%*s%s' "$padding" '' "$value"
+}
+
 print_table_cell_clipped() {
   local value=$1 target_width=$2 width limit clipped="" used=0 char char_width i
   display_width width "$value"
