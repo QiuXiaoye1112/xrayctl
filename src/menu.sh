@@ -31,10 +31,6 @@ _outbound_user_labels() {
   ' "$CONFIG_FILE"
 }
 
-_outbound_inbound_default() {
-  jq -r --arg inbound "$1" '[.routing.rules[]? | select(.ruleTag==("xrayctl-outbound:"+$inbound)) | .outboundTag][0] // .outbounds[0].tag // "未设置"' "$CONFIG_FILE"
-}
-
 _outbound_user_default() {
   local inbound=$1 identity=$2
   jq -r --arg inbound "$inbound" --arg identity "$identity" '
@@ -196,8 +192,11 @@ user_outbound_detail_menu() {
     clear_screen
     _outbound_user_identity identity "$inbound" "$label" || return 1
     default=$(_outbound_user_default "$inbound" "$identity")
-    [[ -n $default ]] || default=$(_outbound_inbound_default "$inbound")
-    display_default=$(_outbound_display_name "$default")
+    if [[ -n $default ]]; then
+      display_default=$(_outbound_display_name "$default")
+    else
+      display_default="跟随入站（$(_outbound_display_name "$(_outbound_inbound_default "$inbound")")）"
+    fi
     heading "用户出站管理 · ${label}"
     printf '默认出站：%s\n模板：\n' "$display_default"
     template_bindings_display "$inbound" "$identity"
@@ -250,8 +249,11 @@ inbound_outbound_detail_menu() {
         if _outbound_user_identity identity "$inbound" "$label" 2>/dev/null; then
           default=$(_outbound_user_default "$inbound" "$identity")
           count=$(_outbound_user_domain_count "$inbound" "$identity")
-          [[ -n $default ]] || default=$inbound_default
-          display_default=$(_outbound_display_name "$default")
+          if [[ -n $default ]]; then
+            display_default=$(_outbound_display_name "$default")
+          else
+            display_default="跟随入站（$(_outbound_display_name "$inbound_default")）"
+          fi
           printf '  %s\n  默认出站：%s\n  分流规则：%s 条\n  模板：\n' \
             "$label" "$display_default" "$count"
           template_bindings_display "$inbound" "$identity" '    '

@@ -112,6 +112,10 @@ set_inputs 0
 menu_output=$(inbound_outbound_menu)
 [[ $menu_output == *'默认出站：direct'* ]] || fail 'outbound menu did not show the default outbound'
 [[ $menu_output != *'入站默认出站：'* ]] || fail 'outbound menu retained the old default label'
+[[ $menu_output == *'  默认出站：跟随入站（direct）'* ]] || fail 'user overview did not distinguish inheritance'
+set_inputs 0
+user_output=$(user_outbound_detail_menu node alice)
+[[ $user_output == *'默认出站：跟随入站（direct）'* ]] || fail 'user detail did not distinguish inheritance'
 inbound_summary=${menu_output%%用户：*}
 [[ $inbound_summary == *'分流规则：0 条'* && $inbound_summary == *$'模板：\n  无'* ]] || fail 'empty inbound routing summary was missing'
 check_inbound_routing_summary() {
@@ -140,6 +144,10 @@ check_inbound_routing_summary() {
   inbound_summary=${menu_output%%用户：*}
   [[ $inbound_summary == *'分流规则：2 条'* && $inbound_summary == *$'模板：\n  public-openai → direct\n  public-other → direct'* ]] || fail 'inbound routing summary included the wrong scope'
   [[ $inbound_summary != *'user-only'* && $inbound_summary != *'other-only'* ]] || fail 'inbound summary included another scope template'
+  [[ $menu_output == *'  默认出站：direct'* && $menu_output != *'跟随入站'* ]] || fail 'explicit user default was displayed as inherited'
+  set_inputs 0
+  user_output=$(user_outbound_detail_menu node alice)
+  [[ $user_output == *'默认出站：direct'* && $user_output != *'跟随入站'* ]] || fail 'explicit user detail was displayed as inherited'
   [[ $menu_output == *'分流规则：1 条'* && $menu_output == *$'  模板：\n    user-only → direct'* ]] || fail 'user routing summary was changed'
 }
 check_inbound_routing_summary

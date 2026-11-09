@@ -271,4 +271,36 @@ if ! selector_has direct || ! selector_has blocked || ! selector_has proxy-us ||
   printf 'not ok - user-domain selector changed the existing outbound choices\n' >&2; exit 1;
 fi
 
+# The user-default picker must offer dynamic inheritance without creating a route.
+assign_outbound renamed-a proxy-jp >/dev/null
+selector_pick='跟随入站（proxy-jp）'
+select_outbound selected 1 0 "" 0 renamed-a
+assert_eq '@inherit' "$selected" 'user-default selector returned inheritance sentinel'
+selector_has direct && selector_has proxy-us || { printf 'not ok - inheritance replaced existing choices\n' >&2; exit 1; }
+assert_eq 1 "$(jq --arg id "$bob_a" '[.routing.rules[] | select(.inboundTag==["renamed-a"] and .user==[$id] and ((.ruleTag // "")|startswith("xrayctl-user-outbound:")))] | length' "$CONFIG_FILE")" 'bob starts with an independent default'
+rules_before=$(jq -S --arg id "$bob_a" '[.routing.rules[] | select((.inboundTag==["renamed-a"] and .user==[$id] and ((.ruleTag // "")|startswith("xrayctl-user-outbound:"))) | not)]' "$CONFIG_FILE")
+meta_before=$(cat "$META_FILE")
+outbound_user_default_set renamed-a bob >/dev/null
+assert_eq "$rules_before" "$(jq -S '.routing.rules' "$CONFIG_FILE")" 'inheritance only removed the selected user default and preserved domain rules'
+assert_eq "$meta_before" "$(cat "$META_FILE")" 'inheritance preserved template metadata'
+assert_eq '' "$(_outbound_user_default renamed-a "$bob_a")" 'inherited user has no independent default'
+assign_outbound renamed-a proxy-us >/dev/null
+selector_pick='跟随入站（proxy-us）'
+select_outbound selected 1 0 "" 0 renamed-a
+assert_eq '@inherit' "$selected" 'inheritance label follows inbound default changes'
+remove_inbound_default_outbound renamed-a >/dev/null
+selector_pick='跟随入站（direct）'
+select_outbound selected 1 0 "" 0 renamed-a
+assert_eq '@inherit' "$selected" 'inheritance falls back to the native first outbound'
+_stage_local_outbound "$CONFIG_FILE" 192.0.2.10
+assign_outbound renamed-a "$(_freedom_tag_for_ip 192.0.2.10)" >/dev/null
+selector_pick='跟随入站（192.0.2.10）'
+select_outbound selected 1 0 "" 0 renamed-a
+assert_eq '@inherit' "$selected" 'local inherited outbound displays its IP'
+selector_pick=direct
+select_outbound selected 1 0 ""
+if selector_has '跟随入站（direct）' || selector_has '跟随入站（192.0.2.10）'; then
+  printf 'not ok - inheritance leaked into ordinary outbound selection\n' >&2; exit 1
+fi
+
 printf 'ok - per-inbound user outbound scope, priority, inheritance, blocked rules, identity lifecycle, rollback, and safe refusal pass\n'
