@@ -276,7 +276,9 @@ assign_outbound renamed-a proxy-jp >/dev/null
 selector_pick='跟随入站（proxy-jp）'
 select_outbound selected 1 0 "" 0 renamed-a
 assert_eq '@inherit' "$selected" 'user-default selector returned inheritance sentinel'
-selector_has direct && selector_has proxy-us || { printf 'not ok - inheritance replaced existing choices\n' >&2; exit 1; }
+if ! selector_has direct || ! selector_has proxy-us; then
+  printf 'not ok - inheritance replaced existing choices\n' >&2; exit 1
+fi
 assert_eq 1 "$(jq --arg id "$bob_a" '[.routing.rules[] | select(.inboundTag==["renamed-a"] and .user==[$id] and ((.ruleTag // "")|startswith("xrayctl-user-outbound:")))] | length' "$CONFIG_FILE")" 'bob starts with an independent default'
 rules_before=$(jq -S --arg id "$bob_a" '[.routing.rules[] | select((.inboundTag==["renamed-a"] and .user==[$id] and ((.ruleTag // "")|startswith("xrayctl-user-outbound:"))) | not)]' "$CONFIG_FILE")
 meta_before=$(cat "$META_FILE")
