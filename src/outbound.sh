@@ -394,10 +394,16 @@ add_outbound() {
   info "出站 ${tag} 已添加。"
 }
 
+_outbound_inbound_default() {
+  jq -r --arg inbound "$1" '[.routing.rules[]? | select(.ruleTag==("xrayctl-outbound:"+$inbound)) | .outboundTag][0] // .outbounds[0].tag // "未设置"' "$CONFIG_FILE"
+}
+
 select_outbound() {
   local __var=$1 include_direct=${2:-0} include_detected_local=${3:-1} __ipvar=${4-} include_blocked=${5:-0} candidate_tag answer local_tag
-  local label ip iface t i
+  # Only user-default selection supplies an inbound and offers inheritance.
+  local inherit_inbound=${6-} inherited_outbound label ip iface t i
   local tags=() local_ips=() local_ip_tags=() local_raw_ips=() proxy_tags=()
+  [[ -z $inherit_inbound ]] || tags+=("@inherit")
   ((include_direct == 0)) || tags+=("direct")
   ((include_blocked == 0)) || tags+=("blocked")
   while IFS= read -r candidate_tag; do [[ -z $candidate_tag ]] || proxy_tags+=("$candidate_tag"); done < <(
@@ -422,7 +428,10 @@ select_outbound() {
   # 只显示 direct、代理标签和本机 IP，不显示协议/地址括号说明。
   local display_labels=()
   for t in "${tags[@]}"; do
-    if [[ $t == direct ]]; then
+    if [[ $t == @inherit ]]; then
+      inherited_outbound=$(_outbound_inbound_default "$inherit_inbound")
+      display_labels+=("跟随入站（$(_outbound_display_name "$inherited_outbound")）")
+    elif [[ $t == direct ]]; then
       display_labels+=("direct")
     elif [[ $t =~ ^local- ]]; then
       # 找到对应的原始 IP 标签
@@ -683,7 +692,7 @@ outbound_user_default_set() {
   inbound_require_supported_configuration "$inbound"
   client_label_exists "$inbound" "$label" || die "找不到入站 ${inbound} 的用户 ${label}。"
   _outbound_user_identity identity "$inbound" "$label" || return 1
-  [[ -n $outbound ]] || select_outbound outbound 1 1 local_ip || return 1
+  [[ -n $outbound ]] || select_outbound outbound 1 1 local_ip 0 "$inbound" || return 1
   if [[ $outbound == '@inherit' ]]; then
     outbound_user_default_unset "$inbound" "$label"
     return $?
