@@ -44,7 +44,11 @@ platform_service_exists() {
 platform_openrc_service() {
   # OpenRC supervisors must not inherit the management flock. Closing the
   # descriptors for this command leave the caller's locks held until it exits.
-  rc-service "$@" 9>&- 8>&-
+  if [[ -n ${TRAFFIC_LOCK_FD:-} ]]; then
+    ( exec {TRAFFIC_LOCK_FD}>&-; rc-service "$@" 9>&- 8>&- )
+  else
+    rc-service "$@" 9>&- 8>&-
+  fi
 }
 
 platform_service_is_active() {

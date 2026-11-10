@@ -58,7 +58,9 @@ jobs:
             XRAYCTL_REAL_XRAY_BIN="$xray" XRAYCTL_TEST_REALITY=1 bash tests/integration/test_user_quota_real_xray.sh
           done
       - name: Verify user quota with a real systemd service
-        run: sudo env XRAYCTL_TEST_SYSTEMD=1 XRAYCTL_REAL_XRAY_BIN="$XRAYCTL_REAL_XRAY_BIN" bash tests/integration/test_systemd_user_quota.sh
+        run: |
+          sudo env XRAYCTL_TEST_SYSTEMD=1 XRAYCTL_REAL_XRAY_BIN="$XRAYCTL_REAL_XRAY_BIN" bash tests/integration/test_systemd_user_quota.sh
+          sudo env XRAYCTL_TEST_SYSTEMD=1 bash tests/integration/test_traffic_timer_systemd.sh
       - name: Verify user and inbound quotas together in isolated network namespaces
         run: |
           sudo --preserve-env=XRAYCTL_PINNED_XRAY_BIN,XRAYCTL_REAL_XRAY_BIN unshare --net bash -ec '

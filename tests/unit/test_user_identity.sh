@@ -216,7 +216,7 @@ traffic_user_reconcile_locked
   traffic_read_counters() { printf 'a\t100\n'; }
   traffic_rules_restore() { :; }
   traffic_user_reconcile() { :; }
-  traffic_collect
+  if traffic_collect; then printf "failed API sample was reported successful\n" >&2; exit 1; fi
   after=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$TRAFFIC_FILE")
   [[ $before == "$after" ]]
   jq -e '.inbounds.a.daily["2026-02-28"]==200' "$TRAFFIC_FILE" >/dev/null

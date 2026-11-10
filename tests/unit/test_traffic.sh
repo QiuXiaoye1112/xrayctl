@@ -77,15 +77,15 @@ jq -e '.accountingMultiplier==2 and .inbounds.vless.daily["2026-08-24"]==200 and
 tmp=$(temp_file); traffic_default_json >"$tmp"
 install -m 600 "$tmp" "$TRAFFIC_FILE"; rm -f "$tmp"
 
-# Collection adds one sample to the current daily bucket and resets rules only
-# after the file was committed. Backend functions are mocked at this boundary.
+# Collection commits cumulative counter deltas without replacing rules.
+# Backend functions are mocked at this boundary.
 traffic_set_enabled true
 MOCK_COUNTERS=$'vless\t1073741824\nsocks\t2048\nhttp\t4096'
 RESTORE_CALLS=0
 traffic_read_counters() { printf '%s\n' "$MOCK_COUNTERS"; }
 traffic_rules_restore() { RESTORE_CALLS=$((RESTORE_CALLS + 1)); }
 traffic_collect
-[[ $RESTORE_CALLS == 1 ]]
+[[ $RESTORE_CALLS == 0 ]]
 jq -e '
   .enabled==true and
   (has("limitsEnabled")|not) and
@@ -95,17 +95,16 @@ jq -e '
   .inbounds.http.daily["2026-08-24"]==8192
 ' "$TRAFFIC_FILE" >/dev/null
 
-# A failed rule rebuild must not commit counters that will be read again on
-# the next retry.
+# A failed counter read must not advance totals or the cumulative baseline.
 before_retry=$(jq -S . "$TRAFFIC_FILE")
-traffic_rules_restore() { return 1; }
+traffic_read_counters() { return 1; }
 traffic_collect || true
 traffic_collect || true
 [[ $before_retry == "$(jq -S . "$TRAFFIC_FILE")" ]] || {
   printf 'failed rule rebuild double-counted traffic\n' >&2
   exit 1
 }
-traffic_rules_restore() { RESTORE_CALLS=$((RESTORE_CALLS + 1)); }
+traffic_read_counters() { printf '%s\n' "$MOCK_COUNTERS"; }
 last=$(jq -r .lastCollectedAt "$TRAFFIC_FILE")
 traffic_sync_inventory
 [[ $(jq -r .lastCollectedAt "$TRAFFIC_FILE") == "$last" ]]
@@ -382,7 +381,7 @@ grep -Fq 'add rule inet xrayctl_traffic input tcp dport 24443 counter comment "x
 platform_init_system() { printf systemd; }
 systemctl() { local IFS=' '; printf '%s\n' "$*" >>"$CASE_DIR/systemctl-calls"; }
 traffic_timer_install
-grep -Fxq 'OnUnitActiveSec=1min' "$TRAFFIC_SYSTEMD_TIMER"
+grep -Fxq 'OnUnitInactiveSec=1min' "$TRAFFIC_SYSTEMD_TIMER"
 grep -Fxq 'NoNewPrivileges=true' "$TRAFFIC_SYSTEMD_SERVICE"
 grep -Fxq 'ProtectSystem=strict' "$TRAFFIC_SYSTEMD_SERVICE"
 grep -Fxq "ExecStart=$QUICK_COMMAND internal-traffic-collect" "$TRAFFIC_SYSTEMD_SERVICE"
@@ -448,6 +447,7 @@ XRAYCTL_TRAFFIC_NOW='2026-09-22 18:29:59'
 XRAYCTL_TRAFFIC_TODAY=2026-09-22
 traffic_collect
 XRAYCTL_TRAFFIC_NOW='2026-09-22 18:30:00'
+MOCK_COUNTERS=$'vless\t100'
 traffic_collect
 jq -e '.inbounds.vless.cycles["2026-08-22 18:30:00"]==null and .inbounds.vless.cycles["2026-09-22 18:30:00"]==100 and .inbounds.vless.daily["2026-09-22"]==100 and (.inbounds.vless.daily|length)==1 and .inbounds.vless.limit==null' "$TRAFFIC_FILE" >/dev/null
 [[ $(traffic_period_start '2026-02-28 23:59:59') == '2026-02-22 18:30:00' ]]
@@ -511,13 +511,13 @@ jq -e '.totals.cycles["2026-08-22 18:30:00"]==750' "$TRAFFIC_FILE" >/dev/null
 # A successful aggregate migration is never seeded again on later updates.
 traffic_sync_inventory
 [[ $(traffic_range_total 2026-08-22 2026-08-24) == 750 ]]
-# Failed rule replacement must roll the independent aggregate back too.
+# Failed counter reads must preserve the independent aggregate too.
 MOCK_COUNTERS=$'a\t50'
 before=$(jq -S . "$TRAFFIC_FILE")
-traffic_rules_restore() { return 1; }
+traffic_read_counters() { return 1; }
 if traffic_collect >/dev/null 2>&1; then exit 1; fi
 [[ $(jq -S . "$TRAFFIC_FILE") == "$before" ]]
-traffic_rules_restore() { :; }
+traffic_read_counters() { printf '%s' "$MOCK_COUNTERS"; }
 traffic_collect
 MOCK_COUNTERS=""
 traffic_clear_all_records <<<RESET >/dev/null
@@ -528,6 +528,7 @@ MOCK_COUNTERS=$'a\t50'
 traffic_collect
 XRAYCTL_TRAFFIC_NOW='2026-09-22 18:30:00'
 XRAYCTL_TRAFFIC_TODAY=2026-09-22
+MOCK_COUNTERS=$'a\t100'
 traffic_collect
 jq -e '.totals.cycles=={"2026-09-22 18:30:00":100} and .totals.daily=={"2026-09-22":100}' "$TRAFFIC_FILE" >/dev/null
 BASH_AGGREGATE

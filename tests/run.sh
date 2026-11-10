@@ -14,6 +14,7 @@ tests=(
   "tests/unit/test_interactive_builders.sh"
   "tests/unit/test_input_cancellation.sh"
   "tests/unit/test_traffic.sh"
+  "tests/unit/test_traffic_reliability.sh"
   "tests/unit/test_user_identity.sh"
   "tests/unit/test_account_user_traffic.sh"
   "tests/integration/test_state.sh"
@@ -41,6 +42,7 @@ tests=(
   "tests/integration/test_user_quota_real_xray.sh"
   "tests/integration/test_account_user_quota_real_xray.sh"
   "tests/integration/test_systemd_user_quota.sh"
+  "tests/integration/test_traffic_timer_systemd.sh"
   "tests/integration/test_openrc_user_quota.sh"
   "tests/smoke/test_cli.sh"
   "tests/smoke/test_build.sh"
@@ -50,7 +52,14 @@ tests=(
 
 for test_file in "${tests[@]}"; do
   printf '\n==> %s\n' "$test_file"
-  bash "${REPO_ROOT}/${test_file}"
+  case_root=$(mktemp -d)
+  if XRAYCTL_TRAFFIC_FILE="$case_root/traffic.json" XRAYCTL_LOCK_FILE="$case_root/lock" bash "${REPO_ROOT}/${test_file}"; then
+    rm -rf "$case_root"
+  else
+    test_rc=$?
+    rm -rf "$case_root"
+    exit "$test_rc"
+  fi
 done
 
 printf '\n==> scripts/lint.sh\n'

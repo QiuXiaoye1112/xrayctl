@@ -250,11 +250,22 @@ traffic_user_update_samples() {
   period_start=$(traffic_period_start "$now") || return 1
   inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
   active_tags=$(jq -c '[.inbounds[]? | select(.protocol=="vless" or .protocol=="socks" or .protocol=="http") | .tag]' "$CONFIG_FILE") || return 1
+  if jq -e --arg now "$now" '
+    .userLastCollectedAt as $last |
+    any(.inbounds[]?.users[]?; .limit.enabled==true and
+      (.limit.cycleEnd // "")!="" and $now>=.limit.cycleEnd and
+      $last!=null and $last<.limit.cycleEnd)
+  ' "$TRAFFIC_FILE" >/dev/null; then
+    warn "用户采集跨越额度周期边界，边界之间的增量只能按本次采集周期估算。"
+  fi
   rolled=$(traffic_user_rolled_limits_json "$now") || return 1
   tmp=$(temp_file) || return 1
   jq --argjson samples "$samples" --argjson inventory "$inventory" --argjson activeTags "$active_tags" --argjson rolled "$rolled" --arg epoch "$epoch" --arg now "$now" --arg periodStart "$period_start" '
     reduce $rolled[] as $cycle (. ;
-      .inbounds[$cycle.tag].users[$cycle.id].limit |= (.cycleStart=$cycle.start | .cycleEnd=$cycle.end | .usedBytes=$cycle.used)
+      .userLastCollectedAt as $last |
+      .inbounds[$cycle.tag].users[$cycle.id].limit |= (
+        if .cycleStart!=$cycle.start and $last!=null then .lastCycleEstimate={from:$last,to:$now} else . end |
+        .cycleStart=$cycle.start | .cycleEnd=$cycle.end | .usedBytes=$cycle.used)
     ) |
     # A manually renamed inbound can be recognized by the stable, globally
     # unique identity. Move its user state before calculating deltas.
@@ -989,7 +1000,7 @@ traffic_update_file() {
   inventory=$(traffic_inventory_json)
   tmp=$(temp_file)
   jq --arg today "$today" --arg cutoff "$cutoff" --arg periodStart "$period_start" --arg now "$now" --argjson markCollected "$mark_collected" \
-     --argjson samples "$samples" --argjson inventory "$inventory" '
+     --arg counterEpoch "${TRAFFIC_COUNTER_EPOCH:-}" --argjson rawSnapshot "${TRAFFIC_RAW_SNAPSHOT:-null}" --argjson samples "$samples" --argjson inventory "$inventory" '
     .inbounds=(.inbounds // {}) |
     reduce ($inventory|to_entries[]) as $item (.;
       .inbounds[$item.key]=((.inbounds[$item.key] // {daily:{}}) + $item.value + {deleted:false})
@@ -1028,7 +1039,8 @@ traffic_update_file() {
       .inbounds[$item.key].cycles[$periodStart]=((.inbounds[$item.key].cycles[$periodStart] // 0) + ($item.value * 2))
     ) |
     .inbounds |= with_entries(select((.value.deleted != true) or ((.value.daily|length) > 0) or ((.value.cycles|length) > 0) or ((.value.users // {})|length)>0)) |
-    if $markCollected then .lastCollectedAt=$now else . end
+    if $markCollected then .lastCollectedAt=$now else . end |
+    if $rawSnapshot != null then .kernelCounters=$rawSnapshot | .kernelCounterEpoch=$counterEpoch else . end
   ' "$TRAFFIC_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
   traffic_write_file "$tmp" || { rm -f "$tmp"; return 1; }
   rm -f "$tmp"
@@ -1045,28 +1057,63 @@ traffic_sync_inventory() {
 traffic_lock_acquire() {
   local attempt=0 owner=""
   [[ ${TRAFFIC_LOCK_HELD:-0} != 1 ]] || return 1
-  mkdir -p "$(dirname "$TRAFFIC_LOCK")"
-  while ! mkdir "$TRAFFIC_LOCK" 2>/dev/null; do
+  if command_exists flock; then
+    mkdir -p "$(dirname "$TRAFFIC_LOCK")" || return 1
+    exec {TRAFFIC_LOCK_FD}>"${TRAFFIC_LOCK}.flock" || return 1
+    while ! flock -n "$TRAFFIC_LOCK_FD"; do
+      attempt=$((attempt + 1))
+      if ((attempt >= 100)); then
+        exec {TRAFFIC_LOCK_FD}>&-
+        return 1
+      fi
+      sleep 0.05
+    done
+    TRAFFIC_LOCK_HELD=1
+    return 0
+  fi
+  mkdir -p "$(dirname "$TRAFFIC_LOCK")" || return 1
+  # Publish a fully initialized owner atomically; a killed initializer cannot
+  # leave the shared lock without a PID.
+  TRAFFIC_LOCK_OWNER=$(mktemp -d "${TRAFFIC_LOCK}.owner.XXXXXX") || return 1
+  printf '%s\n' "${BASHPID:-$$}" >"$TRAFFIC_LOCK_OWNER/pid"
+  while ! ln -sT "$TRAFFIC_LOCK_OWNER" "$TRAFFIC_LOCK" 2>/dev/null; do
     owner=$(cat "$TRAFFIC_LOCK/pid" 2>/dev/null || true)
     if [[ $owner =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
-      rm -f "$TRAFFIC_LOCK/pid" 2>/dev/null || true
-      rmdir "$TRAFFIC_LOCK" 2>/dev/null || true
+      if [[ -L $TRAFFIC_LOCK ]]; then
+        rm -f "$TRAFFIC_LOCK"
+      else
+        rm -f "$TRAFFIC_LOCK/pid"; rmdir "$TRAFFIC_LOCK" 2>/dev/null || true
+      fi
       continue
     fi
     attempt=$((attempt + 1))
-    ((attempt < 100)) || return 1
+    if ((attempt >= 100)); then
+      # Recover an empty legacy mkdir lock only after the initialization grace.
+      if [[ -z $owner && ! -L $TRAFFIC_LOCK ]] && rmdir "$TRAFFIC_LOCK" 2>/dev/null; then continue; fi
+      rm -f "$TRAFFIC_LOCK_OWNER/pid"; rmdir "$TRAFFIC_LOCK_OWNER"
+      unset TRAFFIC_LOCK_OWNER
+      return 1
+    fi
     sleep 0.05
   done
-  printf '%s\n' "${BASHPID:-$$}" >"$TRAFFIC_LOCK/pid"
   TRAFFIC_LOCK_HELD=1
+
 }
 
 traffic_lock_release() {
+  if [[ -n ${TRAFFIC_LOCK_FD:-} ]]; then
+    flock -u "$TRAFFIC_LOCK_FD" || true
+    exec {TRAFFIC_LOCK_FD}>&-
+    unset TRAFFIC_LOCK_FD
+    TRAFFIC_LOCK_HELD=0
+    return 0
+  fi
   local owner
   owner=$(cat "$TRAFFIC_LOCK/pid" 2>/dev/null || true)
-  if [[ $owner == "${BASHPID:-$$}" ]]; then
-    rm -f "$TRAFFIC_LOCK/pid" 2>/dev/null || true
-    rmdir "$TRAFFIC_LOCK" 2>/dev/null || true
+  if [[ $owner == "${BASHPID:-$$}" && -n ${TRAFFIC_LOCK_OWNER:-} ]]; then
+    rm -f "$TRAFFIC_LOCK"
+    rm -f "$TRAFFIC_LOCK_OWNER/pid"; rmdir "$TRAFFIC_LOCK_OWNER"
+    unset TRAFFIC_LOCK_OWNER
   fi
   TRAFFIC_LOCK_HELD=0
 }
@@ -1108,53 +1155,72 @@ traffic_ensure_backend() {
 }
 
 traffic_read_nft_counters() {
-  command_exists nft || return 0
+  command_exists nft || return 1
   local payload
-  payload=$(nft -j list table inet "$TRAFFIC_NFT_TABLE" 2>/dev/null) || return 0
-  jq -r '
+  payload=$(nft -j list table inet "$TRAFFIC_NFT_TABLE" 2>/dev/null) || return 1
+  jq -er --argjson detailed "${TRAFFIC_DETAILED_COUNTERS:-0}" '
+    if (.nftables|type)!="array" then error("invalid nft response") else . end |
     [.nftables[]?.rule |
       (.comment // "") as $comment |
       select(($comment | startswith("xrayctl-traffic:count:")) or ($comment | test("^xrayctl-traffic:[^:]+$"))) |
-      {tag:(if ($comment | startswith("xrayctl-traffic:count:"))
+      {tag:((if $detailed==1 then ((.chain // "") + ":") else "" end) + (if ($comment | startswith("xrayctl-traffic:count:"))
             then ($comment | sub("^xrayctl-traffic:count:";""))
-            else ($comment | sub("^xrayctl-traffic:";"")) end),
-       bytes:([.expr[]?.counter.bytes] | add // 0)}] |
+            else ($comment | sub("^xrayctl-traffic:";"")) end)),
+       bytes:([.expr[]?.counter.bytes] | add // 0)} |
+       if (.bytes|type)!="number" or .bytes<0 or (.bytes|floor)!=.bytes then error("invalid counter") else . end] |
     group_by(.tag)[] | [.[0].tag,(map(.bytes)|add)] | @tsv
   ' <<<"$payload"
 }
 
 traffic_read_iptables_counters() {
-  local command chain output
+  local command chain output found=0
   for command in iptables ip6tables; do
     command_exists "$command" || continue
     for chain in "$TRAFFIC_IPTABLES_IN_CHAIN" "$TRAFFIC_IPTABLES_OUT_CHAIN"; do
-      output=$("$command" -t filter -L "$chain" -nvx 2>/dev/null) || continue
-      awk '
+      output=$("$command" -t filter -L "$chain" -nvx 2>/dev/null) || return 1
+      found=1
+      local prefix=""
+      [[ ${TRAFFIC_DETAILED_COUNTERS:-0} != 1 ]] || prefix="${command}:${chain}:"
+      awk -v prefix="$prefix" '
         $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
           for (i=1;i<=NF;i++) {
             if ($i ~ /^xrayctl-traffic:count:[A-Za-z0-9_.-]+/) {
               tag=$i; sub(/^xrayctl-traffic:count:/,"",tag); gsub(/[^A-Za-z0-9_.-].*$/,"",tag);
-              print tag "\t" $2
+              print prefix tag "\t" $2
             } else if ($i ~ /^xrayctl-traffic:[A-Za-z0-9_.-]+$/) {
-              tag=$i; sub(/^xrayctl-traffic:/,"",tag); print tag "\t" $2
+              tag=$i; sub(/^xrayctl-traffic:/,"",tag); print prefix tag "\t" $2
             }
           }
         }
       ' <<<"$output"
     done
   done
+  ((found))
+}
+
+traffic_read_backend_counters() {
+  case "$(traffic_recorded_backend)" in
+    nft) traffic_read_nft_counters;;
+    iptables) traffic_read_iptables_counters;;
+    *) return 1;;
+  esac
 }
 
 traffic_read_counters() {
-  {
-    case $(traffic_recorded_backend) in
-      nft) traffic_read_nft_counters;;
-      iptables) traffic_read_iptables_counters;;
-    esac
-  } | awk -F '\t' '
+  local rows
+  rows=$(traffic_read_backend_counters | awk -F '\t' '
     NF==2 && $2 ~ /^[0-9]+$/ {sum[$1]+=$2}
-    END {for (tag in sum) print tag "\t" sum[tag]}
-  '
+    END {for (tag in sum) printf "%s\t%.0f\n",tag,sum[tag]}
+  ') || return 1
+  if [[ ${TRAFFIC_DETAILED_COUNTERS:-0} == 1 && -r $CONFIG_FILE ]]; then
+    jq -e --slurpfile state "$TRAFFIC_FILE" --arg rows "$rows" '
+      ($rows|split("\n")|map(split("\t")[0]|split(":")|last)) as $tags |
+      (($state[0].rulesInventory // null) as $rules |
+        if $rules!=null then all($rules|keys[]; . as $tag | any($tags[]; .==$tag))
+        else all(.inbounds[]?; .tag as $tag | any($tags[]; .==$tag)) end)
+    ' "$CONFIG_FILE" >/dev/null || return 1
+  fi
+  printf '%s\n' "$rows"
 }
 
 traffic_samples_json() {
@@ -1206,7 +1272,7 @@ traffic_clear_iptables_rules() {
 }
 
 traffic_rules_clear() {
-  case $(traffic_recorded_backend) in
+  case "$(traffic_recorded_backend)" in
     nft) traffic_clear_nft_rules;;
     iptables) traffic_clear_iptables_rules;;
   esac
@@ -1257,8 +1323,14 @@ traffic_restore_iptables_rules() {
 }
 
 traffic_rules_restore() {
-  local selected
+  local selected inventory epoch
+  epoch=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf unknown)
   selected=$(traffic_backend)
+  inventory=$(traffic_inventory_json) || return 1
+  if jq -e --arg epoch "$epoch" --argjson inventory "$inventory" ' .rulesInventory==$inventory and .rulesInventory!=null and .rulesEpoch==$epoch' "$TRAFFIC_FILE" >/dev/null 2>&1; then
+    traffic_read_counters >/dev/null
+    return $?
+  fi
   [[ $selected != none ]] || return 1
   if traffic_backend_conflicts "$selected"; then
     warn "目标防火墙后端存在同名资源，拒绝覆盖；请先检查资源归属。"
@@ -1271,7 +1343,13 @@ traffic_rules_restore() {
     nft) traffic_restore_nft_rules ;;
     iptables) traffic_restore_iptables_rules ;;
     *) return 1 ;;
-  esac
+  esac || return 1
+  local tmp
+  tmp=$(temp_file) || return 1
+  jq --arg epoch "$epoch" --argjson inventory "$inventory" '.rulesInventory=$inventory | .rulesEpoch=$epoch | .kernelCounters={}' "$TRAFFIC_FILE" >"$tmp" && traffic_write_file "$tmp"
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
 }
 
 traffic_rules_restore_serialized() {
@@ -1286,31 +1364,45 @@ traffic_collect() {
   traffic_is_enabled || return 0
   traffic_require_root internal-traffic-collect
   traffic_lock_acquire || { warn "另一个流量采集任务正在运行。"; return 1; }
-  local counters samples rc=0 snapshot=""
+  local counters samples rc=0 snapshot="" raw_samples epoch
+  epoch=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf unknown)
   snapshot=$(temp_file) || { traffic_lock_release; return 1; }
   cp -p "$TRAFFIC_FILE" "$snapshot" || { rm -f "$snapshot"; traffic_lock_release; return 1; }
-  counters=$(traffic_read_counters) || rc=1
-  if ((rc == 0)); then
-    samples=$(traffic_samples_json <<<"$counters") || rc=1
+  local previous_epoch
+  previous_epoch=$(jq -r '.kernelCounterEpoch // empty' "$TRAFFIC_FILE") || rc=1
+  if ((rc == 0)) && [[ -n $previous_epoch && $previous_epoch != "$epoch" ]]; then
+    warn "系统已重启，正在重新建立内核统计规则；重启前未采集的计数无法恢复。"
+    traffic_rules_restore || rc=1
   fi
-  if ((rc == 0)); then traffic_update_file "$samples" || rc=1; fi
-  if ((rc == 0)); then traffic_rules_restore || rc=1; fi
-  # Rule replacement clears packet counters.  If replacement fails, the
-  # counters still represent the same packets and the next retry would add
-  # them again.  Restore the pre-collection file so the retry is idempotent.
+  if ((rc == 0)); then counters=$(TRAFFIC_DETAILED_COUNTERS=1 traffic_read_counters) || rc=1; fi
+  if ((rc == 0)); then
+    raw_samples=$(traffic_samples_json <<<"$counters") || rc=1
+    if ((rc == 0)); then
+      samples=$(jq -nc --arg epoch "$epoch" --argjson raw "$raw_samples" --slurpfile state "$TRAFFIC_FILE" '$raw | with_entries(. as $entry | .value=($entry.value - (if (($state[0].kernelCounterEpoch // $epoch)==$epoch and ($state[0].kernelCounters[$entry.key] // 0) <= $entry.value) then ($state[0].kernelCounters[$entry.key] // 0) else 0 end))) | reduce to_entries[] as $entry ({}; ($entry.key|split(":")|last) as $tag | .[$tag]=((.[$tag] // 0)+$entry.value))') || rc=1
+    fi
+  fi
+  if ((rc == 0)); then TRAFFIC_RAW_SNAPSHOT="$raw_samples" TRAFFIC_COUNTER_EPOCH="$epoch" traffic_update_file "$samples" || rc=1; fi
+  # Totals and the cumulative counter baseline are committed atomically.
+  # A failed write leaves both unchanged, allowing an idempotent retry.
   if ((rc != 0)); then
     traffic_write_file "$snapshot" || true
   elif ! traffic_user_collect_locked; then
     # User API failures must never prevent the independent inbound accounting
     # and firewall quota rules from being committed.
     warn "用户流量本次未采集；入站流量采集仍已完成。"
+    rc=2
   fi
   rm -f "$snapshot"
+  local inventory
+  inventory=$(traffic_inventory_json) || rc=1
+  if ((rc == 0)) && jq -e --argjson inventory "$inventory" '.rulesInventory!=null and .rulesInventory!=$inventory' "$TRAFFIC_FILE" >/dev/null; then
+    traffic_rules_restore || rc=1
+  fi
   traffic_lock_release
   if ((rc == 0)); then
-    traffic_user_reconcile || warn "用户额度规则暂未同步，将在下次采集时重试。"
+    traffic_user_reconcile || { warn "用户额度规则暂未同步，将在下次采集时重试。"; rc=2; }
   fi
-  ((rc == 0)) || { warn "流量采集未完成，现有累计记录已尽量保留。"; return 1; }
+  ((rc == 0)) || { warn "流量采集未完成，现有累计记录已尽量保留。"; return "$rc"; }
 }
 
 traffic_rename_records() {
@@ -1354,7 +1446,7 @@ traffic_after_config_change() {
   if [[ -n $old && -n $new ]]; then
     traffic_rename_records "$old" "$new" || return 1
   fi
-  if traffic_is_enabled; then traffic_collect || return 1; else traffic_sync_inventory || return 1; fi
+  if traffic_is_enabled && [[ -n $(traffic_recorded_backend) ]]; then traffic_collect || return 1; else traffic_sync_inventory || return 1; fi
   if [[ -n $old && -z $new ]]; then traffic_user_forget_inbound "$old"; fi
 }
 
@@ -1593,15 +1685,17 @@ Description=Collect xrayctl traffic every minute
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=1min
+OnActiveSec=1min
+OnUnitInactiveSec=1min
+AccuracySec=1s
 RandomizedDelaySec=5s
-Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF_TIMER
-      systemctl daemon-reload
-      systemctl enable --now xrayctl-traffic-collect.timer >/dev/null 2>&1 || return 1
+      systemctl daemon-reload || return 1
+      systemctl enable xrayctl-traffic-collect.timer >/dev/null 2>&1 || return 1
+      systemctl restart xrayctl-traffic-collect.timer >/dev/null 2>&1 || return 1
       meta_resource_register trafficService "$TRAFFIC_SYSTEMD_SERVICE"
       meta_resource_register trafficTimer "$TRAFFIC_SYSTEMD_TIMER"
       ;;
@@ -1649,7 +1743,11 @@ traffic_runtime_ensure() {
   traffic_is_enabled && was_enabled=1
   traffic_init_file || return 1
   traffic_set_enabled true || return 1
-  if ((was_enabled)); then traffic_collect || true; fi
+  if ((was_enabled)) && [[ -n $(traffic_recorded_backend) ]]; then
+    local collection_rc=0
+    traffic_collect || collection_rc=$?
+    ((collection_rc == 0 || collection_rc == 2)) || return 1
+  fi
   traffic_ensure_backend || return 1
   traffic_sync_inventory || return 1
   traffic_rules_restore_serialized || return 1
