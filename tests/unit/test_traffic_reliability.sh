@@ -4,10 +4,16 @@ cd "$(dirname "$0")/../.."
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
 export XRAYCTL_TESTING=1 XRAYCTL_CONFIG_DIR="$root/config" XRAYCTL_TRAFFIC_FILE="$root/traffic.json"
+export XRAYCTL_CERT_DIR="$root/certs" XRAYCTL_LOG_DIR="$root/log" XRAYCTL_BACKUP_DIR="$root/backups"
 export XRAYCTL_LOCK_FILE="$root/lock" XRAYCTL_META_FILE="$root/meta.json"
 export XRAYCTL_TRAFFIC_NOW='2026-11-10 12:00:00' XRAYCTL_XRAY_BIN=/nonexistent
 source ./xrayctl.sh
 trap 'rm -rf "$root"' EXIT
+# BusyBox flock only supports the nonblocking/unlock flags used here.
+flock() {
+  [[ ${1-} == -n || ${1-} == -u ]] || { printf 'unsupported flock flag\n' >&2; return 1; }
+  command flock "$@"
+}
 write_default_config
 traffic_init_file
 traffic_read_counters() { printf 'a\t%s\n' "$counter"; }

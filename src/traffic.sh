@@ -1060,10 +1060,14 @@ traffic_lock_acquire() {
   if command_exists flock; then
     mkdir -p "$(dirname "$TRAFFIC_LOCK")" || return 1
     exec {TRAFFIC_LOCK_FD}>"${TRAFFIC_LOCK}.flock" || return 1
-    if ! flock -w 5 "$TRAFFIC_LOCK_FD"; then
-      exec {TRAFFIC_LOCK_FD}>&-
-      return 1
-    fi
+    while ! flock -n "$TRAFFIC_LOCK_FD"; do
+      attempt=$((attempt + 1))
+      if ((attempt >= 100)); then
+        exec {TRAFFIC_LOCK_FD}>&-
+        return 1
+      fi
+      sleep 0.05
+    done
     TRAFFIC_LOCK_HELD=1
     return 0
   fi
