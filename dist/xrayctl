@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="ff3328414461"
+readonly XRAYCTL_BUILD_COMMIT="f8240385b171"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -4587,10 +4587,14 @@ traffic_lock_acquire() {
   if command_exists flock; then
     mkdir -p "$(dirname "$TRAFFIC_LOCK")" || return 1
     exec {TRAFFIC_LOCK_FD}>"${TRAFFIC_LOCK}.flock" || return 1
-    if ! flock -w 5 "$TRAFFIC_LOCK_FD"; then
-      exec {TRAFFIC_LOCK_FD}>&-
-      return 1
-    fi
+    while ! flock -n "$TRAFFIC_LOCK_FD"; do
+      attempt=$((attempt + 1))
+      if ((attempt >= 100)); then
+        exec {TRAFFIC_LOCK_FD}>&-
+        return 1
+      fi
+      sleep 0.05
+    done
     TRAFFIC_LOCK_HELD=1
     return 0
   fi
