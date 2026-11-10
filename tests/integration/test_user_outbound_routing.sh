@@ -7,6 +7,7 @@ TEST_ROOT=$(mktemp -d /tmp/xrayctl-user-outbound.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 export XRAYCTL_TESTING=1
+export XRAYCTL_TRAFFIC_FILE="$TEST_ROOT/traffic.json" XRAYCTL_LOCK_FILE="$TEST_ROOT/lock"
 export XRAYCTL_CONFIG_DIR="$TEST_ROOT/config"
 export XRAYCTL_CONFIG_FILE="$XRAYCTL_CONFIG_DIR/config.json"
 export XRAYCTL_META_FILE="$XRAYCTL_CONFIG_DIR/meta.json"

@@ -135,7 +135,7 @@ jq -e --arg id "$id_a" '.inbounds.a.users[$id].limit.usedBytes>0' "$TRAFFIC_FILE
 jq -e --arg id "$id_a" '[.routing.rules[] | select(.ruleTag==("xrayctl-user-limit:"+$id))] | length==1' "$CONFIG_FILE" >/dev/null
 before_user=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$TRAFFIC_FILE")
 kill "$server_pid"; wait "$server_pid" || true; server_pid=''
-traffic_collect
+if traffic_collect; then printf 'not ok - stopped Xray reported successful collection\n' >&2; exit 1; fi
 after_user=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$TRAFFIC_FILE")
 [[ $before_user == "$after_user" ]]
 jq -e --arg id "$id_a" '[.routing.rules[] | select(.ruleTag==("xrayctl-user-limit:"+$id))] | length==1' "$CONFIG_FILE" >/dev/null
