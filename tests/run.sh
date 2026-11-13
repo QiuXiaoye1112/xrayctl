@@ -9,6 +9,7 @@ tests=(
   "tests/architecture/test_architecture.sh"
   "tests/unit/test_validators.sh"
   "tests/unit/test_notices.sh"
+  "tests/unit/test_ui_layout.sh"
   "tests/unit/test_platform.sh"
   "tests/unit/test_protocol_builders.sh"
   "tests/unit/test_interactive_builders.sh"

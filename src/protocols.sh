@@ -83,9 +83,13 @@ protocol_build() {
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
   local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
+  local total_steps=3 listen_step=2 user_step=3
+  ui_wizard_step 1 "" "选择入站协议"
   choose choice "选择入站协议" "VLESS" "SOCKS5" "HTTP" || return 1
   case $choice in
-    1) protocol=vless;; 2) protocol=socks;; 3) protocol=http;;
+    1) protocol=vless; total_steps=4; listen_step=3; user_step=4 ;;
+    2) protocol=socks ;;
+    3) protocol=http ;;
   esac
 
   if protocol_supports_stream "$protocol"; then
@@ -93,6 +97,7 @@ build_inbound() {
     suggested_host=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
   fi
 
+  ui_wizard_step "$listen_step" "$total_steps" "监听参数与连接地址"
   prompt_tag tag "${protocol}-$(random_hex 2)" || return 1
   prompt_value listen "监听地址" "0.0.0.0" || return 1
   suggest_available_port suggested_port || suggested_port=443
@@ -104,6 +109,7 @@ build_inbound() {
     prompt_public_host public_host "" "$suggested_host" || return 1
   fi
 
+  ui_wizard_step "$user_step" "$total_steps" "创建初始访问用户"
   case $protocol in
     vless)
       prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol" || return 1

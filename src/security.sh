@@ -31,6 +31,7 @@ generate_reality_keys() {
 build_stream_settings() {
   local protocol=$1 __json=$2 __public_key=$3
   local transport_choice security_choice method security path target sni private public short_id cert key alpn json
+  ui_wizard_step 2 4 "传输与安全配置"
   case $protocol in
     vless)
       choose security_choice "选择加密方式" "REALITY" "TLS" "无" || return 1

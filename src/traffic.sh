@@ -666,7 +666,7 @@ traffic_user_reset() {
 }
 
 traffic_users_show() {
-  local filter=${1-} tag protocol id label used quota start end enabled status ambiguous period_start current_bytes current_tag="" user_state inventory
+  local filter=${1-} tag protocol id label used quota start end enabled status ambiguous period_start current_bytes current_tag="" user_state inventory status_disp bar pct fill empty raw_used raw_quota
   heading '流量限制'
   if [[ ! -r $CONFIG_FILE || ! -r $TRAFFIC_FILE ]]; then
     info "用户流量统计尚未配置。"
@@ -678,34 +678,49 @@ traffic_users_show() {
   while IFS=$'\t' read -r tag protocol id label current_bytes used quota start end enabled ambiguous; do
     [[ -n $tag ]] || continue
     if [[ $tag != "$current_tag" ]]; then
-      printf '\n%s\n' "$tag"
-      print_table_cell '用户名称' 12; printf ' | '
+      printf '\n  %s▸ %s%s\n' "$C_BOLD$C_CYAN" "$tag" "$C_RESET"
+      printf '  %s' "$C_DIM"
+      print_table_cell '用户名称' 12; printf ' │ '
       print_table_cell_right '已用流量' 10; printf ' / '
-      print_table_cell '月度额度' 10; printf ' | '
-      print_table_cell '状态' 6; printf '\n'
-      printf '%s\n' '-----------------------------------------------'
+      print_table_cell '月度额度' 10; printf ' │ '
+      print_table_cell '状态' 8; printf ' │ 占用%s\n' "$C_RESET"
+      ui_rule 2
       current_tag=$tag
     fi
     if [[ -z $id || $id == '-' ]]; then
-      if [[ $protocol == socks || $protocol == http ]]; then printf '   此入站没有可统计的认证账号\n'; else printf '   此入站暂不支持按用户统计\n'; fi
+      if [[ $protocol == socks || $protocol == http ]]; then printf '  %s○ 此入站没有可统计的认证账号%s\n' "$C_DIM" "$C_RESET"; else printf '  %s○ 此入站暂不支持按用户统计%s\n' "$C_DIM" "$C_RESET"; fi
       continue
     fi
+    raw_used=0; raw_quota=0; bar=""
     if [[ $enabled == true && $quota =~ ^[0-9]+$ && $quota -gt 0 ]]; then
-      if [[ $ambiguous == true ]]; then status='冲突'; current_bytes='统计冲突';
-      elif ((used >= quota)); then status='超额'; current_bytes=$used
-      else status='正常'; current_bytes=$used; fi
+      raw_quota=$quota
+      if [[ $ambiguous == true ]]; then
+        status='冲突'; status_disp=$(ui_badge warn "冲突"); current_bytes='统计冲突'
+      elif ((used >= quota)); then
+        status='超额'; status_disp=$(ui_badge err "超额"); current_bytes=$used; raw_used=$used
+      else
+        status='正常'; status_disp=$(ui_badge ok "正常"); current_bytes=$used; raw_used=$used
+      fi
       quota=$(traffic_format_bytes "$quota")
+      if [[ $ambiguous != true ]]; then
+        pct=$((raw_used * 100 / raw_quota))
+        ((pct > 100)) && pct=100
+        fill=$((pct / 10)); empty=$((10 - fill))
+        bar="$(ui_repeat '█' "$fill")$(ui_repeat '░' "$empty") ${pct}%"
+      fi
     else
       quota='∞'
-      if [[ $ambiguous == true ]]; then status='冲突'; current_bytes='统计冲突'; else status='正常'; fi
+      if [[ $ambiguous == true ]]; then status='冲突'; status_disp=$(ui_badge warn "冲突"); current_bytes='统计冲突'
+      else status='正常'; status_disp=$(ui_badge ok "正常"); fi
+      bar="${C_DIM}不限额度${C_RESET}"
     fi
     if [[ $ambiguous == true ]]; then used='统计冲突'
     elif [[ $user_state == '已配置' ]]; then used=$(traffic_format_bytes "$current_bytes")
     else used='未统计'; fi
-    print_table_cell_clipped "$label" 12; printf ' | '
+    printf '  '; print_table_cell_clipped "$label" 12; printf ' %s│%s ' "$C_DIM" "$C_RESET"
     print_table_cell_right "$used" 10; printf ' / '
-    print_table_cell "$quota" 10; printf ' | '
-    print_table_cell "$status" 6; printf '\n'
+    print_table_cell "$quota" 10; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+    print_table_cell "$status_disp" 8; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$bar"
   done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --argjson inventory "$inventory" --arg periodStart "$period_start" --arg filter "$filter" '
     $state[0] as $s | .inbounds[]? | select($filter=="" or .tag==$filter) | .tag as $tag | .protocol as $protocol |
     if $protocol=="vless" then
@@ -1531,13 +1546,15 @@ traffic_show() {
     traffic_validate_range "$start" "$end" || { warn "日期范围无效或超出当前周期。"; return 1; }
   fi
   traffic_init_file; traffic_sync_inventory
-  traffic_is_enabled && status="运行中" || status="已停止"
+  traffic_is_enabled && status=$(ui_badge ok "运行中") || status=$(ui_badge muted "已停止")
   last=$(jq -r '.lastCollectedAt // empty' "$TRAFFIC_FILE")
   heading "流量信息"
-  printf '统计状态：%s\n统计范围：%s ～ %s\n最后采集：%s\n\n' "$status" "$start" "$end" "${last:-尚未采集}"
-  print_table_cell_clipped "标签" 20; printf '| '
-  print_table_cell_clipped "协议" 10; printf '| '
-  print_table_cell "端口" 7; printf '| %14s\n' "总流量"
+  printf '  统计状态：%s  |  统计范围：%s ～ %s\n  最后采集：%s\n\n' "$status" "$start" "$end" "${last:-尚未采集}"
+  printf '%s' "$C_DIM"
+  print_table_cell_clipped "标签" 20; printf ' │ '
+  print_table_cell_clipped "协议" 10; printf ' │ '
+  print_table_cell "端口" 7; printf ' │ %14s%s\n' "总流量" "$C_RESET"
+  ui_rule 0
   display_order=$(jq -c '[.inbounds[]?.tag]' "$CONFIG_FILE" 2>/dev/null || printf '[]')
   rows=$(jq -r --arg start "$start" --arg finish "$end" --argjson period "$period" --argjson order "$display_order" '
     ($order | to_entries | map({key:.value,value:.key}) | from_entries) as $positions |
@@ -1551,9 +1568,9 @@ traffic_show() {
   if [[ -n $rows ]]; then
     while IFS=$'\t' read -r tag protocol port bytes deleted disabled; do
       if [[ $disabled == true ]]; then tag="${tag}(已禁用)"; elif [[ $deleted == true ]]; then tag="${tag}(已删除)"; fi
-      print_table_cell_clipped "$tag" 20; printf '| '
-      print_table_cell_clipped "$protocol" 10; printf '| '
-      print_table_cell "$port" 7; printf '| %14s\n' "$(traffic_format_bytes "$bytes")"
+      print_table_cell_clipped "$tag" 20; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+      print_table_cell_clipped "$protocol" 10; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+      print_table_cell "$port" 7; printf ' %s│%s %s%14s%s\n' "$C_DIM" "$C_RESET" "$C_BOLD" "$(traffic_format_bytes "$bytes")" "$C_RESET"
     done <<<"$rows"
   fi
   if [[ $period == true ]]; then
@@ -1561,7 +1578,8 @@ traffic_show() {
   else
     total=$(traffic_range_total "$start" "$end")
   fi
-  printf '%s\n全部入站：%s\n' '----------------------------------------------------------' "$(traffic_format_bytes "$total")"
+  ui_rule 0
+  printf '全部入站：%s%s%s\n' "$C_BOLD$C_CYAN" "$(traffic_format_bytes "$total")" "$C_RESET"
 }
 
 traffic_prompt_range() {

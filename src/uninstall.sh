@@ -2,12 +2,14 @@
 cleanup_step() {
   local description=$1
   shift
-  printf '  %s ... ' "$description"
+  printf '  '
+  print_table_cell "$description" 24
+  printf ' '
   if "$@" 2>/dev/null; then
-    printf '✓\n'
+    printf '%s✓%s\n' "$C_GREEN" "$C_RESET"
     return 0
   else
-    printf '✗\n'
+    printf '%s✗%s\n' "$C_RED" "$C_RESET"
     return 1
   fi
 }
@@ -362,33 +364,19 @@ _scan_xrayctl_residuals() {
 
 uninstall_xray() {
   ensure_system_context uninstall
-  heading "删除"
-  cat <<'EOF'
-
-⚠  即将永久删除 xrayctl 管理的全部数据：
-
-  - Xray 核心
-  - 所有入站配置及用户凭据
-  - TLS 证书副本
-  - xrayctl 签发的 Let's Encrypt 证书
-  - Cloudflare Global API Key
-  - Certbot 独立环境
-  - 自动续期任务
-  - xrayctl 配置的 BBR 设置
-  - 日志、元数据
-  - 所有 xrayctl 备份
-
-不会删除：
-  - 系统 Nginx / Apache / 其他程序
-  - 系统 Certbot
-  - /etc/letsencrypt（其他网站证书）
-  - Cloudflare DNS 记录
-  - 系统软件包 (curl / python3 / jq)
-  - xrayctl 未修改过的文件
-
-完全删除不会创建或保留备份。
-EOF
-  printf '输入 DELETE 确认：'
+  heading "卸载清理"
+  ui_card_open "⚠ 即将永久删除以下 xrayctl 受管数据（不保留备份）"
+  ui_card_line "• Xray 核心程序、所有入站配置及用户凭据"
+  ui_card_line "• 托管 TLS 证书副本、Let's Encrypt 证书与续期任务"
+  ui_card_line "• Cloudflare 凭据、独立 Certbot 环境与 BBR 持久化配置"
+  ui_card_line "• 运行日志、元数据及全部 xrayctl 手动备份"
+  ui_card_close
+  ui_card_open "✓ 以下系统组件与外部文件将保持原样"
+  ui_card_line "• 系统 Nginx / Apache / 其他服务与系统软件包 (curl/python3/jq)"
+  ui_card_line "• 系统 Certbot、/etc/letsencrypt 及其他网站证书"
+  ui_card_line "• Cloudflare DNS 记录及非 xrayctl 管理的配置"
+  ui_card_close
+  printf '\n请输入 %sDELETE%s 确认卸载: ' "$C_BOLD$C_RED" "$C_RESET"
   local answer
   read -r answer || { cancel_input; return 0; }
   if [[ $answer != "DELETE" ]]; then

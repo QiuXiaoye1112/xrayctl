@@ -330,15 +330,45 @@ install_quick_command() {
 }
 
 show_status() {
-  local traffic_state backend
-  heading "Xray 状态"
-  if xray_installed; then "$XRAY_BIN" version | sed -n '1,2p'; else printf 'Xray: 未安装\n'; fi
-  if service_exists; then platform_service_status 2>/dev/null | sed -n '1,12p' || true
-  else printf '%s 服务: 未安装\n' "$(platform_init_system 2>/dev/null || printf unknown)"; fi
-  [[ -f $CONFIG_FILE ]] && printf '入站数: %s\n配置: %s\n' "$(jq '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?')" "$CONFIG_FILE"
-  if traffic_is_enabled; then traffic_state="运行中"; else traffic_state="已停止"; fi
+  local traffic_state backend svc_state svc_badge bbr_state bbr_badge inbound_cnt="0" cert_cnt="0"
+  heading "Xray 运行状态"
+  svc_state=$(service_state_summary)
+  case $svc_state in
+    运行中) svc_badge=$(ui_badge ok "运行中") ;;
+    已停止) svc_badge=$(ui_badge err "已停止") ;;
+    *)      svc_badge=$(ui_badge muted "$svc_state") ;;
+  esac
+  bbr_state=$(bbr_state_summary)
+  case $bbr_state in
+    已启用) bbr_badge=$(ui_badge ok "已启用") ;;
+    未启用) bbr_badge=$(ui_badge muted "未启用") ;;
+    *)      bbr_badge=$(ui_badge warn "$bbr_state") ;;
+  esac
+  [[ -r $CONFIG_FILE ]] && inbound_cnt=$(jq '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?')
+  if declare -F certificate_count >/dev/null 2>&1; then
+    cert_cnt=$(certificate_count 2>/dev/null || printf '0')
+  fi
+  if traffic_is_enabled; then traffic_state=$(ui_badge ok "运行中"); else traffic_state=$(ui_badge muted "已停止"); fi
   backend=$(traffic_recorded_backend); backend=${backend:-未设置}
-  printf '流量统计: %s（%s）\n用户额度: 已设置 %s 个用户\n' "$traffic_state" "$backend" "$(traffic_user_limit_count)"
+
+  ui_card_open "核心与服务概览"
+  ui_card_kv "Xray 核心" "$(xray_version_summary)" 12
+  ui_card_kv "服务状态" "${svc_badge}  (自启: $(startup_state_summary))" 12
+  ui_card_kv "TCP BBR" "$bbr_badge" 12
+  ui_card_kv "入站 / 证书" "${inbound_cnt} 个入站 / ${cert_cnt} 张证书" 12
+  ui_card_kv "流量统计" "${traffic_state} (${backend})" 12
+  ui_card_kv "用户额度" "已配置 $(traffic_user_limit_count) 个用户" 12
+  ui_card_kv "配置文件" "$CONFIG_FILE" 12
+  ui_card_close
+
+  if xray_installed; then
+    ui_section "Xray 版本信息"
+    "$XRAY_BIN" version | sed -n '1,2p' | sed 's/^/  /'
+  fi
+  if service_exists; then
+    ui_section "服务单元详情"
+    platform_service_status 2>/dev/null | sed -n '1,10p' | sed 's/^/  /' || true
+  fi
 }
 
 service_action() {
@@ -501,42 +531,114 @@ startup_state_summary() {
   else printf '已关闭'; fi
 }
 
+_ui_state_badge() {
+  local label=$1
+  case $label in
+    运行中|已开启|已启用) ui_badge ok "$label" ;;
+    已停止)               ui_badge err "$label" ;;
+    未安装|已关闭|未启用) ui_badge muted "$label" ;;
+    *)                    ui_badge warn "$label" ;;
+  esac
+}
+
 show_main_summary() {
-  printf '服务: %s  |  入站: %s  |  BBR: %s  |  Xray: %s\n' \
-    "$(service_state_summary)" "$(node_count_summary)" "$(bbr_state_summary)" "$(xray_version_summary)"
+  local svc bbr certs="0"
+  svc=$(_ui_state_badge "$(service_state_summary)")
+  bbr=$(_ui_state_badge "$(bbr_state_summary)")
+  if declare -F certificate_count >/dev/null 2>&1; then
+    certs=$(certificate_count 2>/dev/null || printf '0')
+  fi
+  printf '  状态 %s   %s│%s  Xray %s%s%s   %s│%s  BBR %s   %s│%s  入站 %s%s%s  证书 %s%s%s\n' \
+    "$svc" "$C_DIM" "$C_RESET" \
+    "$C_BOLD" "$(xray_version_summary)" "$C_RESET" "$C_DIM" "$C_RESET" \
+    "$bbr" "$C_DIM" "$C_RESET" \
+    "$C_BOLD" "$(node_count_summary)" "$C_RESET" \
+    "$C_BOLD" "$certs" "$C_RESET"
 }
 
 show_main_inbounds() {
   command_exists jq && [[ -r $CONFIG_FILE ]] || return 0
-  local count tag protocol port method security
+  local count tag protocol port method security users outbound sec_disp out_disp
   count=$(jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null) || return 0
-  heading "当前入站"
+  ui_section "入站概览"
   if ((count == 0)); then
-    info "还没有入站。"
-    printf '\n'
+    printf '  %s○ 暂无入站节点，请选择 [1] 入站管理 创建首个节点%s\n' "$C_DIM" "$C_RESET"
     return 0
   fi
-  print_table_cell_clipped "标签" 20; printf '|'; print_table_cell_clipped "协议" 8; printf '|'
-  print_table_cell "端口" 7; printf '|'; print_table_cell_clipped "传输" 7; printf '|'
-  print_table_cell_clipped "安全" 10; printf '\n'
-  jq -r '.inbounds[] | [.tag,.protocol,
-    (.port|tostring),(if (.streamSettings.network // .streamSettings.method // "raw")=="websocket" then "ws" else (.streamSettings.network // .streamSettings.method // "raw") end),
-    (.streamSettings.security // "none")] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r tag protocol port method security; do
-        print_table_cell_clipped "$tag" 20; printf '|'; print_table_cell_clipped "$protocol" 8; printf '|'
-        print_table_cell "$port" 7; printf '|'; print_table_cell_clipped "$method" 7; printf '|'
-        print_table_cell_clipped "$security" 10; printf '\n'
+  printf '  %s' "$C_DIM"
+  print_table_cell_clipped "标签" 16; printf ' │ '
+  print_table_cell_clipped "协议" 6; printf ' │ '
+  print_table_cell "端口" 6; printf ' │ '
+  print_table_cell_clipped "传输" 5; printf ' │ '
+  print_table_cell_clipped "安全" 8; printf ' │ '
+  print_table_cell "用户" 4; printf ' │ 默认出站%s\n' "$C_RESET"
+  ui_rule 2
+  jq -r '
+    (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
+    .inbounds[] |
+    .tag as $tag |
+    [$tag,.protocol,
+     (.port|tostring),
+     (if .protocol=="vless" then
+        (if (.streamSettings.network // .streamSettings.method // "raw")=="websocket" then "ws" else (.streamSettings.network // .streamSettings.method // "raw") end)
+      else "-" end),
+     (if .protocol=="vless" then (.streamSettings.security // "none")
+      elif .protocol=="socks" then (.settings.auth // "noauth")
+      elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
+      else "noauth" end),
+     (if .protocol=="vless" then (.settings.clients // [] | length)
+      else ((.settings.accounts // .settings.users // []) | length) end | tostring),
+     ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r tag protocol port method security users outbound; do
+        case $security in
+          reality) sec_disp="${C_CYAN}${security}${C_RESET}" ;;
+          tls|password) sec_disp="${C_GREEN}${security}${C_RESET}" ;;
+          none|noauth) sec_disp="${C_YELLOW}${security}${C_RESET}" ;;
+          *) sec_disp="$security" ;;
+        esac
+        if declare -F _outbound_display_name >/dev/null 2>&1; then
+          out_disp=$(_outbound_display_name "$outbound")
+        else
+          out_disp=$outbound
+        fi
+        printf '  '; print_table_cell_clipped "$tag" 16; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$protocol" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$port" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$method" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$sec_disp" 8; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$users" 4; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$out_disp"
       done
-  printf '\n'
 }
 
 show_node_summary() {
-  local tag=$1 protocol port method security listen
-  IFS=$'\t' read -r protocol port method security listen < <(
-    jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|[
-      .protocol,(.port|tostring),(.streamSettings.network // .streamSettings.method // "raw"),
-      (.streamSettings.security // "none"),(.listen // "0.0.0.0")]|@tsv' "$CONFIG_FILE"
+  local tag=$1 protocol port method security listen users outbound host out_disp
+  IFS=$'\t' read -r protocol port method security listen users outbound < <(
+    jq -r --arg tag "$tag" '
+      (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
+      .inbounds[]|select(.tag==$tag)|[
+        .protocol,
+        (.port|tostring),
+        (if .protocol=="vless" then (.streamSettings.network // .streamSettings.method // "raw") else "-" end),
+        (if .protocol=="vless" then (.streamSettings.security // "none")
+         elif .protocol=="socks" then (.settings.auth // "noauth")
+         elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
+         else "noauth" end),
+        (.listen // "0.0.0.0"),
+        (if .protocol=="vless" then (.settings.clients // [] | length)
+         else ((.settings.accounts // .settings.users // []) | length) end | tostring),
+        ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)
+      ]|@tsv' "$CONFIG_FILE"
   )
-  printf '协议: %s  |  端口: %s  |  传输: %s  |  安全: %s  |  监听: %s\n\n' \
-    "$protocol" "$port" "$method" "$security" "$listen"
+  host=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
+  if declare -F _outbound_display_name >/dev/null 2>&1; then
+    out_disp=$(_outbound_display_name "$outbound")
+  else
+    out_disp=$outbound
+  fi
+  ui_card_open "节点概览"
+  ui_card_kv "协议 / 安全" "${protocol^^} · ${method} · ${security}" 12
+  ui_card_kv "监听端口" "${listen}:${port}" 12
+  [[ -z $host ]] || ui_card_kv "连接地址" "$host" 12
+  ui_card_kv "用户 / 出站" "${users} 个用户  ·  默认出站 ${out_disp}" 12
+  ui_card_close
 }

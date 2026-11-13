@@ -276,9 +276,12 @@ list_outbound_overview() {
   ensure_config
   heading "入站与出站规则"
   if [[ $(jq '.inbounds|length' "$CONFIG_FILE") == 0 ]]; then
-    info "还没有入站。"
+    printf '  %s○ 还没有入站%s\n' "$C_DIM" "$C_RESET"
   else
-    print_table_cell "序号" 6; print_table_cell "入站" 28; printf '出站\n'
+    printf '  %s' "$C_DIM"
+    print_table_cell "序号" 5; printf ' │ '
+    print_table_cell "入站" 22; printf ' │ 默认出站%s\n' "$C_RESET"
+    ui_rule 2
     jq -r '
       (.routing.rules // []) as $rules | (.outbounds[0].tag // "未设置") as $native |
       .inbounds | to_entries[] |
@@ -286,7 +289,8 @@ list_outbound_overview() {
       [$number,$tag,([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
       | while IFS=$'\t' read -r number tag outbound; do
           local display; display=$(_outbound_display_name "$outbound")
-          print_table_cell "$number" 6; print_table_cell "$tag" 28; printf '%s\n' "$display"
+          printf '  '; print_table_cell "$number" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+          print_table_cell_clipped "$tag" 22; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$display"
         done
   fi
 
@@ -296,22 +300,22 @@ list_outbound_overview() {
       [.key+1,.value.tag,.value.protocol,
        .value.settings.address,(.value.settings.port|tostring),
        (if (.value.settings.user // "")=="" then "无" else .value.settings.user end)] | @tsv' "$CONFIG_FILE")
-    print_table_cell "序号" 4; printf '| '
-    print_table_cell_clipped "标签" 16; printf '| '
-    print_table_cell "协议" 7; printf '| '
-    print_table_cell_clipped "地址" 22; printf '| 用户\n'
+    printf '  %s' "$C_DIM"
+    print_table_cell "序号" 4; printf ' │ '
+    print_table_cell_clipped "标签" 16; printf ' │ '
+    print_table_cell "协议" 6; printf ' │ '
+    print_table_cell_clipped "地址" 22; printf ' │ 用户%s\n' "$C_RESET"
+    ui_rule 2
     while IFS=$'\t' read -r number tag protocol address port username; do
       endpoint=$(_outbound_endpoint_display "$address" "$port")
-      print_table_cell "$number" 4; printf '| '
-      print_table_cell_clipped "$tag" 16; printf '| '
-      print_table_cell "$protocol" 7; printf '| '
-      print_table_cell_clipped "$endpoint" 22; printf '| %s\n' "$username"
+      printf '  '; print_table_cell "$number" 4; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+      print_table_cell_clipped "$tag" 16; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+      print_table_cell "$protocol" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+      print_table_cell_clipped "$endpoint" 22; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$username"
     done <<<"$rows"
   else
-    info "还没有代理出站。"
+    printf '  %s○ 还没有手动添加的代理出站%s\n' "$C_DIM" "$C_RESET"
   fi
-
-  printf '\n'
 }
 
 list_inbound_outbound_status() {

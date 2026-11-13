@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 outbound_menu() {
-  local choice
+  local choice XRAYCTL_UI_CRUMB="首页 › 出站管理"
   while true; do
     clear_screen
     heading "出站管理"
     list_outbound_overview
-    printf '\n1) 入站出站管理\n2) 用户域名模板库\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 查看出站详情\n5) 删除出站\n0) 返回\n'
+    ui_menu_group "分流与模板"
+    ui_menu_item 1 "入站出站管理"
+    ui_menu_item 2 "用户域名模板库"
+    ui_menu_group "代理出站节点"
+    ui_menu_item 3 "添加代理出站 (SOCKS5/HTTP)"
+    ui_menu_item 4 "查看出站详情"
+    ui_menu_item 5 "删除出站"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) inbound_outbound_menu;;
@@ -165,13 +172,17 @@ user_template_remove_menu() {
 
 user_template_menu() {
   local inbound=$1 label=$2 identity choice name outbound local_ip=''
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${inbound} › ${label} › 模板"
   _outbound_user_identity identity "$inbound" "$label" || return 1
   while true; do
     clear_screen
     heading "用户模板 · ${label}"
-    printf '已应用模板：\n'
+    ui_section "已应用模板"
     template_bindings_display "$inbound" "$identity"
-    printf '\n1) 应用模板\n2) 移除模板\n0) 返回\n'
+    ui_menu_group "模板操作"
+    ui_menu_item 1 "应用模板"
+    ui_menu_item 2 "移除模板"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1)
@@ -188,6 +199,7 @@ user_template_menu() {
 
 user_outbound_detail_menu() {
   local inbound=$1 label=$2 choice identity default display_default
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${inbound} › 用户 ${label}"
   while true; do
     clear_screen
     _outbound_user_identity identity "$inbound" "$label" || return 1
@@ -202,7 +214,12 @@ user_outbound_detail_menu() {
     template_bindings_display "$inbound" "$identity"
     heading '域名分流规则'
     _outbound_user_domain_rules_display "$inbound" "$identity"
-    printf '\n1) 设置默认出站\n2) 管理模板\n3) 添加规则\n4) 删除规则\n0) 返回\n'
+    ui_menu_group "用户分流配置"
+    ui_menu_item 1 "设置默认出站"
+    ui_menu_item 2 "管理模板"
+    ui_menu_item 3 "添加规则"
+    ui_menu_item 4 "删除规则"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action outbound_user_default_set "$inbound" "$label" ""; pause;;
@@ -229,6 +246,7 @@ inbound_user_outbound_menu() {
 
 inbound_outbound_detail_menu() {
   local inbound=$1 choice label identity default display_default count inbound_default first_user inbound_rule_count
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${inbound}"
   local -a labels=()
   while inbound_exists "$inbound"; do
     clear_screen
@@ -238,6 +256,7 @@ inbound_outbound_detail_menu() {
     inbound_rule_count=$(jq -r --arg inbound "$inbound" '
       [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-domain:")) and .inboundTag==[$inbound])] | length
     ' "$CONFIG_FILE") || return 1
+    ui_section "入站公共策略"
     printf '默认出站：%s\n分流规则：%s 条\n模板：\n' \
       "$(_outbound_display_name "$inbound_default")" "$inbound_rule_count"
     template_bindings_display "$inbound"
@@ -264,7 +283,11 @@ inbound_outbound_detail_menu() {
     else
       printf '  无\n'
     fi
-    printf '\n1) 设置默认出站\n2) 公共域名分流\n3) 用户出站管理\n0) 返回\n'
+    ui_menu_group "出站策略操作"
+    ui_menu_item 1 "设置默认出站"
+    ui_menu_item 2 "公共域名分流"
+    ui_menu_item 3 "用户出站管理"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action assign_outbound "$inbound" ""; pause;;
@@ -354,16 +377,20 @@ delete_domain_template_domains_menu() {
 
 template_manage_menu() {
   local name=$1 choice type domains match
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › 模板库 › ${name}"
   while domain_template_exists "$name"; do
     clear_screen
     heading "模板 · ${name}"
-    printf '精确域名：\n'
+    ui_section "精确域名"
     jq -r --arg name "$name" '.domainTemplates.templates[]? |
       select(.name==$name) | .exact[]? // empty | "  "+.' "$META_FILE"
-    printf '子域名：\n'
+    ui_section "子域名"
     jq -r --arg name "$name" '.domainTemplates.templates[]? |
       select(.name==$name) | .suffix[]? // empty | "  "+.' "$META_FILE"
-    printf '\n1) 添加域名\n2) 删除域名\n0) 返回\n'
+    ui_menu_group "模板内容操作"
+    ui_menu_item 1 "添加域名"
+    ui_menu_item 2 "删除域名"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1)
@@ -385,14 +412,20 @@ template_manage_menu() {
 
 template_library_menu() {
   local choice name exact suffix
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › 模板库"
   while true; do
     clear_screen
     heading '模板库'
+    ui_section "现有模板"
     while IFS=$'\t' read -r name exact suffix; do
       [[ -n $name ]] || continue
       printf '  %-16s 精确 %s 个，子域名 %s 个\n' "$name" "$exact" "$suffix"
     done < <(list_domain_templates)
-    printf '\n1) 新建模板\n2) 管理模板\n3) 删除模板\n0) 返回\n'
+    ui_menu_group "模板库管理"
+    ui_menu_item 1 "新建模板"
+    ui_menu_item 2 "管理模板"
+    ui_menu_item 3 "删除模板"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action create_domain_template; pause;;
@@ -406,11 +439,17 @@ template_library_menu() {
 
 client_menu_for_tag() {
   local tag=$1 choice
+  local XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${tag} › 用户管理"
   while inbound_exists "$tag"; do
     clear_screen
     heading "用户管理 · ${tag}"
     list_clients "$tag"
-    printf '\n1) 添加用户\n2) 重命名用户\n3) 更换 UUID/密码\n4) 删除用户\n0) 返回入站\n'
+    ui_menu_group "凭据操作"
+    ui_menu_item 1 "添加用户"
+    ui_menu_item 2 "重命名用户"
+    ui_menu_item 3 "更换 UUID/密码"
+    ui_menu_item 4 "删除用户"
+    ui_menu_footer "返回入站"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action add_client "$tag"; pause;; 2) run_menu_action rename_client "$tag"; pause;;
@@ -422,12 +461,19 @@ client_menu_for_tag() {
 
 modify_inbound_menu() {
   local current_tag=$1 protocol=$2 parent_tag_var=${3-} choice renamed_tag
+  local XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${current_tag} › 修改信息"
   while inbound_exists "$current_tag"; do
     clear_screen
+    XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${current_tag} › 修改信息"
     heading "修改入站信息 · ${current_tag}"
-    printf '1) 修改入站名称\n2) 修改地址/端口\n'
-    [[ $protocol != vless ]] || printf '3) 修改传输/安全\n'
-    printf '0) 返回入站\n'
+    ui_menu_group "基础与网络"
+    ui_menu_item 1 "修改入站名称"
+    ui_menu_item 2 "修改地址/端口"
+    if [[ $protocol == vless ]]; then
+      ui_menu_group "传输与安全"
+      ui_menu_item 3 "修改传输/安全"
+    fi
+    ui_menu_footer "返回入站"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1)
@@ -455,8 +501,10 @@ modify_inbound_menu() {
 
 manage_inbound_menu() {
   local tag=$1 choice protocol auth security
+  local XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${tag}"
   while inbound_exists "$tag"; do
     clear_screen
+    XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${tag}"
     protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
     heading "入站 · ${tag}"
     show_node_summary "$tag"
@@ -464,7 +512,14 @@ manage_inbound_menu() {
       vless)
         security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
         if [[ $security == tls ]]; then
-          printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 证书管理\n5) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与用户"
+          ui_menu_item 1 "分享信息"
+          ui_menu_item 2 "用户管理"
+          ui_menu_group "配置与诊断"
+          ui_menu_item 3 "修改入站信息"
+          ui_menu_item 4 "证书管理"
+          ui_menu_item 5 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -472,7 +527,13 @@ manage_inbound_menu() {
             0) return;; *) warn "无效选项。"; pause;;
           esac
         else
-          printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与用户"
+          ui_menu_item 1 "分享信息"
+          ui_menu_item 2 "用户管理"
+          ui_menu_group "配置与诊断"
+          ui_menu_item 3 "修改入站信息"
+          ui_menu_item 4 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -483,9 +544,15 @@ manage_inbound_menu() {
         ;;
       http)
         if http_inbound_has_auth "$tag"; then auth=password; else auth=noauth; fi
-        printf '认证: %s\n\n' "$auth"
+        ui_kv "认证方式" "$auth" 10
         if [[ $auth == password ]]; then
-          printf '1) 客户端配置\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与用户"
+          ui_menu_item 1 "客户端配置"
+          ui_menu_item 2 "用户管理"
+          ui_menu_group "配置与诊断"
+          ui_menu_item 3 "修改入站信息"
+          ui_menu_item 4 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -493,7 +560,11 @@ manage_inbound_menu() {
             0) return;; *) warn "无效选项。"; pause;;
           esac
         else
-          printf '1) 客户端配置\n2) 修改入站信息\n3) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与配置"
+          ui_menu_item 1 "客户端配置"
+          ui_menu_item 2 "修改入站信息"
+          ui_menu_item 3 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -504,9 +575,15 @@ manage_inbound_menu() {
         ;;
       socks)
         auth=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth // "noauth"' "$CONFIG_FILE")
-        printf '认证: %s\n\n' "$auth"
+        ui_kv "认证方式" "$auth" 10
         if [[ $auth == password ]]; then
-          printf '1) 客户端配置\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与用户"
+          ui_menu_item 1 "客户端配置"
+          ui_menu_item 2 "用户管理"
+          ui_menu_group "配置与诊断"
+          ui_menu_item 3 "修改入站信息"
+          ui_menu_item 4 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -514,7 +591,11 @@ manage_inbound_menu() {
             0) return;; *) warn "无效选项。"; pause;;
           esac
         else
-          printf '1) 客户端配置\n2) 修改入站信息\n3) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与配置"
+          ui_menu_item 1 "客户端配置"
+          ui_menu_item 2 "修改入站信息"
+          ui_menu_item 3 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -530,12 +611,20 @@ manage_inbound_menu() {
 
 inbound_menu() {
   local choice tag
+  local XRAYCTL_UI_CRUMB="首页 › 入站管理"
   while true; do
     clear_screen
     heading "入站管理"
     list_inbounds
-    printf '\n完整配置: %s\n\n' "$CONFIG_FILE"
-    printf '1) 新增入站\n2) 管理已有入站\n3) 全部分享链接\n4) 删除入站\n0) 返回\n'
+    printf '\n'
+    ui_kv "配置文件" "$CONFIG_FILE" 10
+    ui_menu_group "节点管理"
+    ui_menu_item 1 "新增入站"
+    ui_menu_item 2 "管理已有入站"
+    ui_menu_group "交付与清理"
+    ui_menu_item 3 "全部分享链接"
+    ui_menu_item 4 "删除入站"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action add_inbound; pause;;
@@ -547,15 +636,30 @@ inbound_menu() {
   done
 }
 
-
 certificate_menu() {
-  local choice
+  local choice cf_state
+  local XRAYCTL_UI_CRUMB="首页 › TLS 证书"
   while true; do
     clear_screen
     heading "TLS 证书"
-    printf '托管证书: %s\n\n' "$(certificate_count)"
-    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 删除托管证书\n5) Cloudflare 凭据\n'
-    printf '6) 立即续期所有证书\n0) 返回\n'
+    if load_cloudflare_credentials 2>/dev/null; then
+      cf_state=$(ui_badge ok "已配置")
+    else
+      cf_state=$(ui_badge muted "未配置")
+    fi
+    ui_card_open "证书概览"
+    ui_card_kv "托管证书" "$(certificate_count) 张" 14
+    ui_card_kv "Cloudflare" "$cf_state" 14
+    ui_card_close
+    ui_menu_group "签发、导入与查看"
+    ui_menu_item 1 "Let's Encrypt 自动签发"
+    ui_menu_item 2 "导入已有证书"
+    ui_menu_item 3 "查看托管证书"
+    ui_menu_item 4 "删除托管证书"
+    ui_menu_group "自动续期与凭据"
+    ui_menu_item 5 "Cloudflare 凭据"
+    ui_menu_item 6 "立即续期所有证书"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action issue_certificate; pause;;
@@ -586,13 +690,29 @@ toggle_service_startup() {
 }
 
 service_menu() {
-  local choice
+  local choice svc_badge boot_badge bbr_badge
+  local XRAYCTL_UI_CRUMB="首页 › 服务管理"
   while true; do
     clear_screen
     heading "服务管理"
-    printf '状态: %s  |  开机自启: %s  |  Xray: %s\n\n' \
-      "$(service_state_summary)" "$(startup_state_summary)" "$(xray_version_summary)"
-    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装 Xray\n6) BBR启用/关闭\n0) 返回\n'
+    svc_badge=$(_ui_state_badge "$(service_state_summary)")
+    boot_badge=$(_ui_state_badge "$(startup_state_summary)")
+    bbr_badge=$(_ui_state_badge "$(bbr_state_summary)")
+    ui_card_open "运行环境"
+    ui_card_kv "服务状态" "$svc_badge" 12
+    ui_card_kv "开机自启" "$boot_badge" 12
+    ui_card_kv "Xray 核心" "$(xray_version_summary)" 12
+    ui_card_kv "TCP BBR" "$bbr_badge" 12
+    ui_card_close
+    ui_menu_group "服务控制"
+    ui_menu_item 1 "启动/停止"
+    ui_menu_item 2 "重启服务"
+    ui_menu_item 3 "开关开机自启"
+    ui_menu_group "诊断与内核"
+    ui_menu_item 4 "查看日志"
+    ui_menu_item 5 "安装 Xray"
+    ui_menu_item 6 "BBR启用/关闭"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action toggle_service_running; pause;; 2) run_menu_action service_action restart; pause;;
@@ -615,13 +735,17 @@ bbr_state_summary() {
 
 traffic_menu() {
   local choice
+  local XRAYCTL_UI_CRUMB="首页 › 流量信息"
   traffic_is_enabled && run_menu_action traffic_collect
   while true; do
     clear_screen
     traffic_show || true
-    printf '\n1) 刷新\n2) 清空指定入站记录\n3) 清空全部入站流量记录\n'
-    printf '4) 设置月度统计起点\n'
-    printf '0) 返回\n'
+    ui_menu_group "统计操作"
+    ui_menu_item 1 "刷新"
+    ui_menu_item 2 "清空指定入站记录"
+    ui_menu_item 3 "清空全部入站流量记录"
+    ui_menu_item 4 "设置月度统计起点"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action traffic_collect;;
@@ -636,12 +760,16 @@ traffic_menu() {
 
 traffic_limit_menu() {
   local choice
+  local XRAYCTL_UI_CRUMB="首页 › 流量限制"
   traffic_user_ensure_configured || true
   while true; do
     if traffic_is_enabled; then run_menu_action traffic_collect || true; fi
     clear_screen
     traffic_users_show "" || true
-    printf '\n1) 刷新流量\n2) 管理用户额度\n0) 返回\n'
+    ui_menu_group "配额管理"
+    ui_menu_item 1 "刷新流量"
+    ui_menu_item 2 "管理用户额度"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) continue;;
@@ -676,6 +804,7 @@ traffic_user_menu() {
     pause
     return 0
   fi
+  local XRAYCTL_UI_CRUMB="首页 › 流量限制 › ${tag}"
   while true; do
     clear_screen
     inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
@@ -709,9 +838,13 @@ traffic_user_menu() {
     else
       printf '流量：%s / ∞\n重置周期：无\n状态：正常\n' "$(traffic_format_bytes "$current_bytes")"
     fi
-    printf '\n'
+    ui_rule 0
     done
-    printf '1) 设置/修改额度\n2) 重置用户流量\n3) 取消用户额度\n0) 返回\n'
+    ui_menu_group "用户额度操作"
+    ui_menu_item 1 "设置/修改额度"
+    ui_menu_item 2 "重置用户流量"
+    ui_menu_item 3 "取消用户额度"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in 0) return 0;; 1|2|3) ;; *) warn '无效选项。'; pause; continue;; esac
     if ((${#user_labels[@]} == 1)); then
@@ -738,13 +871,24 @@ traffic_user_menu() {
 }
 
 main_menu() {
-  local choice
+  local choice XRAYCTL_UI_CRUMB=""
   while true; do
     clear_screen
-    printf '%sXray Linux 管理脚本%s  v%s\n' "$C_BOLD$C_BLUE" "$C_RESET" "$XRAYCTL_VERSION"
+    ui_banner "xrayctl · Xray Linux 管理控制台" "v${XRAYCTL_VERSION}"
     show_main_summary
     show_main_inbounds
-    printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 流量限制\n5) 流量信息\n6) 服务管理\n7) 卸载\n0) 退出\n'
+    ui_menu_group "代理与路由"
+    ui_menu_item 1 "入站管理"
+    ui_menu_item 2 "出站管理"
+    ui_menu_group "安全与证书"
+    ui_menu_item 3 "TLS 证书"
+    ui_menu_group "流量与配额"
+    ui_menu_item 4 "流量限制"
+    ui_menu_item 5 "流量信息"
+    ui_menu_group "系统与运维"
+    ui_menu_item 6 "服务管理"
+    ui_menu_item 7 "卸载"
+    ui_menu_footer "退出"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_limit_menu;;
@@ -970,13 +1114,18 @@ dispatch() {
 
 domain_rule_detail_menu() {
   local tag=$1 choice
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${tag} › 公共分流"
   while inbound_exists "$tag"; do
     clear_screen
     heading "域名分流 · ${tag}"
     printf '模板：\n'
     template_bindings_display "$tag"
     list_domain_rules "$tag" --menu
-    printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    ui_menu_group "分流规则操作"
+    ui_menu_item 1 "管理模板"
+    ui_menu_item 2 "添加规则"
+    ui_menu_item 3 "删除规则"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) inbound_template_manage_menu "$tag";;
@@ -1000,12 +1149,17 @@ select_inbound_template() {
 
 inbound_template_manage_menu() {
   local inbound=$1 choice name outbound local_ip=""
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${inbound} › 公共分流 › 模板"
   while inbound_exists "$inbound"; do
     clear_screen
     heading "入站模板 · ${inbound}"
-    printf '已应用模板：\n'
+    ui_section "已应用模板"
     template_bindings_display "$inbound"
-    printf '\n1) 添加模板\n2) 移除模板\n3) 修改出站\n0) 返回\n'
+    ui_menu_group "模板操作"
+    ui_menu_item 1 "添加模板"
+    ui_menu_item 2 "移除模板"
+    ui_menu_item 3 "修改出站"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 1; }
     case $choice in
       1) if apply_domain_template_menu "$inbound"; then :; fi; pause;;

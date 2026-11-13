@@ -653,6 +653,7 @@ issue_certificate() {
   local was_active=0 rc=0
 
   if [[ -z $domain ]]; then
+    ui_wizard_step 1 3 "指定证书域名或公网 IP"
     local default_domain
     default_domain=$(detect_public_ip || true)
     prompt_validated_value domain "证书域名/IP" "$default_domain" validate_domain_or_ip "域名/IP 无效，请重新输入。" || return 1
@@ -671,6 +672,7 @@ issue_certificate() {
 
   # Choose verification method for domains
   if [[ $mode == domain ]]; then
+    ui_wizard_step 2 3 "选择所有权验证方式"
     local cf_label="Cloudflare DNS 自动验证"
     local dns_label="DNS 手动验证（无法自动续期）"
     local http_label="HTTP 自动验证"
@@ -690,7 +692,14 @@ issue_certificate() {
     fi
   fi
 
-  [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。" || return 1
+  if [[ -z $email ]]; then
+    if [[ $mode == domain ]]; then
+      ui_wizard_step 3 3 "填写 Let's Encrypt 联系邮箱"
+    else
+      ui_wizard_step 2 2 "填写 Let's Encrypt 联系邮箱"
+    fi
+    prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。" || return 1
+  fi
   validate_email_address "$email" || die "邮箱格式无效。"
 
   # Check if cert already exists
@@ -803,7 +812,8 @@ import_certificate() {
 
 list_certificates() {
   ensure_meta
-  local id cert found=0 source validation auto_renew subject cert_name
+  local id cert found=0 source validation auto_renew subject cert_name source_disp renew_disp x509_line
+  heading "托管证书列表"
   while IFS= read -r id; do
     [[ -n $id ]] || continue
     cert="${CERT_DIR}/${id}.crt"
@@ -813,34 +823,36 @@ list_certificates() {
     source=$(meta_cert_get_field "$id" source)
     validation=$(meta_cert_get_field "$id" validation)
     auto_renew=$(meta_cert_get_field "$id" autoRenew)
-    printf '标识: %s\n' "$id"
-    [[ -n $subject && $subject != "$id" ]] && printf '域名/IP: %s\n' "$subject"
-    [[ -n $cert_name && $cert_name != "$id" ]] && printf 'Certbot名称: %s\n' "$cert_name"
     case $source in
-      legacy)   printf '来源: 旧版本迁移\n';;
-      imported) printf '来源: 手动导入\n';;
-      letsencrypt) printf '来源: Let'"'"'s Encrypt\n';;
-      *)        [[ -n $source ]] && printf '来源: %s\n' "$source";;
+      legacy)      source_disp="旧版本迁移" ;;
+      imported)    source_disp="手动导入" ;;
+      letsencrypt) source_disp="Let's Encrypt" ;;
+      *)           source_disp=${source:-未知} ;;
     esac
-    [[ -n $validation && $validation != "legacy" ]] && printf '验证: %s\n' "$validation"
     if [[ $auto_renew == "true" ]]; then
       if [[ $validation == dns-cloudflare ]] && ! load_cloudflare_credentials; then
-        printf '自动续期: 是（阻塞：Cloudflare 凭据缺失）\n'
+        renew_disp=$(ui_badge warn "阻塞（Cloudflare 凭据缺失）")
       else
-        printf '自动续期: 是\n'
+        renew_disp=$(ui_badge ok "已开启")
       fi
     else
-      printf '自动续期: 否\n'
+      renew_disp=$(ui_badge muted "未开启")
     fi
-    case $source in
-      legacy) printf '状态: 需重新签发以恢复自动续期\n';;
-    esac
+    ui_card_open "证书 · ${id}"
+    [[ -n $subject && $subject != "$id" ]] && ui_card_kv "域名 / IP" "$subject" 12
+    [[ -n $cert_name && $cert_name != "$id" ]] && ui_card_kv "Certbot 名称" "$cert_name" 12
+    ui_card_kv "来源" "$source_disp" 12
+    [[ -n $validation && $validation != "legacy" ]] && ui_card_kv "验证方式" "$validation" 12
+    ui_card_kv "自动续期" "$renew_disp" 12
+    [[ $source == legacy ]] && ui_card_kv "状态提示" "$(ui_badge warn "需重新签发以恢复自动续期")" 12
     if [[ -r $cert ]]; then
-      openssl x509 -in "$cert" -noout -subject -issuer -dates 2>/dev/null | sed 's/^/  /'
+      while IFS= read -r x509_line; do
+        ui_card_line "${C_DIM}${x509_line}${C_RESET}"
+      done < <(openssl x509 -in "$cert" -noout -subject -issuer -dates 2>/dev/null || true)
     else
-      printf '[证书文件缺失]\n'
+      ui_card_kv "证书文件" "$(ui_badge err "文件缺失")" 12
     fi
-    printf '\n'
+    ui_card_close
   done < <(meta_cert_list)
   ((found)) || info "还没有托管证书。"
 }

@@ -123,27 +123,48 @@ add_inbound() {
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
   XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
   traffic_after_config_change || warn "入站已创建，但流量规则暂未同步，采集任务会自动重试。"
-  heading "入站已创建"
-  show_inbound "$tag"
+  info "入站 ${tag} 已创建并部署生效。"
   print_links "$tag" "" || true
 }
 
 list_inbounds() {
   ensure_config
-  local count
+  local count tag protocol port method security listen users sec_disp
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站。"; return; fi
-  print_table_cell_clipped "标签" 20; printf '| '; print_table_cell_clipped "协议" 8; printf '| '
-  print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 7; printf '| '
-  print_table_cell_clipped "安全" 10; printf '| 监听\n'
+  printf '  %s' "$C_DIM"
+  print_table_cell_clipped "标签" 18; printf ' │ '
+  print_table_cell_clipped "协议" 6; printf ' │ '
+  print_table_cell "端口" 6; printf ' │ '
+  print_table_cell_clipped "传输" 6; printf ' │ '
+  print_table_cell_clipped "安全" 8; printf ' │ '
+  print_table_cell "用户" 4; printf ' │ 监听%s\n' "$C_RESET"
+  ui_rule 2
   jq -r '.inbounds | to_entries[] |
     [.value.tag,.value.protocol,(.value.port|tostring),
-     (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end),
-     (.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r tag protocol port method security listen; do
-        print_table_cell_clipped "$tag" 20; printf '| '; print_table_cell_clipped "$protocol" 8; printf '| '
-        print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 7; printf '| '
-        print_table_cell_clipped "$security" 10; printf '| %s\n' "$listen"
+     (if .value.protocol=="vless" then
+        (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end)
+      else "-" end),
+     (if .value.protocol=="vless" then (.value.streamSettings.security // "none")
+      elif .value.protocol=="socks" then (.value.settings.auth // "noauth")
+      elif (((.value.settings.accounts // .value.settings.users // [])|length)>0) then "password"
+      else "noauth" end),
+     (if .value.protocol=="vless" then (.value.settings.clients // [] | length)
+      else ((.value.settings.accounts // .settings.users // []) | length) end | tostring),
+     (.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r tag protocol port method security users listen; do
+        case $security in
+          reality) sec_disp="${C_CYAN}${security}${C_RESET}" ;;
+          tls|password) sec_disp="${C_GREEN}${security}${C_RESET}" ;;
+          none|noauth) sec_disp="${C_YELLOW}${security}${C_RESET}" ;;
+          *) sec_disp="$security" ;;
+        esac
+        printf '  '; print_table_cell_clipped "$tag" 18; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$protocol" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$port" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$method" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$sec_disp" 8; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$users" 4; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$listen"
       done
 }
 
@@ -294,7 +315,7 @@ http_inbound_has_auth() {
 
 list_clients() {
   ensure_config
-  local tag=${1-} protocol count
+  local tag=${1-} protocol count number label credential
   [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
@@ -305,18 +326,25 @@ list_clients() {
     count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])|length' "$CONFIG_FILE")
   fi
   if ((count == 0)); then info "还没有用户。"; return; fi
+  printf '  %s' "$C_DIM"
+  print_table_cell "序号" 5; printf ' │ '
+  print_table_cell "用户" 16; printf ' │ 凭据 (%s)%s\n' "$([[ $protocol == vless ]] && printf 'UUID' || printf '密码')" "$C_RESET"
+  ui_rule 2
   case $protocol in
     vless)
-      print_table_cell "序号" 5; print_table_cell "用户" 16; print_table_cell "凭据" 40; printf '\n'
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.xrayctlLabel // .value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
         | while IFS=$'\t' read -r number label credential; do
-        print_table_cell "$number" 5; print_table_cell "$label" 16; print_table_cell "$credential" 40; printf '\n'
+        printf '  '; print_table_cell "$number" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$label" 16; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$credential"
       done
       ;;
     socks|http)
-      print_table_cell "序号" 5; print_table_cell "用户" 16; printf '凭据\n'
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|to_entries[]|[.key+1,.value.user,(.value.pass // "-")]|@tsv' "$CONFIG_FILE" \
-        | while IFS=$'\t' read -r number label credential; do print_table_cell "$number" 5; print_table_cell "$label" 16; printf '%s\n' "$credential"; done ;;
+        | while IFS=$'\t' read -r number label credential; do
+        printf '  '; print_table_cell "$number" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$label" 16; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$credential"
+      done
+      ;;
     *) die "${protocol} 不支持独立多用户管理。";;
   esac
 }

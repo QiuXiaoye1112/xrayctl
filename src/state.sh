@@ -387,7 +387,12 @@ state_commit() {
   else
     ensure_config
   fi
-  validate_candidate "$candidate" || return 1
+  ui_step 1 3 "校验 JSON 与 Xray 核心"
+  if ! validate_candidate "$candidate"; then
+    ui_step_done fail
+    return 1
+  fi
+  ui_step_done ok
   service_is_active && old_active=1
   if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} != 1 ]]; then setup_runtime_access || return 1; fi
 
@@ -425,27 +430,39 @@ state_commit() {
     fi
   fi
 
+  ui_step 2 3 "备份并写入配置与元数据"
   if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$CONFIG_FILE"; then
+    ui_step_done fail
     ((traffic_locked == 0)) || traffic_lock_release
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
   fi
 
   if [[ -n $meta_candidate ]] && ! install -m 600 "$meta_candidate" "$META_FILE"; then
+    ui_step_done fail
     error "metadata 提交失败，正在回滚配置和 metadata。"
     _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
     ((traffic_locked == 0)) || traffic_lock_release
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
   fi
+  ui_step_done ok
 
-  if ((old_active)) && ! restart_service; then
-    error "重启失败，正在回滚配置和 metadata。"
-    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
-    restart_service || true
-    ((traffic_locked == 0)) || traffic_lock_release
-    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
-    return 1
+  if ((old_active)); then
+    ui_step 3 3 "重启 Xray 服务使变更生效"
+    if ! restart_service; then
+      ui_step_done fail "已回滚"
+      error "重启失败，正在回滚配置和 metadata。"
+      _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
+      restart_service || true
+      ((traffic_locked == 0)) || traffic_lock_release
+      _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+      return 1
+    fi
+    ui_step_done ok
+  else
+    ui_step 3 3 "检查服务状态"
+    ui_step_done ok "服务未运行，无需重启"
   fi
 
   # Moving a managed inbound's records must happen before the timer can sample
