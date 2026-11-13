@@ -526,7 +526,8 @@ traffic_user_enable() {
 traffic_user_ensure_configured() {
   traffic_user_has_clients || return 0
   traffic_user_managed_config && return 0
-  traffic_user_enable
+  # Initialization must not leave its management lock in a menu/read caller.
+  ( traffic_user_enable )
 }
 
 traffic_user_select() {
@@ -1455,6 +1456,7 @@ traffic_rename_records_locked() {
 
 traffic_after_config_change() {
   local old=${1-} new=${2-}
+  traffic_systemd_refresh_write_paths || return 1
   [[ -f $TRAFFIC_FILE ]] || return 0
   # Move the stable user identities before sampling the renamed config. If we
   # sampled first, the new tag would get a second baseline for the same user.
@@ -1678,10 +1680,62 @@ traffic_clear_all_records() {
   info "已清空全部入站流量记录。"
 }
 
+# Xray opens file logs during run -test. Include configured log parents as well
+# as managed state paths, without granting write access to the entire root.
+traffic_systemd_write_paths() {
+  local log_paths="" path
+  local -a paths=("$(dirname "$TRAFFIC_FILE")" "$(dirname "$TRAFFIC_LOCK")"
+    "$(dirname "$LOCK_FILE")" "$(dirname "$CONFIG_FILE")" "$(dirname "$META_FILE")" "$LOG_DIR" /run/xtables.lock)
+  if [[ -r $CONFIG_FILE ]]; then
+    log_paths=$(jq -r '
+      [.log.access?, .log.error?] | map(select(.!=null and .!="" and .!="none")) |
+      if any(.[]; type!="string" or test("[\\x00-\\x1f\\x7f]")) then error("invalid log path") else .[] end
+    ' "$CONFIG_FILE") || return 1
+    while IFS= read -r path; do
+      [[ -n $path ]] || continue
+      [[ $path == /dev/* ]] && continue
+      [[ $path == /* ]] || { error "采集服务要求日志使用绝对路径：$path"; return 1; }
+      paths+=("$(dirname "$path")")
+    done <<<"$log_paths"
+  fi
+  local index
+  for index in "${!paths[@]}"; do
+    path=${paths[$index]}
+    [[ ! -d $path ]] || path=$(cd "$path" && pwd -P) || return 1
+    paths[index]=$path
+    [[ $path == /* && ! $path =~ ^/+$ && $path != */../* && $path != */.. && $path != */./* && $path != */. && $path != *$'\n'* && $path != *$'\r'* ]] || {
+      error "采集服务写入目录无效或范围过大：$path"; return 1;
+    }
+  done
+  # Quote spaces/backslashes and escape systemd specifiers in path values.
+  while IFS= read -r path; do
+    # A custom file-log configuration may not use the managed default at all.
+    if [[ $path == /run/xtables.lock || ( $path == "$LOG_DIR" && ! -e $path ) ]]; then path="-$path"; fi
+    path=${path//\\/\\\\}
+    path=${path//\"/\\\"}
+    path=${path//%/%%}
+    printf '"%s" ' "$path"
+  done < <(printf '%s\n' "${paths[@]}" | sort -u)
+}
+
+# Configuration edits can move file logs after the collector was installed.
+# Only refresh units recorded as owned by this manager, and only when changed.
+traffic_systemd_refresh_write_paths() {
+  [[ -f $TRAFFIC_SYSTEMD_SERVICE && -r $META_FILE ]] || return 0
+  jq -e --arg unit "$TRAFFIC_SYSTEMD_SERVICE" '.managedResources.trafficService==$unit' "$META_FILE" >/dev/null 2>&1 || return 0
+  [[ $(platform_init_system) == systemd ]] || return 0
+  local expected
+  expected=$(traffic_systemd_write_paths) || return 1
+  grep -Fxq "ReadWritePaths=$expected" "$TRAFFIC_SYSTEMD_SERVICE" && return 0
+  traffic_timer_install
+}
+
 traffic_timer_install() {
   [[ -x $QUICK_COMMAND ]] || install_quick_command
   case $(platform_init_system) in
     systemd)
+      local write_paths
+      write_paths=$(traffic_systemd_write_paths) || return 1
       cat >"$TRAFFIC_SYSTEMD_SERVICE" <<EOF_SERVICE
 [Unit]
 Description=Collect xrayctl per-inbound traffic counters
@@ -1689,13 +1743,16 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+# Prepare this single runtime file before constructing the read-only namespace.
+# The collector itself retains the strict filesystem sandbox.
+ExecStartPre=+/usr/bin/touch /run/xtables.lock
 ExecStart=${QUICK_COMMAND} internal-traffic-collect
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=$(dirname "$TRAFFIC_FILE") $(dirname "$TRAFFIC_LOCK") $(dirname "$CONFIG_FILE") $(dirname "$META_FILE")
+ReadWritePaths=$write_paths
 EOF_SERVICE
       cat >"$TRAFFIC_SYSTEMD_TIMER" <<EOF_TIMER
 [Unit]
