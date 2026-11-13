@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="81e2892a61f0"
+readonly XRAYCTL_BUILD_COMMIT="1128eac8b908"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -4449,7 +4449,8 @@ traffic_user_enable() {
 traffic_user_ensure_configured() {
   traffic_user_has_clients || return 0
   traffic_user_managed_config && return 0
-  traffic_user_enable
+  # Initialization must not leave its management lock in a menu/read caller.
+  ( traffic_user_enable )
 }
 
 traffic_user_select() {
