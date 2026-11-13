@@ -613,3 +613,51 @@ fi
 BASH_BACKEND_COLLISION
 
 printf 'traffic accounting unit checks passed.\n'
+
+# Sandbox write paths include actual file logs and distinct management locks.
+mkdir -p "$TMP/sandbox"
+CASE_DIR="$TMP/sandbox" XRAYCTL_TESTING=1 \
+XRAYCTL_CONFIG_FILE="$TMP/sandbox/config.json" \
+XRAYCTL_LOG_DIR="$TMP/sandbox/managed logs" \
+XRAYCTL_LOCK_FILE="$TMP/sandbox/manager/lock" \
+XRAYCTL_TRAFFIC_LOCK="$TMP/sandbox/counters/lock" bash <<'BASH_SANDBOX'
+set -Eeuo pipefail
+source ./xrayctl.sh
+mkdir -p "$LOG_DIR"
+jq -n --arg path "$CASE_DIR/custom logs%literal/access.log" '{log:{access:$path,error:"none"}}' >"$CONFIG_FILE"
+paths=$(traffic_systemd_write_paths)
+[[ $paths == *'"-/run/xtables.lock"'* ]]
+[[ $paths == *"\"$CASE_DIR/custom logs%%literal\""* ]]
+[[ $paths == *"\"$CASE_DIR/managed logs\""* ]]
+[[ $paths == *"\"$CASE_DIR/manager\""* && $paths == *"\"$CASE_DIR/counters\""* ]]
+rmdir "$LOG_DIR"
+paths=$(traffic_systemd_write_paths)
+[[ $paths == *"\"-$LOG_DIR\""* ]]
+LOG_DIR="$CASE_DIR/unused logs%literal"
+paths=$(traffic_systemd_write_paths)
+[[ $paths == *"\"-$CASE_DIR/unused logs%%literal\""* ]]
+printf '%s\n' '{"log":{"access":"/access.log"}}' >"$CONFIG_FILE"
+if traffic_systemd_write_paths >/dev/null 2>&1; then exit 1; fi
+jq -n '{log:{access:"/tmp/log\nInjected"}}' >"$CONFIG_FILE"
+if traffic_systemd_write_paths >/dev/null 2>&1; then exit 1; fi
+# Editing configured log destinations refreshes only the manager-owned unit.
+TRAFFIC_SYSTEMD_SERVICE="$CASE_DIR/collector.service"
+META_FILE="$CASE_DIR/meta.json"
+jq -n --arg unit "$TRAFFIC_SYSTEMD_SERVICE" '{managedResources:{trafficService:$unit}}' >"$META_FILE"
+printf '[Service]\nReadWritePaths=/old\n' >"$TRAFFIC_SYSTEMD_SERVICE"
+printf '%s\n' '{"log":{"access":"/var/log/new-xray/access.log"}}' >"$CONFIG_FILE"
+platform_init_system() { printf systemd; }
+calls=0
+traffic_timer_install() {
+  calls=$((calls+1))
+  printf 'ReadWritePaths=%s\n' "$(traffic_systemd_write_paths)" >"$TRAFFIC_SYSTEMD_SERVICE"
+}
+traffic_systemd_refresh_write_paths
+[[ $calls == 1 ]]
+traffic_systemd_refresh_write_paths
+[[ $calls == 1 ]]
+printf '%s\n' '{"log":{"access":"/var/log/moved-xray/access.log"}}' >"$CONFIG_FILE"
+traffic_systemd_refresh_write_paths
+[[ $calls == 2 ]]
+printf 'ok - sandbox paths cover logs and locks, reject unsafe paths, and refresh after log edits\n'
+BASH_SANDBOX
