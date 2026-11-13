@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="f8240385b171"
+readonly XRAYCTL_BUILD_COMMIT="88f9915a3e79"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -57,12 +57,237 @@ CERTBOT_SHARED_LOCK_WAIT="${XRAYCTL_CERTBOT_SHARED_LOCK_WAIT:-300}"
 CLOUDFLARE_INI="${XRAYCTL_CLOUDFLARE_INI:-/etc/xrayctl/cloudflare.ini}"
 CERT_RENEW_HOOK="${XRAYCTL_CERT_RENEW_HOOK:-/etc/periodic/daily/xrayctl-certbot-renew}"
 
+readonly _ANSI_RED=$'\033[31m' _ANSI_GREEN=$'\033[32m' _ANSI_YELLOW=$'\033[33m'
+readonly _ANSI_BLUE=$'\033[34m' _ANSI_CYAN=$'\033[36m'
+readonly _ANSI_BOLD=$'\033[1m' _ANSI_DIM=$'\033[2m' _ANSI_RESET=$'\033[0m'
+
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
-  C_BLUE=$'\033[34m'; C_CYAN=$'\033[36m'; C_BOLD=$'\033[1m'; C_RESET=$'\033[0m'
+  C_RED=$_ANSI_RED; C_GREEN=$_ANSI_GREEN; C_YELLOW=$_ANSI_YELLOW; C_CYAN=$_ANSI_CYAN
+  C_BOLD=$_ANSI_BOLD; C_DIM=$_ANSI_DIM; C_RESET=$_ANSI_RESET
 else
-  C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_CYAN=""; C_BOLD=""; C_RESET=""
+  C_RED=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""
+  C_BOLD=""; C_DIM=""; C_RESET=""
 fi
+
+_ui_put() {
+  local style=$1 text=$2 fd=${3:-1}
+  if [[ -t $fd && -z ${NO_COLOR:-} ]]; then
+    printf '%s%s%s' "$style" "$text" "$_ANSI_RESET" >&"$fd"
+  else
+    printf '%s' "$text" >&"$fd"
+  fi
+}
+
+ui_width() {
+  local cols=${COLUMNS:-}
+  if [[ ! $cols =~ ^[0-9]+$ ]] && [[ -t 1 ]] && command_exists tput; then
+    cols=$(tput cols 2>/dev/null || true)
+  fi
+  if [[ ! $cols =~ ^[0-9]+$ ]] || ((cols <= 0)); then
+    cols=72
+  fi
+  ((cols < 64)) && cols=64
+  ((cols > 78)) && cols=78
+  printf '%s' "$cols"
+}
+
+ui_repeat() {
+  local char=$1 count=$2 out="" i
+  ((count > 0)) || return 0
+  for ((i=0; i<count; i++)); do out+=$char; done
+  printf '%s' "$out"
+}
+
+ui_rule() {
+  local indent=${1:-2} width
+  width=$(( $(ui_width) - indent ))
+  ((width > 10)) || width=10
+  printf '%*s' "$indent" ''
+  _ui_put "$_ANSI_DIM" "$(ui_repeat '─' "$width")"
+  printf '\n'
+}
+
+ui_badge() {
+  local tone=$1 text=$2
+  case $tone in
+    ok)    _ui_put "$_ANSI_GREEN" "● ${text}" ;;
+    warn)  _ui_put "$_ANSI_YELLOW" "● ${text}" ;;
+    err)   _ui_put "$_ANSI_RED" "● ${text}" ;;
+    info)  _ui_put "$_ANSI_CYAN" "◆ ${text}" ;;
+    muted) _ui_put "$_ANSI_DIM" "○ ${text}" ;;
+    *)     printf '%s' "$text" ;;
+  esac
+}
+
+ui_banner() {
+  local title=$1 right=${2-} width inner pad title_w right_w border
+  width=$(ui_width)
+  inner=$((width - 4))
+  display_width title_w "$title"
+  display_width right_w "$right"
+  pad=$((inner - title_w - right_w - 2))
+  ((pad >= 1)) || pad=1
+  border=$(ui_repeat '─' "$inner")
+  printf '\n  '; _ui_put "$_ANSI_CYAN" "╭${border}╮"; printf '\n'
+  printf '  '; _ui_put "$_ANSI_CYAN" '│'; printf ' '
+  _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "$title"
+  printf '%*s' "$pad" ''
+  _ui_put "$_ANSI_DIM" "$right"
+  printf ' '; _ui_put "$_ANSI_CYAN" '│'; printf '\n'
+  printf '  '; _ui_put "$_ANSI_CYAN" "╰${border}╯"; printf '\n'
+}
+
+ui_section() {
+  printf '\n  '
+  _ui_put "${_ANSI_BOLD}${_ANSI_BLUE}" "▸ ${1}"
+  printf '\n'
+}
+
+ui_menu_group() {
+  printf '\n  '
+  _ui_put "${_ANSI_BOLD}${_ANSI_BLUE}" "▸ ${1}"
+  printf '\n'
+}
+
+ui_menu_item() {
+  local key=$1 label=$2 desc=${3-}
+  printf '    '
+  _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "${key})"
+  if [[ -n $desc ]]; then
+    printf ' '
+    print_table_cell "$label" 18
+    printf ' '
+    _ui_put "$_ANSI_DIM" "$desc"
+  else
+    printf ' %s' "$label"
+  fi
+  printf '\n'
+}
+
+ui_menu_footer() {
+  local label=${1:-返回}
+  printf '\n'
+  ui_rule 2
+  printf '    '
+  _ui_put "${_ANSI_DIM}${_ANSI_BOLD}" '0)'
+  printf ' %s\n' "$label"
+}
+
+ui_kv() {
+  local label=$1 value=$2 width=${3:-12} cell
+  printf -v cell '%s' "$label"
+  printf '  '
+  if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+    printf '%s' "$_ANSI_DIM"
+    print_table_cell "$cell" "$width"
+    printf '%s' "$_ANSI_RESET"
+  else
+    print_table_cell "$cell" "$width"
+  fi
+  printf ' %s\n' "$value"
+}
+
+ui_card_open() {
+  local title=$1 width bar_len title_w
+  width=$(ui_width)
+  display_width title_w "$title"
+  bar_len=$((width - title_w - 6))
+  ((bar_len >= 4)) || bar_len=4
+  printf '\n  '
+  _ui_put "$_ANSI_DIM" '┌─ '
+  _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "$title"
+  printf ' '
+  _ui_put "$_ANSI_DIM" "$(ui_repeat '─' "$bar_len")"
+  printf '\n'
+}
+
+ui_card_kv() {
+  local label=$1 value=$2 width=${3:-12}
+  printf '  '
+  _ui_put "$_ANSI_DIM" '│'
+  printf ' '
+  if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+    printf '%s' "$_ANSI_DIM"
+    print_table_cell "$label" "$width"
+    printf '%s' "$_ANSI_RESET"
+  else
+    print_table_cell "$label" "$width"
+  fi
+  printf ' %s\n' "$value"
+}
+
+ui_card_line() {
+  printf '  '
+  _ui_put "$_ANSI_DIM" '│'
+  printf ' %s\n' "$1"
+}
+
+ui_card_close() {
+  local width
+  width=$(( $(ui_width) - 3 ))
+  ((width > 10)) || width=10
+  printf '  '
+  _ui_put "$_ANSI_DIM" "└$(ui_repeat '─' "$width")"
+  printf '\n'
+}
+
+ui_wizard_step() {
+  local step=$1 total=$2 title=$3 hint=${4-} width bar_len header_text header_w badge
+  width=$(ui_width)
+  if [[ -n $total && $total != 0 ]]; then
+    badge="[${step}/${total}]"
+  else
+    badge="[步骤 ${step}]"
+  fi
+  header_text="${badge} ${title}"
+  display_width header_w "$header_text"
+  bar_len=$((width - header_w - 6))
+  ((bar_len >= 4)) || bar_len=4
+  printf '\n  '
+  _ui_put "$_ANSI_DIM" '┌─ '
+  _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "$badge"
+  printf ' '
+  _ui_put "$_ANSI_BOLD" "$title"
+  printf ' '
+  _ui_put "$_ANSI_DIM" "$(ui_repeat '─' "$bar_len")"
+  printf '\n'
+  if [[ -n $hint ]]; then
+    printf '  '
+    _ui_put "$_ANSI_DIM" '│'
+    printf ' '
+    _ui_put "$_ANSI_DIM" "$hint"
+    printf '\n'
+  fi
+}
+
+ui_progress_enabled() {
+  [[ ${XRAYCTL_UI_PROGRESS:-} == 1 ]] && return 0
+  [[ ${XRAYCTL_UI_PROGRESS:-} == 0 ]] && return 1
+  [[ -t 1 && ${XRAYCTL_TESTING:-0} != 1 ]]
+}
+
+ui_step() {
+  local step=$1 total=$2 label=$3
+  ui_progress_enabled || return 0
+  printf '  ' >&2
+  _ui_put "$_ANSI_CYAN" "[${step}/${total}]" 2
+  printf ' %s ... ' "$label" >&2
+}
+
+ui_step_done() {
+  local status=${1:-ok} detail=${2-}
+  ui_progress_enabled || return 0
+  case $status in
+    ok)   _ui_put "$_ANSI_GREEN" '✓' 2 ;;
+    warn) _ui_put "$_ANSI_YELLOW" '!' 2 ;;
+    fail) _ui_put "$_ANSI_RED" '✗' 2 ;;
+  esac
+  if [[ -n $detail ]]; then
+    printf ' ' >&2
+    _ui_put "$_ANSI_DIM" "$detail" 2
+  fi
+  printf '\n' >&2
+}
 
 print_notice() {
   local label=$1 color=$2 title=${3-} detail line rendered
@@ -87,7 +312,25 @@ info()    { print_notice "信息" "$C_GREEN" "${1-}" "${@:2}"; }
 warn()    { print_notice "警告" "$C_YELLOW" "${1-}" "${@:2}" >&2; }
 error()   { print_notice "错误" "$C_RED" "${1-}" "${@:2}" >&2; }
 die()     { error "$*"; exit 1; }
-heading() { printf '\n%s%s%s\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"; }
+heading() {
+  local title="$*" width bar_len title_w
+  width=$(ui_width)
+  if [[ -n ${XRAYCTL_UI_CRUMB:-} ]]; then
+    printf '\n  '
+    _ui_put "$_ANSI_DIM" "$XRAYCTL_UI_CRUMB"
+    printf '\n'
+  else
+    printf '\n'
+  fi
+  display_width title_w "$title"
+  bar_len=$((width - title_w - 5))
+  ((bar_len >= 4)) || bar_len=4
+  printf '  '
+  _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "▸ ${title}"
+  printf ' '
+  _ui_put "$_ANSI_DIM" "$(ui_repeat '─' "$bar_len")"
+  printf '\n'
+}
 clear_screen() { clear 2>/dev/null || true; }
 
 on_error() {
@@ -183,8 +426,14 @@ prompt_hidden_secret() {
 choose() {
   local __var=$1 prompt=$2; shift 2
   local options=("$@") selected_value i
-  printf '%s\n' "$prompt"
-  for ((i=0; i<${#options[@]}; i++)); do printf '  %d) %s\n' "$((i+1))" "${options[$i]}"; done
+  printf '\n  '
+  _ui_put "$_ANSI_BOLD" "$prompt"
+  printf '\n'
+  for ((i=0; i<${#options[@]}; i++)); do
+    printf '    '
+    _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "$((i+1)))"
+    printf ' %s\n' "${options[$i]}"
+  done
   while true; do
     read -r -p "请选择 [1-${#options[@]}]: " selected_value || { cancel_selection; return 1; }
     if [[ $selected_value =~ ^[0-9]+$ ]] && (( selected_value >= 1 && selected_value <= ${#options[@]} )); then
@@ -226,12 +475,17 @@ prompt_validated_value() {
 }
 
 display_width() {
-  local __var=$1 value=$2 char code computed_width=0 i
+  local __var=$1 value=$2 char code b1 b2 cp computed_width=0 i len
   local LC_ALL=C
-  for ((i=0; i<${#value}; i++)); do
-    # The infinity symbol occupies one terminal column, unlike CJK text.
-    if [[ ${value:i:3} == $'\xe2\x88\x9e' ]]; then
-      ((computed_width+=1, i+=2))
+  len=${#value}
+  for ((i=0; i<len; i++)); do
+    if [[ ${value:i:2} == $'\033[' ]]; then
+      ((i+=2))
+      while ((i < len)); do
+        char=${value:i:1}
+        [[ $char == m ]] && break
+        ((i+=1))
+      done
       continue
     fi
     char=${value:i:1}
@@ -239,6 +493,20 @@ display_width() {
     ((code < 0)) && ((code+=256))
     if ((code < 128)); then
       ((computed_width+=1))
+    elif ((code >= 194 && code <= 223 && i + 1 < len)); then
+      ((computed_width+=1, i+=1))
+    elif ((code >= 224 && code <= 239 && i + 2 < len)); then
+      printf -v b1 '%d' "'${value:i+1:1}"; ((b1 < 0)) && ((b1+=256))
+      printf -v b2 '%d' "'${value:i+2:1}"; ((b2 < 0)) && ((b2+=256))
+      cp=$(( ((code & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63) ))
+      if ((cp >= 0x2010 && cp <= 0x27BF)); then
+        ((computed_width+=1))
+      else
+        ((computed_width+=2))
+      fi
+      ((i+=2))
+    elif ((code >= 240 && code <= 244 && i + 3 < len)); then
+      ((computed_width+=2, i+=3))
     elif (( (code & 0xC0) != 0x80 )); then
       ((computed_width+=2))
     fi
@@ -1117,7 +1385,12 @@ state_commit() {
   else
     ensure_config
   fi
-  validate_candidate "$candidate" || return 1
+  ui_step 1 3 "校验 JSON 与 Xray 核心"
+  if ! validate_candidate "$candidate"; then
+    ui_step_done fail
+    return 1
+  fi
+  ui_step_done ok
   service_is_active && old_active=1
   if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} != 1 ]]; then setup_runtime_access || return 1; fi
 
@@ -1155,27 +1428,39 @@ state_commit() {
     fi
   fi
 
+  ui_step 2 3 "备份并写入配置与元数据"
   if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$CONFIG_FILE"; then
+    ui_step_done fail
     ((traffic_locked == 0)) || traffic_lock_release
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
   fi
 
   if [[ -n $meta_candidate ]] && ! install -m 600 "$meta_candidate" "$META_FILE"; then
+    ui_step_done fail
     error "metadata 提交失败，正在回滚配置和 metadata。"
     _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
     ((traffic_locked == 0)) || traffic_lock_release
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
   fi
+  ui_step_done ok
 
-  if ((old_active)) && ! restart_service; then
-    error "重启失败，正在回滚配置和 metadata。"
-    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
-    restart_service || true
-    ((traffic_locked == 0)) || traffic_lock_release
-    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
-    return 1
+  if ((old_active)); then
+    ui_step 3 3 "重启 Xray 服务使变更生效"
+    if ! restart_service; then
+      ui_step_done fail "已回滚"
+      error "重启失败，正在回滚配置和 metadata。"
+      _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
+      restart_service || true
+      ((traffic_locked == 0)) || traffic_lock_release
+      _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+      return 1
+    fi
+    ui_step_done ok
+  else
+    ui_step 3 3 "检查服务状态"
+    ui_step_done ok "服务未运行，无需重启"
   fi
 
   # Moving a managed inbound's records must happen before the timer can sample
@@ -1495,6 +1780,7 @@ generate_reality_keys() {
 build_stream_settings() {
   local protocol=$1 __json=$2 __public_key=$3
   local transport_choice security_choice method security path target sni private public short_id cert key alpn json
+  ui_wizard_step 2 4 "传输与安全配置"
   case $protocol in
     vless)
       choose security_choice "选择加密方式" "REALITY" "TLS" "无" || return 1
@@ -2212,6 +2498,7 @@ issue_certificate() {
   local was_active=0 rc=0
 
   if [[ -z $domain ]]; then
+    ui_wizard_step 1 3 "指定证书域名或公网 IP"
     local default_domain
     default_domain=$(detect_public_ip || true)
     prompt_validated_value domain "证书域名/IP" "$default_domain" validate_domain_or_ip "域名/IP 无效，请重新输入。" || return 1
@@ -2230,6 +2517,7 @@ issue_certificate() {
 
   # Choose verification method for domains
   if [[ $mode == domain ]]; then
+    ui_wizard_step 2 3 "选择所有权验证方式"
     local cf_label="Cloudflare DNS 自动验证"
     local dns_label="DNS 手动验证（无法自动续期）"
     local http_label="HTTP 自动验证"
@@ -2249,7 +2537,14 @@ issue_certificate() {
     fi
   fi
 
-  [[ -n $email ]] || prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。" || return 1
+  if [[ -z $email ]]; then
+    if [[ $mode == domain ]]; then
+      ui_wizard_step 3 3 "填写 Let's Encrypt 联系邮箱"
+    else
+      ui_wizard_step 2 2 "填写 Let's Encrypt 联系邮箱"
+    fi
+    prompt_validated_value email "Let's Encrypt 联系邮箱" "" validate_email_address "邮箱格式无效，请重新输入。" || return 1
+  fi
   validate_email_address "$email" || die "邮箱格式无效。"
 
   # Check if cert already exists
@@ -2362,7 +2657,8 @@ import_certificate() {
 
 list_certificates() {
   ensure_meta
-  local id cert found=0 source validation auto_renew subject cert_name
+  local id cert found=0 source validation auto_renew subject cert_name source_disp renew_disp x509_line
+  heading "托管证书列表"
   while IFS= read -r id; do
     [[ -n $id ]] || continue
     cert="${CERT_DIR}/${id}.crt"
@@ -2372,34 +2668,36 @@ list_certificates() {
     source=$(meta_cert_get_field "$id" source)
     validation=$(meta_cert_get_field "$id" validation)
     auto_renew=$(meta_cert_get_field "$id" autoRenew)
-    printf '标识: %s\n' "$id"
-    [[ -n $subject && $subject != "$id" ]] && printf '域名/IP: %s\n' "$subject"
-    [[ -n $cert_name && $cert_name != "$id" ]] && printf 'Certbot名称: %s\n' "$cert_name"
     case $source in
-      legacy)   printf '来源: 旧版本迁移\n';;
-      imported) printf '来源: 手动导入\n';;
-      letsencrypt) printf '来源: Let'"'"'s Encrypt\n';;
-      *)        [[ -n $source ]] && printf '来源: %s\n' "$source";;
+      legacy)      source_disp="旧版本迁移" ;;
+      imported)    source_disp="手动导入" ;;
+      letsencrypt) source_disp="Let's Encrypt" ;;
+      *)           source_disp=${source:-未知} ;;
     esac
-    [[ -n $validation && $validation != "legacy" ]] && printf '验证: %s\n' "$validation"
     if [[ $auto_renew == "true" ]]; then
       if [[ $validation == dns-cloudflare ]] && ! load_cloudflare_credentials; then
-        printf '自动续期: 是（阻塞：Cloudflare 凭据缺失）\n'
+        renew_disp=$(ui_badge warn "阻塞（Cloudflare 凭据缺失）")
       else
-        printf '自动续期: 是\n'
+        renew_disp=$(ui_badge ok "已开启")
       fi
     else
-      printf '自动续期: 否\n'
+      renew_disp=$(ui_badge muted "未开启")
     fi
-    case $source in
-      legacy) printf '状态: 需重新签发以恢复自动续期\n';;
-    esac
+    ui_card_open "证书 · ${id}"
+    [[ -n $subject && $subject != "$id" ]] && ui_card_kv "域名 / IP" "$subject" 12
+    [[ -n $cert_name && $cert_name != "$id" ]] && ui_card_kv "Certbot 名称" "$cert_name" 12
+    ui_card_kv "来源" "$source_disp" 12
+    [[ -n $validation && $validation != "legacy" ]] && ui_card_kv "验证方式" "$validation" 12
+    ui_card_kv "自动续期" "$renew_disp" 12
+    [[ $source == legacy ]] && ui_card_kv "状态提示" "$(ui_badge warn "需重新签发以恢复自动续期")" 12
     if [[ -r $cert ]]; then
-      openssl x509 -in "$cert" -noout -subject -issuer -dates 2>/dev/null | sed 's/^/  /'
+      while IFS= read -r x509_line; do
+        ui_card_line "${C_DIM}${x509_line}${C_RESET}"
+      done < <(openssl x509 -in "$cert" -noout -subject -issuer -dates 2>/dev/null || true)
     else
-      printf '[证书文件缺失]\n'
+      ui_card_kv "证书文件" "$(ui_badge err "文件缺失")" 12
     fi
-    printf '\n'
+    ui_card_close
   done < <(meta_cert_list)
   ((found)) || info "还没有托管证书。"
 }
@@ -2767,9 +3065,13 @@ protocol_build() {
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3
   local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
+  local total_steps=3 listen_step=2 user_step=3
+  ui_wizard_step 1 "" "选择入站协议"
   choose choice "选择入站协议" "VLESS" "SOCKS5" "HTTP" || return 1
   case $choice in
-    1) protocol=vless;; 2) protocol=socks;; 3) protocol=http;;
+    1) protocol=vless; total_steps=4; listen_step=3; user_step=4 ;;
+    2) protocol=socks ;;
+    3) protocol=http ;;
   esac
 
   if protocol_supports_stream "$protocol"; then
@@ -2777,6 +3079,7 @@ build_inbound() {
     suggested_host=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
   fi
 
+  ui_wizard_step "$listen_step" "$total_steps" "监听参数与连接地址"
   prompt_tag tag "${protocol}-$(random_hex 2)" || return 1
   prompt_value listen "监听地址" "0.0.0.0" || return 1
   suggest_available_port suggested_port || suggested_port=443
@@ -2788,6 +3091,7 @@ build_inbound() {
     prompt_public_host public_host "" "$suggested_host" || return 1
   fi
 
+  ui_wizard_step "$user_step" "$total_steps" "创建初始访问用户"
   case $protocol in
     vless)
       prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol" || return 1
@@ -2934,27 +3238,48 @@ add_inbound() {
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
   XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
   traffic_after_config_change || warn "入站已创建，但流量规则暂未同步，采集任务会自动重试。"
-  heading "入站已创建"
-  show_inbound "$tag"
+  info "入站 ${tag} 已创建并部署生效。"
   print_links "$tag" "" || true
 }
 
 list_inbounds() {
   ensure_config
-  local count
+  local count tag protocol port method security listen users sec_disp
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站。"; return; fi
-  print_table_cell_clipped "标签" 20; printf '| '; print_table_cell_clipped "协议" 8; printf '| '
-  print_table_cell "端口" 7; printf '| '; print_table_cell_clipped "传输" 7; printf '| '
-  print_table_cell_clipped "安全" 10; printf '| 监听\n'
+  printf '  %s' "$C_DIM"
+  print_table_cell_clipped "标签" 18; printf ' │ '
+  print_table_cell_clipped "协议" 6; printf ' │ '
+  print_table_cell "端口" 6; printf ' │ '
+  print_table_cell_clipped "传输" 6; printf ' │ '
+  print_table_cell_clipped "安全" 8; printf ' │ '
+  print_table_cell "用户" 4; printf ' │ 监听%s\n' "$C_RESET"
+  ui_rule 2
   jq -r '.inbounds | to_entries[] |
     [.value.tag,.value.protocol,(.value.port|tostring),
-     (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end),
-     (.value.streamSettings.security // "none"),(.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r tag protocol port method security listen; do
-        print_table_cell_clipped "$tag" 20; printf '| '; print_table_cell_clipped "$protocol" 8; printf '| '
-        print_table_cell "$port" 7; printf '| '; print_table_cell_clipped "$method" 7; printf '| '
-        print_table_cell_clipped "$security" 10; printf '| %s\n' "$listen"
+     (if .value.protocol=="vless" then
+        (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end)
+      else "-" end),
+     (if .value.protocol=="vless" then (.value.streamSettings.security // "none")
+      elif .value.protocol=="socks" then (.value.settings.auth // "noauth")
+      elif (((.value.settings.accounts // .value.settings.users // [])|length)>0) then "password"
+      else "noauth" end),
+     (if .value.protocol=="vless" then (.value.settings.clients // [] | length)
+      else ((.value.settings.accounts // .settings.users // []) | length) end | tostring),
+     (.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r tag protocol port method security users listen; do
+        case $security in
+          reality) sec_disp="${C_CYAN}${security}${C_RESET}" ;;
+          tls|password) sec_disp="${C_GREEN}${security}${C_RESET}" ;;
+          none|noauth) sec_disp="${C_YELLOW}${security}${C_RESET}" ;;
+          *) sec_disp="$security" ;;
+        esac
+        printf '  '; print_table_cell_clipped "$tag" 18; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$protocol" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$port" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$method" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$sec_disp" 8; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$users" 4; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$listen"
       done
 }
 
@@ -3105,7 +3430,7 @@ http_inbound_has_auth() {
 
 list_clients() {
   ensure_config
-  local tag=${1-} protocol count
+  local tag=${1-} protocol count number label credential
   [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
@@ -3116,18 +3441,25 @@ list_clients() {
     count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])|length' "$CONFIG_FILE")
   fi
   if ((count == 0)); then info "还没有用户。"; return; fi
+  printf '  %s' "$C_DIM"
+  print_table_cell "序号" 5; printf ' │ '
+  print_table_cell "用户" 16; printf ' │ 凭据 (%s)%s\n' "$([[ $protocol == vless ]] && printf 'UUID' || printf '密码')" "$C_RESET"
+  ui_rule 2
   case $protocol in
     vless)
-      print_table_cell "序号" 5; print_table_cell "用户" 16; print_table_cell "凭据" 40; printf '\n'
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.xrayctlLabel // .value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
         | while IFS=$'\t' read -r number label credential; do
-        print_table_cell "$number" 5; print_table_cell "$label" 16; print_table_cell "$credential" 40; printf '\n'
+        printf '  '; print_table_cell "$number" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$label" 16; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$credential"
       done
       ;;
     socks|http)
-      print_table_cell "序号" 5; print_table_cell "用户" 16; printf '凭据\n'
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|to_entries[]|[.key+1,.value.user,(.value.pass // "-")]|@tsv' "$CONFIG_FILE" \
-        | while IFS=$'\t' read -r number label credential; do print_table_cell "$number" 5; print_table_cell "$label" 16; printf '%s\n' "$credential"; done ;;
+        | while IFS=$'\t' read -r number label credential; do
+        printf '  '; print_table_cell "$number" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$label" 16; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$credential"
+      done
+      ;;
     *) die "${protocol} 不支持独立多用户管理。";;
   esac
 }
@@ -3402,12 +3734,70 @@ public_host_for_tag() {
 }
 
 # --- src/share.sh ---
-share_separator() { printf '%s\n' '------------------------------------------------------------------------'; }
+share_separator() { ui_rule 2; }
 
 print_share_entry() {
-  local label=$1 field=$2 value=$3
-  share_separator
-  printf '用户: %s\n%s: %s\n' "$label" "$field" "$value"
+  local label=$1 field=$2 value=$3 index=${4-}
+  if [[ -n $index ]]; then
+    printf '\n  %s▸ [%s]%s 用户: %s%s%s\n' "$C_BOLD$C_CYAN" "$index" "$C_RESET" "$C_BOLD" "$label" "$C_RESET"
+  else
+    printf '\n  %s▸%s 用户: %s%s%s\n' "$C_BOLD$C_CYAN" "$C_RESET" "$C_BOLD" "$label" "$C_RESET"
+  fi
+  printf '%s: %s\n' "$field" "$value"
+}
+
+_share_print_params_card() {
+  local tag=$1 protocol=$2 uri_host=$3 port=$4
+  local stream method security path="" sni="" sid="" pbk="" flow="" auth=""
+  ui_card_open "连接参数 · ${tag}"
+  case $protocol in
+    vless)
+      stream=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings // {network:"raw",security:"none"}' "$CONFIG_FILE")
+      method=$(jq -r '.network // .method // "raw"' <<<"$stream")
+      security=$(jq -r '.security // "none"' <<<"$stream")
+      flow=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[0].flow // empty' "$CONFIG_FILE")
+      ui_card_kv "协议与传输" "VLESS · ${method^^} · ${security^^}${flow:+ (${flow})}" 12
+      ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      case $method in
+        websocket)
+          path=$(jq -r '.wsSettings.path // "/"' <<<"$stream")
+          ui_card_kv "WS 路径" "$path" 12
+          ;;
+        xhttp)
+          path=$(jq -r '.xhttpSettings.path // "/"' <<<"$stream")
+          ui_card_kv "XHTTP 路径" "${path} (mode: auto)" 12
+          ;;
+      esac
+      case $security in
+        tls)
+          sni=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
+          [[ -n $sni ]] || sni=$(public_host_for_tag "$tag")
+          ui_card_kv "TLS SNI" "$sni" 12
+          ui_card_kv "指纹 (fp)" "chrome" 12
+          ;;
+        reality)
+          sni=$(jq -r '.realitySettings.serverNames[0] // empty' <<<"$stream")
+          sid=$(jq -r '.realitySettings.shortIds[0] // empty' <<<"$stream")
+          pbk=$(reality_public_key "$tag" 2>/dev/null || true)
+          ui_card_kv "伪装 SNI" "${sni:--}" 12
+          ui_card_kv "公钥 (pbk)" "${pbk:-需安装 Xray 后生成}" 12
+          ui_card_kv "Short ID" "${sid:--}" 12
+          ui_card_kv "指纹 (fp)" "chrome" 12
+          ;;
+      esac
+      ;;
+    socks)
+      auth=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth // "noauth"' "$CONFIG_FILE")
+      ui_card_kv "协议类型" "SOCKS5 ($([[ $auth == password ]] && printf '账号密码认证' || printf '无认证'))" 12
+      ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      ;;
+    http)
+      if http_inbound_has_auth "$tag"; then auth='账号密码认证'; else auth='无认证'; fi
+      ui_card_kv "协议类型" "HTTP (${auth})" 12
+      ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      ;;
+  esac
+  ui_card_close
 }
 
 link_query_for_stream() {
@@ -3445,7 +3835,7 @@ link_query_for_stream() {
 
 print_links() {
   ensure_config; init_meta
-  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link
+  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link idx=0
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
@@ -3453,22 +3843,25 @@ print_links() {
   host=$(public_host_for_tag "$tag"); uri_host=$host
   [[ $uri_host == *:* && $uri_host != \[*\] ]] && uri_host="[${uri_host}]"
   port=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.port' "$CONFIG_FILE")
-  heading "${tag} 分享信息"
+  heading "${tag} · 节点交付"
+  _share_print_params_card "$tag" "$protocol" "$uri_host" "$port"
   case $protocol in
     vless)
       query=$(link_query_for_stream "$tag" "$protocol")
       while IFS= read -r -d '' label && IFS= read -r -d '' id; do
         [[ -z $filter || $label == "$filter" ]] || continue
+        idx=$((idx + 1))
         link="vless://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")"
-        print_share_entry "$label" "链接" "$link"
+        print_share_entry "$label" "链接" "$link" "$idx"
       done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", (.id // ""), "\u0000"' "$CONFIG_FILE")
       ;;
     socks)
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
         while IFS= read -r -d '' label && IFS= read -r -d '' password; do
           [[ -z $filter || $label == "$filter" ]] || continue
+          idx=$((idx + 1))
           link="socks5://$(url_encode "$label"):$(url_encode "$password")@${uri_host}:${port}#$(url_encode "${tag}-${label}")"
-          print_share_entry "$label" "链接" "$link"
+          print_share_entry "$label" "链接" "$link" "$idx"
         done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|(.user // ""), "\u0000", (.pass // ""), "\u0000"' "$CONFIG_FILE")
       else
         link="socks5://${uri_host}:${port}#$(url_encode "${tag}")"
@@ -3479,8 +3872,9 @@ print_links() {
       if http_inbound_has_auth "$tag"; then
         while IFS= read -r -d '' label && IFS= read -r -d '' password; do
           [[ -z $filter || $label == "$filter" ]] || continue
+          idx=$((idx + 1))
           link="http://$(url_encode "$label"):$(url_encode "$password")@${uri_host}:${port}#$(url_encode "${tag}-${label}")"
-          print_share_entry "$label" "链接" "$link"
+          print_share_entry "$label" "链接" "$link" "$idx"
         done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|(.user // ""), "\u0000", (.pass // ""), "\u0000"' "$CONFIG_FILE")
       else
         link="http://${uri_host}:${port}#$(url_encode "${tag}")"
@@ -3488,6 +3882,7 @@ print_links() {
       fi
       ;;
   esac
+  printf '\n'
   share_separator
 }
 
@@ -4193,7 +4588,7 @@ traffic_user_reset() {
 }
 
 traffic_users_show() {
-  local filter=${1-} tag protocol id label used quota start end enabled status ambiguous period_start current_bytes current_tag="" user_state inventory
+  local filter=${1-} tag protocol id label used quota start end enabled status ambiguous period_start current_bytes current_tag="" user_state inventory status_disp bar pct fill empty raw_used raw_quota
   heading '流量限制'
   if [[ ! -r $CONFIG_FILE || ! -r $TRAFFIC_FILE ]]; then
     info "用户流量统计尚未配置。"
@@ -4205,34 +4600,49 @@ traffic_users_show() {
   while IFS=$'\t' read -r tag protocol id label current_bytes used quota start end enabled ambiguous; do
     [[ -n $tag ]] || continue
     if [[ $tag != "$current_tag" ]]; then
-      printf '\n%s\n' "$tag"
-      print_table_cell '用户名称' 12; printf ' | '
+      printf '\n  %s▸ %s%s\n' "$C_BOLD$C_CYAN" "$tag" "$C_RESET"
+      printf '  %s' "$C_DIM"
+      print_table_cell '用户名称' 12; printf ' │ '
       print_table_cell_right '已用流量' 10; printf ' / '
-      print_table_cell '月度额度' 10; printf ' | '
-      print_table_cell '状态' 6; printf '\n'
-      printf '%s\n' '-----------------------------------------------'
+      print_table_cell '月度额度' 10; printf ' │ '
+      print_table_cell '状态' 8; printf ' │ 占用%s\n' "$C_RESET"
+      ui_rule 2
       current_tag=$tag
     fi
     if [[ -z $id || $id == '-' ]]; then
-      if [[ $protocol == socks || $protocol == http ]]; then printf '   此入站没有可统计的认证账号\n'; else printf '   此入站暂不支持按用户统计\n'; fi
+      if [[ $protocol == socks || $protocol == http ]]; then printf '  %s○ 此入站没有可统计的认证账号%s\n' "$C_DIM" "$C_RESET"; else printf '  %s○ 此入站暂不支持按用户统计%s\n' "$C_DIM" "$C_RESET"; fi
       continue
     fi
+    raw_used=0; raw_quota=0; bar=""
     if [[ $enabled == true && $quota =~ ^[0-9]+$ && $quota -gt 0 ]]; then
-      if [[ $ambiguous == true ]]; then status='冲突'; current_bytes='统计冲突';
-      elif ((used >= quota)); then status='超额'; current_bytes=$used
-      else status='正常'; current_bytes=$used; fi
+      raw_quota=$quota
+      if [[ $ambiguous == true ]]; then
+        status='冲突'; status_disp=$(ui_badge warn "冲突"); current_bytes='统计冲突'
+      elif ((used >= quota)); then
+        status='超额'; status_disp=$(ui_badge err "超额"); current_bytes=$used; raw_used=$used
+      else
+        status='正常'; status_disp=$(ui_badge ok "正常"); current_bytes=$used; raw_used=$used
+      fi
       quota=$(traffic_format_bytes "$quota")
+      if [[ $ambiguous != true ]]; then
+        pct=$((raw_used * 100 / raw_quota))
+        ((pct > 100)) && pct=100
+        fill=$((pct / 10)); empty=$((10 - fill))
+        bar="$(ui_repeat '█' "$fill")$(ui_repeat '░' "$empty") ${pct}%"
+      fi
     else
       quota='∞'
-      if [[ $ambiguous == true ]]; then status='冲突'; current_bytes='统计冲突'; else status='正常'; fi
+      if [[ $ambiguous == true ]]; then status='冲突'; status_disp=$(ui_badge warn "冲突"); current_bytes='统计冲突'
+      else status='正常'; status_disp=$(ui_badge ok "正常"); fi
+      bar="${C_DIM}不限额度${C_RESET}"
     fi
     if [[ $ambiguous == true ]]; then used='统计冲突'
     elif [[ $user_state == '已配置' ]]; then used=$(traffic_format_bytes "$current_bytes")
     else used='未统计'; fi
-    print_table_cell_clipped "$label" 12; printf ' | '
+    printf '  '; print_table_cell_clipped "$label" 12; printf ' %s│%s ' "$C_DIM" "$C_RESET"
     print_table_cell_right "$used" 10; printf ' / '
-    print_table_cell "$quota" 10; printf ' | '
-    print_table_cell "$status" 6; printf '\n'
+    print_table_cell "$quota" 10; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+    print_table_cell "$status_disp" 8; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$bar"
   done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --argjson inventory "$inventory" --arg periodStart "$period_start" --arg filter "$filter" '
     $state[0] as $s | .inbounds[]? | select($filter=="" or .tag==$filter) | .tag as $tag | .protocol as $protocol |
     if $protocol=="vless" then
@@ -5058,13 +5468,15 @@ traffic_show() {
     traffic_validate_range "$start" "$end" || { warn "日期范围无效或超出当前周期。"; return 1; }
   fi
   traffic_init_file; traffic_sync_inventory
-  traffic_is_enabled && status="运行中" || status="已停止"
+  traffic_is_enabled && status=$(ui_badge ok "运行中") || status=$(ui_badge muted "已停止")
   last=$(jq -r '.lastCollectedAt // empty' "$TRAFFIC_FILE")
   heading "流量信息"
-  printf '统计状态：%s\n统计范围：%s ～ %s\n最后采集：%s\n\n' "$status" "$start" "$end" "${last:-尚未采集}"
-  print_table_cell_clipped "标签" 20; printf '| '
-  print_table_cell_clipped "协议" 10; printf '| '
-  print_table_cell "端口" 7; printf '| %14s\n' "总流量"
+  printf '  统计状态：%s  |  统计范围：%s ～ %s\n  最后采集：%s\n\n' "$status" "$start" "$end" "${last:-尚未采集}"
+  printf '%s' "$C_DIM"
+  print_table_cell_clipped "标签" 20; printf ' │ '
+  print_table_cell_clipped "协议" 10; printf ' │ '
+  print_table_cell "端口" 7; printf ' │ %14s%s\n' "总流量" "$C_RESET"
+  ui_rule 0
   display_order=$(jq -c '[.inbounds[]?.tag]' "$CONFIG_FILE" 2>/dev/null || printf '[]')
   rows=$(jq -r --arg start "$start" --arg finish "$end" --argjson period "$period" --argjson order "$display_order" '
     ($order | to_entries | map({key:.value,value:.key}) | from_entries) as $positions |
@@ -5078,9 +5490,9 @@ traffic_show() {
   if [[ -n $rows ]]; then
     while IFS=$'\t' read -r tag protocol port bytes deleted disabled; do
       if [[ $disabled == true ]]; then tag="${tag}(已禁用)"; elif [[ $deleted == true ]]; then tag="${tag}(已删除)"; fi
-      print_table_cell_clipped "$tag" 20; printf '| '
-      print_table_cell_clipped "$protocol" 10; printf '| '
-      print_table_cell "$port" 7; printf '| %14s\n' "$(traffic_format_bytes "$bytes")"
+      print_table_cell_clipped "$tag" 20; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+      print_table_cell_clipped "$protocol" 10; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+      print_table_cell "$port" 7; printf ' %s│%s %s%14s%s\n' "$C_DIM" "$C_RESET" "$C_BOLD" "$(traffic_format_bytes "$bytes")" "$C_RESET"
     done <<<"$rows"
   fi
   if [[ $period == true ]]; then
@@ -5088,7 +5500,8 @@ traffic_show() {
   else
     total=$(traffic_range_total "$start" "$end")
   fi
-  printf '%s\n全部入站：%s\n' '----------------------------------------------------------' "$(traffic_format_bytes "$total")"
+  ui_rule 0
+  printf '全部入站：%s%s%s\n' "$C_BOLD$C_CYAN" "$(traffic_format_bytes "$total")" "$C_RESET"
 }
 
 traffic_prompt_range() {
@@ -5592,9 +6005,12 @@ list_outbound_overview() {
   ensure_config
   heading "入站与出站规则"
   if [[ $(jq '.inbounds|length' "$CONFIG_FILE") == 0 ]]; then
-    info "还没有入站。"
+    printf '  %s○ 还没有入站%s\n' "$C_DIM" "$C_RESET"
   else
-    print_table_cell "序号" 6; print_table_cell "入站" 28; printf '出站\n'
+    printf '  %s' "$C_DIM"
+    print_table_cell "序号" 5; printf ' │ '
+    print_table_cell "入站" 22; printf ' │ 默认出站%s\n' "$C_RESET"
+    ui_rule 2
     jq -r '
       (.routing.rules // []) as $rules | (.outbounds[0].tag // "未设置") as $native |
       .inbounds | to_entries[] |
@@ -5602,7 +6018,8 @@ list_outbound_overview() {
       [$number,$tag,([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
       | while IFS=$'\t' read -r number tag outbound; do
           local display; display=$(_outbound_display_name "$outbound")
-          print_table_cell "$number" 6; print_table_cell "$tag" 28; printf '%s\n' "$display"
+          printf '  '; print_table_cell "$number" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+          print_table_cell_clipped "$tag" 22; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$display"
         done
   fi
 
@@ -5612,22 +6029,22 @@ list_outbound_overview() {
       [.key+1,.value.tag,.value.protocol,
        .value.settings.address,(.value.settings.port|tostring),
        (if (.value.settings.user // "")=="" then "无" else .value.settings.user end)] | @tsv' "$CONFIG_FILE")
-    print_table_cell "序号" 4; printf '| '
-    print_table_cell_clipped "标签" 16; printf '| '
-    print_table_cell "协议" 7; printf '| '
-    print_table_cell_clipped "地址" 22; printf '| 用户\n'
+    printf '  %s' "$C_DIM"
+    print_table_cell "序号" 4; printf ' │ '
+    print_table_cell_clipped "标签" 16; printf ' │ '
+    print_table_cell "协议" 6; printf ' │ '
+    print_table_cell_clipped "地址" 22; printf ' │ 用户%s\n' "$C_RESET"
+    ui_rule 2
     while IFS=$'\t' read -r number tag protocol address port username; do
       endpoint=$(_outbound_endpoint_display "$address" "$port")
-      print_table_cell "$number" 4; printf '| '
-      print_table_cell_clipped "$tag" 16; printf '| '
-      print_table_cell "$protocol" 7; printf '| '
-      print_table_cell_clipped "$endpoint" 22; printf '| %s\n' "$username"
+      printf '  '; print_table_cell "$number" 4; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+      print_table_cell_clipped "$tag" 16; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+      print_table_cell "$protocol" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+      print_table_cell_clipped "$endpoint" 22; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$username"
     done <<<"$rows"
   else
-    info "还没有代理出站。"
+    printf '  %s○ 还没有手动添加的代理出站%s\n' "$C_DIM" "$C_RESET"
   fi
-
-  printf '\n'
 }
 
 list_inbound_outbound_status() {
@@ -7265,15 +7682,45 @@ install_quick_command() {
 }
 
 show_status() {
-  local traffic_state backend
-  heading "Xray 状态"
-  if xray_installed; then "$XRAY_BIN" version | sed -n '1,2p'; else printf 'Xray: 未安装\n'; fi
-  if service_exists; then platform_service_status 2>/dev/null | sed -n '1,12p' || true
-  else printf '%s 服务: 未安装\n' "$(platform_init_system 2>/dev/null || printf unknown)"; fi
-  [[ -f $CONFIG_FILE ]] && printf '入站数: %s\n配置: %s\n' "$(jq '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?')" "$CONFIG_FILE"
-  if traffic_is_enabled; then traffic_state="运行中"; else traffic_state="已停止"; fi
+  local traffic_state backend svc_state svc_badge bbr_state bbr_badge inbound_cnt="0" cert_cnt="0"
+  heading "Xray 运行状态"
+  svc_state=$(service_state_summary)
+  case $svc_state in
+    运行中) svc_badge=$(ui_badge ok "运行中") ;;
+    已停止) svc_badge=$(ui_badge err "已停止") ;;
+    *)      svc_badge=$(ui_badge muted "$svc_state") ;;
+  esac
+  bbr_state=$(bbr_state_summary)
+  case $bbr_state in
+    已启用) bbr_badge=$(ui_badge ok "已启用") ;;
+    未启用) bbr_badge=$(ui_badge muted "未启用") ;;
+    *)      bbr_badge=$(ui_badge warn "$bbr_state") ;;
+  esac
+  [[ -r $CONFIG_FILE ]] && inbound_cnt=$(jq '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?')
+  if declare -F certificate_count >/dev/null 2>&1; then
+    cert_cnt=$(certificate_count 2>/dev/null || printf '0')
+  fi
+  if traffic_is_enabled; then traffic_state=$(ui_badge ok "运行中"); else traffic_state=$(ui_badge muted "已停止"); fi
   backend=$(traffic_recorded_backend); backend=${backend:-未设置}
-  printf '流量统计: %s（%s）\n用户额度: 已设置 %s 个用户\n' "$traffic_state" "$backend" "$(traffic_user_limit_count)"
+
+  ui_card_open "核心与服务概览"
+  ui_card_kv "Xray 核心" "$(xray_version_summary)" 12
+  ui_card_kv "服务状态" "${svc_badge}  (自启: $(startup_state_summary))" 12
+  ui_card_kv "TCP BBR" "$bbr_badge" 12
+  ui_card_kv "入站 / 证书" "${inbound_cnt} 个入站 / ${cert_cnt} 张证书" 12
+  ui_card_kv "流量统计" "${traffic_state} (${backend})" 12
+  ui_card_kv "用户额度" "已配置 $(traffic_user_limit_count) 个用户" 12
+  ui_card_kv "配置文件" "$CONFIG_FILE" 12
+  ui_card_close
+
+  if xray_installed; then
+    ui_section "Xray 版本信息"
+    "$XRAY_BIN" version | sed -n '1,2p' | sed 's/^/  /'
+  fi
+  if service_exists; then
+    ui_section "服务单元详情"
+    platform_service_status 2>/dev/null | sed -n '1,10p' | sed 's/^/  /' || true
+  fi
 }
 
 service_action() {
@@ -7436,56 +7883,130 @@ startup_state_summary() {
   else printf '已关闭'; fi
 }
 
+_ui_state_badge() {
+  local label=$1
+  case $label in
+    运行中|已开启|已启用) ui_badge ok "$label" ;;
+    已停止)               ui_badge err "$label" ;;
+    未安装|已关闭|未启用) ui_badge muted "$label" ;;
+    *)                    ui_badge warn "$label" ;;
+  esac
+}
+
 show_main_summary() {
-  printf '服务: %s  |  入站: %s  |  BBR: %s  |  Xray: %s\n' \
-    "$(service_state_summary)" "$(node_count_summary)" "$(bbr_state_summary)" "$(xray_version_summary)"
+  local svc bbr certs="0"
+  svc=$(_ui_state_badge "$(service_state_summary)")
+  bbr=$(_ui_state_badge "$(bbr_state_summary)")
+  if declare -F certificate_count >/dev/null 2>&1; then
+    certs=$(certificate_count 2>/dev/null || printf '0')
+  fi
+  printf '  状态 %s   %s│%s  Xray %s%s%s   %s│%s  BBR %s   %s│%s  入站 %s%s%s  证书 %s%s%s\n' \
+    "$svc" "$C_DIM" "$C_RESET" \
+    "$C_BOLD" "$(xray_version_summary)" "$C_RESET" "$C_DIM" "$C_RESET" \
+    "$bbr" "$C_DIM" "$C_RESET" \
+    "$C_BOLD" "$(node_count_summary)" "$C_RESET" \
+    "$C_BOLD" "$certs" "$C_RESET"
 }
 
 show_main_inbounds() {
   command_exists jq && [[ -r $CONFIG_FILE ]] || return 0
-  local count tag protocol port method security
+  local count tag protocol port method security users outbound sec_disp out_disp
   count=$(jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null) || return 0
-  heading "当前入站"
+  ui_section "入站概览"
   if ((count == 0)); then
-    info "还没有入站。"
-    printf '\n'
+    printf '  %s○ 暂无入站节点，请选择 [1] 入站管理 创建首个节点%s\n' "$C_DIM" "$C_RESET"
     return 0
   fi
-  print_table_cell_clipped "标签" 20; printf '|'; print_table_cell_clipped "协议" 8; printf '|'
-  print_table_cell "端口" 7; printf '|'; print_table_cell_clipped "传输" 7; printf '|'
-  print_table_cell_clipped "安全" 10; printf '\n'
-  jq -r '.inbounds[] | [.tag,.protocol,
-    (.port|tostring),(if (.streamSettings.network // .streamSettings.method // "raw")=="websocket" then "ws" else (.streamSettings.network // .streamSettings.method // "raw") end),
-    (.streamSettings.security // "none")] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r tag protocol port method security; do
-        print_table_cell_clipped "$tag" 20; printf '|'; print_table_cell_clipped "$protocol" 8; printf '|'
-        print_table_cell "$port" 7; printf '|'; print_table_cell_clipped "$method" 7; printf '|'
-        print_table_cell_clipped "$security" 10; printf '\n'
+  printf '  %s' "$C_DIM"
+  print_table_cell_clipped "标签" 16; printf ' │ '
+  print_table_cell_clipped "协议" 6; printf ' │ '
+  print_table_cell "端口" 6; printf ' │ '
+  print_table_cell_clipped "传输" 5; printf ' │ '
+  print_table_cell_clipped "安全" 8; printf ' │ '
+  print_table_cell "用户" 4; printf ' │ 默认出站%s\n' "$C_RESET"
+  ui_rule 2
+  jq -r '
+    (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
+    .inbounds[] |
+    .tag as $tag |
+    [$tag,.protocol,
+     (.port|tostring),
+     (if .protocol=="vless" then
+        (if (.streamSettings.network // .streamSettings.method // "raw")=="websocket" then "ws" else (.streamSettings.network // .streamSettings.method // "raw") end)
+      else "-" end),
+     (if .protocol=="vless" then (.streamSettings.security // "none")
+      elif .protocol=="socks" then (.settings.auth // "noauth")
+      elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
+      else "noauth" end),
+     (if .protocol=="vless" then (.settings.clients // [] | length)
+      else ((.settings.accounts // .settings.users // []) | length) end | tostring),
+     ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r tag protocol port method security users outbound; do
+        case $security in
+          reality) sec_disp="${C_CYAN}${security}${C_RESET}" ;;
+          tls|password) sec_disp="${C_GREEN}${security}${C_RESET}" ;;
+          none|noauth) sec_disp="${C_YELLOW}${security}${C_RESET}" ;;
+          *) sec_disp="$security" ;;
+        esac
+        if declare -F _outbound_display_name >/dev/null 2>&1; then
+          out_disp=$(_outbound_display_name "$outbound")
+        else
+          out_disp=$outbound
+        fi
+        printf '  '; print_table_cell_clipped "$tag" 16; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$protocol" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$port" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$method" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$sec_disp" 8; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+        print_table_cell "$users" 4; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$out_disp"
       done
-  printf '\n'
 }
 
 show_node_summary() {
-  local tag=$1 protocol port method security listen
-  IFS=$'\t' read -r protocol port method security listen < <(
-    jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|[
-      .protocol,(.port|tostring),(.streamSettings.network // .streamSettings.method // "raw"),
-      (.streamSettings.security // "none"),(.listen // "0.0.0.0")]|@tsv' "$CONFIG_FILE"
+  local tag=$1 protocol port method security listen users outbound host out_disp
+  IFS=$'\t' read -r protocol port method security listen users outbound < <(
+    jq -r --arg tag "$tag" '
+      (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
+      .inbounds[]|select(.tag==$tag)|[
+        .protocol,
+        (.port|tostring),
+        (if .protocol=="vless" then (.streamSettings.network // .streamSettings.method // "raw") else "-" end),
+        (if .protocol=="vless" then (.streamSettings.security // "none")
+         elif .protocol=="socks" then (.settings.auth // "noauth")
+         elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
+         else "noauth" end),
+        (.listen // "0.0.0.0"),
+        (if .protocol=="vless" then (.settings.clients // [] | length)
+         else ((.settings.accounts // .settings.users // []) | length) end | tostring),
+        ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)
+      ]|@tsv' "$CONFIG_FILE"
   )
-  printf '协议: %s  |  端口: %s  |  传输: %s  |  安全: %s  |  监听: %s\n\n' \
-    "$protocol" "$port" "$method" "$security" "$listen"
+  host=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
+  if declare -F _outbound_display_name >/dev/null 2>&1; then
+    out_disp=$(_outbound_display_name "$outbound")
+  else
+    out_disp=$outbound
+  fi
+  ui_card_open "节点概览"
+  ui_card_kv "协议 / 安全" "${protocol^^} · ${method} · ${security}" 12
+  ui_card_kv "监听端口" "${listen}:${port}" 12
+  [[ -z $host ]] || ui_card_kv "连接地址" "$host" 12
+  ui_card_kv "用户 / 出站" "${users} 个用户  ·  默认出站 ${out_disp}" 12
+  ui_card_close
 }
 
 # --- src/uninstall.sh ---
 cleanup_step() {
   local description=$1
   shift
-  printf '  %s ... ' "$description"
+  printf '  '
+  print_table_cell "$description" 24
+  printf ' '
   if "$@" 2>/dev/null; then
-    printf '✓\n'
+    printf '%s✓%s\n' "$C_GREEN" "$C_RESET"
     return 0
   else
-    printf '✗\n'
+    printf '%s✗%s\n' "$C_RED" "$C_RESET"
     return 1
   fi
 }
@@ -7840,33 +8361,19 @@ _scan_xrayctl_residuals() {
 
 uninstall_xray() {
   ensure_system_context uninstall
-  heading "删除"
-  cat <<'EOF'
-
-⚠  即将永久删除 xrayctl 管理的全部数据：
-
-  - Xray 核心
-  - 所有入站配置及用户凭据
-  - TLS 证书副本
-  - xrayctl 签发的 Let's Encrypt 证书
-  - Cloudflare Global API Key
-  - Certbot 独立环境
-  - 自动续期任务
-  - xrayctl 配置的 BBR 设置
-  - 日志、元数据
-  - 所有 xrayctl 备份
-
-不会删除：
-  - 系统 Nginx / Apache / 其他程序
-  - 系统 Certbot
-  - /etc/letsencrypt（其他网站证书）
-  - Cloudflare DNS 记录
-  - 系统软件包 (curl / python3 / jq)
-  - xrayctl 未修改过的文件
-
-完全删除不会创建或保留备份。
-EOF
-  printf '输入 DELETE 确认：'
+  heading "卸载清理"
+  ui_card_open "⚠ 即将永久删除以下 xrayctl 受管数据（不保留备份）"
+  ui_card_line "• Xray 核心程序、所有入站配置及用户凭据"
+  ui_card_line "• 托管 TLS 证书副本、Let's Encrypt 证书与续期任务"
+  ui_card_line "• Cloudflare 凭据、独立 Certbot 环境与 BBR 持久化配置"
+  ui_card_line "• 运行日志、元数据及全部 xrayctl 手动备份"
+  ui_card_close
+  ui_card_open "✓ 以下系统组件与外部文件将保持原样"
+  ui_card_line "• 系统 Nginx / Apache / 其他服务与系统软件包 (curl/python3/jq)"
+  ui_card_line "• 系统 Certbot、/etc/letsencrypt 及其他网站证书"
+  ui_card_line "• Cloudflare DNS 记录及非 xrayctl 管理的配置"
+  ui_card_close
+  printf '\n请输入 %sDELETE%s 确认卸载: ' "$C_BOLD$C_RED" "$C_RESET"
   local answer
   read -r answer || { cancel_input; return 0; }
   if [[ $answer != "DELETE" ]]; then
@@ -7907,12 +8414,19 @@ EOF
 
 # --- src/menu.sh ---
 outbound_menu() {
-  local choice
+  local choice XRAYCTL_UI_CRUMB="首页 › 出站管理"
   while true; do
     clear_screen
     heading "出站管理"
     list_outbound_overview
-    printf '\n1) 入站出站管理\n2) 用户域名模板库\n3) 添加代理出站 (SOCKS5/HTTP)\n4) 查看出站详情\n5) 删除出站\n0) 返回\n'
+    ui_menu_group "分流与模板"
+    ui_menu_item 1 "入站出站管理"
+    ui_menu_item 2 "用户域名模板库"
+    ui_menu_group "代理出站节点"
+    ui_menu_item 3 "添加代理出站 (SOCKS5/HTTP)"
+    ui_menu_item 4 "查看出站详情"
+    ui_menu_item 5 "删除出站"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) inbound_outbound_menu;;
@@ -8072,13 +8586,17 @@ user_template_remove_menu() {
 
 user_template_menu() {
   local inbound=$1 label=$2 identity choice name outbound local_ip=''
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${inbound} › ${label} › 模板"
   _outbound_user_identity identity "$inbound" "$label" || return 1
   while true; do
     clear_screen
     heading "用户模板 · ${label}"
-    printf '已应用模板：\n'
+    ui_section "已应用模板"
     template_bindings_display "$inbound" "$identity"
-    printf '\n1) 应用模板\n2) 移除模板\n0) 返回\n'
+    ui_menu_group "模板操作"
+    ui_menu_item 1 "应用模板"
+    ui_menu_item 2 "移除模板"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1)
@@ -8095,6 +8613,7 @@ user_template_menu() {
 
 user_outbound_detail_menu() {
   local inbound=$1 label=$2 choice identity default display_default
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${inbound} › 用户 ${label}"
   while true; do
     clear_screen
     _outbound_user_identity identity "$inbound" "$label" || return 1
@@ -8109,7 +8628,12 @@ user_outbound_detail_menu() {
     template_bindings_display "$inbound" "$identity"
     heading '域名分流规则'
     _outbound_user_domain_rules_display "$inbound" "$identity"
-    printf '\n1) 设置默认出站\n2) 管理模板\n3) 添加规则\n4) 删除规则\n0) 返回\n'
+    ui_menu_group "用户分流配置"
+    ui_menu_item 1 "设置默认出站"
+    ui_menu_item 2 "管理模板"
+    ui_menu_item 3 "添加规则"
+    ui_menu_item 4 "删除规则"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action outbound_user_default_set "$inbound" "$label" ""; pause;;
@@ -8136,6 +8660,7 @@ inbound_user_outbound_menu() {
 
 inbound_outbound_detail_menu() {
   local inbound=$1 choice label identity default display_default count inbound_default first_user inbound_rule_count
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${inbound}"
   local -a labels=()
   while inbound_exists "$inbound"; do
     clear_screen
@@ -8145,6 +8670,7 @@ inbound_outbound_detail_menu() {
     inbound_rule_count=$(jq -r --arg inbound "$inbound" '
       [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-domain:")) and .inboundTag==[$inbound])] | length
     ' "$CONFIG_FILE") || return 1
+    ui_section "入站公共策略"
     printf '默认出站：%s\n分流规则：%s 条\n模板：\n' \
       "$(_outbound_display_name "$inbound_default")" "$inbound_rule_count"
     template_bindings_display "$inbound"
@@ -8171,7 +8697,11 @@ inbound_outbound_detail_menu() {
     else
       printf '  无\n'
     fi
-    printf '\n1) 设置默认出站\n2) 公共域名分流\n3) 用户出站管理\n0) 返回\n'
+    ui_menu_group "出站策略操作"
+    ui_menu_item 1 "设置默认出站"
+    ui_menu_item 2 "公共域名分流"
+    ui_menu_item 3 "用户出站管理"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action assign_outbound "$inbound" ""; pause;;
@@ -8261,16 +8791,20 @@ delete_domain_template_domains_menu() {
 
 template_manage_menu() {
   local name=$1 choice type domains match
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › 模板库 › ${name}"
   while domain_template_exists "$name"; do
     clear_screen
     heading "模板 · ${name}"
-    printf '精确域名：\n'
+    ui_section "精确域名"
     jq -r --arg name "$name" '.domainTemplates.templates[]? |
       select(.name==$name) | .exact[]? // empty | "  "+.' "$META_FILE"
-    printf '子域名：\n'
+    ui_section "子域名"
     jq -r --arg name "$name" '.domainTemplates.templates[]? |
       select(.name==$name) | .suffix[]? // empty | "  "+.' "$META_FILE"
-    printf '\n1) 添加域名\n2) 删除域名\n0) 返回\n'
+    ui_menu_group "模板内容操作"
+    ui_menu_item 1 "添加域名"
+    ui_menu_item 2 "删除域名"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1)
@@ -8292,14 +8826,20 @@ template_manage_menu() {
 
 template_library_menu() {
   local choice name exact suffix
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › 模板库"
   while true; do
     clear_screen
     heading '模板库'
+    ui_section "现有模板"
     while IFS=$'\t' read -r name exact suffix; do
       [[ -n $name ]] || continue
       printf '  %-16s 精确 %s 个，子域名 %s 个\n' "$name" "$exact" "$suffix"
     done < <(list_domain_templates)
-    printf '\n1) 新建模板\n2) 管理模板\n3) 删除模板\n0) 返回\n'
+    ui_menu_group "模板库管理"
+    ui_menu_item 1 "新建模板"
+    ui_menu_item 2 "管理模板"
+    ui_menu_item 3 "删除模板"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action create_domain_template; pause;;
@@ -8313,11 +8853,17 @@ template_library_menu() {
 
 client_menu_for_tag() {
   local tag=$1 choice
+  local XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${tag} › 用户管理"
   while inbound_exists "$tag"; do
     clear_screen
     heading "用户管理 · ${tag}"
     list_clients "$tag"
-    printf '\n1) 添加用户\n2) 重命名用户\n3) 更换 UUID/密码\n4) 删除用户\n0) 返回入站\n'
+    ui_menu_group "凭据操作"
+    ui_menu_item 1 "添加用户"
+    ui_menu_item 2 "重命名用户"
+    ui_menu_item 3 "更换 UUID/密码"
+    ui_menu_item 4 "删除用户"
+    ui_menu_footer "返回入站"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action add_client "$tag"; pause;; 2) run_menu_action rename_client "$tag"; pause;;
@@ -8329,12 +8875,19 @@ client_menu_for_tag() {
 
 modify_inbound_menu() {
   local current_tag=$1 protocol=$2 parent_tag_var=${3-} choice renamed_tag
+  local XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${current_tag} › 修改信息"
   while inbound_exists "$current_tag"; do
     clear_screen
+    XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${current_tag} › 修改信息"
     heading "修改入站信息 · ${current_tag}"
-    printf '1) 修改入站名称\n2) 修改地址/端口\n'
-    [[ $protocol != vless ]] || printf '3) 修改传输/安全\n'
-    printf '0) 返回入站\n'
+    ui_menu_group "基础与网络"
+    ui_menu_item 1 "修改入站名称"
+    ui_menu_item 2 "修改地址/端口"
+    if [[ $protocol == vless ]]; then
+      ui_menu_group "传输与安全"
+      ui_menu_item 3 "修改传输/安全"
+    fi
+    ui_menu_footer "返回入站"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1)
@@ -8362,8 +8915,10 @@ modify_inbound_menu() {
 
 manage_inbound_menu() {
   local tag=$1 choice protocol auth security
+  local XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${tag}"
   while inbound_exists "$tag"; do
     clear_screen
+    XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${tag}"
     protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
     heading "入站 · ${tag}"
     show_node_summary "$tag"
@@ -8371,7 +8926,14 @@ manage_inbound_menu() {
       vless)
         security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
         if [[ $security == tls ]]; then
-          printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 证书管理\n5) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与用户"
+          ui_menu_item 1 "分享信息"
+          ui_menu_item 2 "用户管理"
+          ui_menu_group "配置与诊断"
+          ui_menu_item 3 "修改入站信息"
+          ui_menu_item 4 "证书管理"
+          ui_menu_item 5 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -8379,7 +8941,13 @@ manage_inbound_menu() {
             0) return;; *) warn "无效选项。"; pause;;
           esac
         else
-          printf '1) 分享信息\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与用户"
+          ui_menu_item 1 "分享信息"
+          ui_menu_item 2 "用户管理"
+          ui_menu_group "配置与诊断"
+          ui_menu_item 3 "修改入站信息"
+          ui_menu_item 4 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -8390,9 +8958,15 @@ manage_inbound_menu() {
         ;;
       http)
         if http_inbound_has_auth "$tag"; then auth=password; else auth=noauth; fi
-        printf '认证: %s\n\n' "$auth"
+        ui_kv "认证方式" "$auth" 10
         if [[ $auth == password ]]; then
-          printf '1) 客户端配置\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与用户"
+          ui_menu_item 1 "客户端配置"
+          ui_menu_item 2 "用户管理"
+          ui_menu_group "配置与诊断"
+          ui_menu_item 3 "修改入站信息"
+          ui_menu_item 4 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -8400,7 +8974,11 @@ manage_inbound_menu() {
             0) return;; *) warn "无效选项。"; pause;;
           esac
         else
-          printf '1) 客户端配置\n2) 修改入站信息\n3) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与配置"
+          ui_menu_item 1 "客户端配置"
+          ui_menu_item 2 "修改入站信息"
+          ui_menu_item 3 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -8411,9 +8989,15 @@ manage_inbound_menu() {
         ;;
       socks)
         auth=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth // "noauth"' "$CONFIG_FILE")
-        printf '认证: %s\n\n' "$auth"
+        ui_kv "认证方式" "$auth" 10
         if [[ $auth == password ]]; then
-          printf '1) 客户端配置\n2) 用户管理\n3) 修改入站信息\n4) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与用户"
+          ui_menu_item 1 "客户端配置"
+          ui_menu_item 2 "用户管理"
+          ui_menu_group "配置与诊断"
+          ui_menu_item 3 "修改入站信息"
+          ui_menu_item 4 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -8421,7 +9005,11 @@ manage_inbound_menu() {
             0) return;; *) warn "无效选项。"; pause;;
           esac
         else
-          printf '1) 客户端配置\n2) 修改入站信息\n3) 查看 JSON\n0) 返回列表\n'
+          ui_menu_group "交付与配置"
+          ui_menu_item 1 "客户端配置"
+          ui_menu_item 2 "修改入站信息"
+          ui_menu_item 3 "查看 JSON"
+          ui_menu_footer "返回列表"
           read -r -p "请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol" tag;;
@@ -8437,12 +9025,20 @@ manage_inbound_menu() {
 
 inbound_menu() {
   local choice tag
+  local XRAYCTL_UI_CRUMB="首页 › 入站管理"
   while true; do
     clear_screen
     heading "入站管理"
     list_inbounds
-    printf '\n完整配置: %s\n\n' "$CONFIG_FILE"
-    printf '1) 新增入站\n2) 管理已有入站\n3) 全部分享链接\n4) 删除入站\n0) 返回\n'
+    printf '\n'
+    ui_kv "配置文件" "$CONFIG_FILE" 10
+    ui_menu_group "节点管理"
+    ui_menu_item 1 "新增入站"
+    ui_menu_item 2 "管理已有入站"
+    ui_menu_group "交付与清理"
+    ui_menu_item 3 "全部分享链接"
+    ui_menu_item 4 "删除入站"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action add_inbound; pause;;
@@ -8454,15 +9050,30 @@ inbound_menu() {
   done
 }
 
-
 certificate_menu() {
-  local choice
+  local choice cf_state
+  local XRAYCTL_UI_CRUMB="首页 › TLS 证书"
   while true; do
     clear_screen
     heading "TLS 证书"
-    printf '托管证书: %s\n\n' "$(certificate_count)"
-    printf '1) Let\x27s Encrypt 自动签发\n2) 导入已有证书\n3) 查看托管证书\n4) 删除托管证书\n5) Cloudflare 凭据\n'
-    printf '6) 立即续期所有证书\n0) 返回\n'
+    if load_cloudflare_credentials 2>/dev/null; then
+      cf_state=$(ui_badge ok "已配置")
+    else
+      cf_state=$(ui_badge muted "未配置")
+    fi
+    ui_card_open "证书概览"
+    ui_card_kv "托管证书" "$(certificate_count) 张" 14
+    ui_card_kv "Cloudflare" "$cf_state" 14
+    ui_card_close
+    ui_menu_group "签发、导入与查看"
+    ui_menu_item 1 "Let's Encrypt 自动签发"
+    ui_menu_item 2 "导入已有证书"
+    ui_menu_item 3 "查看托管证书"
+    ui_menu_item 4 "删除托管证书"
+    ui_menu_group "自动续期与凭据"
+    ui_menu_item 5 "Cloudflare 凭据"
+    ui_menu_item 6 "立即续期所有证书"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action issue_certificate; pause;;
@@ -8493,13 +9104,29 @@ toggle_service_startup() {
 }
 
 service_menu() {
-  local choice
+  local choice svc_badge boot_badge bbr_badge
+  local XRAYCTL_UI_CRUMB="首页 › 服务管理"
   while true; do
     clear_screen
     heading "服务管理"
-    printf '状态: %s  |  开机自启: %s  |  Xray: %s\n\n' \
-      "$(service_state_summary)" "$(startup_state_summary)" "$(xray_version_summary)"
-    printf '1) 启动/停止\n2) 重启服务\n3) 开关开机自启\n4) 查看日志\n5) 安装 Xray\n6) BBR启用/关闭\n0) 返回\n'
+    svc_badge=$(_ui_state_badge "$(service_state_summary)")
+    boot_badge=$(_ui_state_badge "$(startup_state_summary)")
+    bbr_badge=$(_ui_state_badge "$(bbr_state_summary)")
+    ui_card_open "运行环境"
+    ui_card_kv "服务状态" "$svc_badge" 12
+    ui_card_kv "开机自启" "$boot_badge" 12
+    ui_card_kv "Xray 核心" "$(xray_version_summary)" 12
+    ui_card_kv "TCP BBR" "$bbr_badge" 12
+    ui_card_close
+    ui_menu_group "服务控制"
+    ui_menu_item 1 "启动/停止"
+    ui_menu_item 2 "重启服务"
+    ui_menu_item 3 "开关开机自启"
+    ui_menu_group "诊断与内核"
+    ui_menu_item 4 "查看日志"
+    ui_menu_item 5 "安装 Xray"
+    ui_menu_item 6 "BBR启用/关闭"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action toggle_service_running; pause;; 2) run_menu_action service_action restart; pause;;
@@ -8522,13 +9149,17 @@ bbr_state_summary() {
 
 traffic_menu() {
   local choice
+  local XRAYCTL_UI_CRUMB="首页 › 流量信息"
   traffic_is_enabled && run_menu_action traffic_collect
   while true; do
     clear_screen
     traffic_show || true
-    printf '\n1) 刷新\n2) 清空指定入站记录\n3) 清空全部入站流量记录\n'
-    printf '4) 设置月度统计起点\n'
-    printf '0) 返回\n'
+    ui_menu_group "统计操作"
+    ui_menu_item 1 "刷新"
+    ui_menu_item 2 "清空指定入站记录"
+    ui_menu_item 3 "清空全部入站流量记录"
+    ui_menu_item 4 "设置月度统计起点"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action traffic_collect;;
@@ -8543,12 +9174,16 @@ traffic_menu() {
 
 traffic_limit_menu() {
   local choice
+  local XRAYCTL_UI_CRUMB="首页 › 流量限制"
   traffic_user_ensure_configured || true
   while true; do
     if traffic_is_enabled; then run_menu_action traffic_collect || true; fi
     clear_screen
     traffic_users_show "" || true
-    printf '\n1) 刷新流量\n2) 管理用户额度\n0) 返回\n'
+    ui_menu_group "配额管理"
+    ui_menu_item 1 "刷新流量"
+    ui_menu_item 2 "管理用户额度"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) continue;;
@@ -8583,6 +9218,7 @@ traffic_user_menu() {
     pause
     return 0
   fi
+  local XRAYCTL_UI_CRUMB="首页 › 流量限制 › ${tag}"
   while true; do
     clear_screen
     inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
@@ -8616,9 +9252,13 @@ traffic_user_menu() {
     else
       printf '流量：%s / ∞\n重置周期：无\n状态：正常\n' "$(traffic_format_bytes "$current_bytes")"
     fi
-    printf '\n'
+    ui_rule 0
     done
-    printf '1) 设置/修改额度\n2) 重置用户流量\n3) 取消用户额度\n0) 返回\n'
+    ui_menu_group "用户额度操作"
+    ui_menu_item 1 "设置/修改额度"
+    ui_menu_item 2 "重置用户流量"
+    ui_menu_item 3 "取消用户额度"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 0; }
     case $choice in 0) return 0;; 1|2|3) ;; *) warn '无效选项。'; pause; continue;; esac
     if ((${#user_labels[@]} == 1)); then
@@ -8645,13 +9285,24 @@ traffic_user_menu() {
 }
 
 main_menu() {
-  local choice
+  local choice XRAYCTL_UI_CRUMB=""
   while true; do
     clear_screen
-    printf '%sXray Linux 管理脚本%s  v%s\n' "$C_BOLD$C_BLUE" "$C_RESET" "$XRAYCTL_VERSION"
+    ui_banner "xrayctl · Xray Linux 管理控制台" "v${XRAYCTL_VERSION}"
     show_main_summary
     show_main_inbounds
-    printf '1) 入站管理\n2) 出站管理\n3) TLS 证书\n4) 流量限制\n5) 流量信息\n6) 服务管理\n7) 卸载\n0) 退出\n'
+    ui_menu_group "代理与路由"
+    ui_menu_item 1 "入站管理"
+    ui_menu_item 2 "出站管理"
+    ui_menu_group "安全与证书"
+    ui_menu_item 3 "TLS 证书"
+    ui_menu_group "流量与配额"
+    ui_menu_item 4 "流量限制"
+    ui_menu_item 5 "流量信息"
+    ui_menu_group "系统与运维"
+    ui_menu_item 6 "服务管理"
+    ui_menu_item 7 "卸载"
+    ui_menu_footer "退出"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_limit_menu;;
@@ -8877,13 +9528,18 @@ dispatch() {
 
 domain_rule_detail_menu() {
   local tag=$1 choice
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${tag} › 公共分流"
   while inbound_exists "$tag"; do
     clear_screen
     heading "域名分流 · ${tag}"
     printf '模板：\n'
     template_bindings_display "$tag"
     list_domain_rules "$tag" --menu
-    printf '\n1) 管理模板\n2) 添加规则\n3) 删除规则\n0) 返回\n'
+    ui_menu_group "分流规则操作"
+    ui_menu_item 1 "管理模板"
+    ui_menu_item 2 "添加规则"
+    ui_menu_item 3 "删除规则"
+    ui_menu_footer "返回"
     read -r -p "请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) inbound_template_manage_menu "$tag";;
@@ -8907,12 +9563,17 @@ select_inbound_template() {
 
 inbound_template_manage_menu() {
   local inbound=$1 choice name outbound local_ip=""
+  local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${inbound} › 公共分流 › 模板"
   while inbound_exists "$inbound"; do
     clear_screen
     heading "入站模板 · ${inbound}"
-    printf '已应用模板：\n'
+    ui_section "已应用模板"
     template_bindings_display "$inbound"
-    printf '\n1) 添加模板\n2) 移除模板\n3) 修改出站\n0) 返回\n'
+    ui_menu_group "模板操作"
+    ui_menu_item 1 "添加模板"
+    ui_menu_item 2 "移除模板"
+    ui_menu_item 3 "修改出站"
+    ui_menu_footer "返回"
     read -r -p '请选择: ' choice || { cancel_selection; return 1; }
     case $choice in
       1) if apply_domain_template_menu "$inbound"; then :; fi; pause;;
