@@ -147,3 +147,22 @@ pass 'rename preserves nested menu context across protocols, repeated renames, c
   assert_eq 0 "${XRAYCTL_MANAGEMENT_LOCK_HELD:-0}" 'quota menu leaked the lock-held flag'
 )
 pass 'idle quota menu releases initialization locks for background enforcement'
+
+# Read-only callers also release a cold initialization lease, while a caller's
+# existing transaction lease stays held.
+(
+  LOCK_FILE="$TEST_ROOT/quota-initializer.lock"
+  exec 9>&-
+  unset XRAYCTL_MANAGEMENT_LOCK_HELD
+  traffic_user_has_clients() { return 0; }
+  traffic_user_managed_config() { return 1; }
+  traffic_user_enable() { [[ ${XRAYCTL_MANAGEMENT_LOCK_HELD:-0} == 1 ]] || acquire_lock; }
+  traffic_user_ensure_configured
+  flock -n "$LOCK_FILE" true || fail 'initializer retained its management lock in caller'
+  assert_eq 0 "${XRAYCTL_MANAGEMENT_LOCK_HELD:-0}" 'initializer leaked lock-held flag'
+  acquire_lock
+  traffic_user_ensure_configured
+  if flock -n "$LOCK_FILE" true; then fail 'initializer released the caller transaction lock'; fi
+  exec 9>&-
+)
+pass 'initializer releases only its own management lease'

@@ -526,7 +526,8 @@ traffic_user_enable() {
 traffic_user_ensure_configured() {
   traffic_user_has_clients || return 0
   traffic_user_managed_config && return 0
-  traffic_user_enable
+  # Initialization must not leave its management lock in a menu/read caller.
+  ( traffic_user_enable )
 }
 
 traffic_user_select() {
