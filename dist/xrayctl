@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="fabd54602fc3"
+readonly XRAYCTL_BUILD_COMMIT="2d6289972a83"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -490,14 +490,15 @@ display_width() {
     fi
     char=${value:i:1}
     printf -v code '%d' "'$char"
-    ((code < 0)) && ((code+=256))
+    # musl represents high C-locale bytes as U+DFxx; restore unsigned bytes.
+    code=$((code & 255))
     if ((code < 128)); then
       ((computed_width+=1))
     elif ((code >= 194 && code <= 223 && i + 1 < len)); then
       ((computed_width+=1, i+=1))
     elif ((code >= 224 && code <= 239 && i + 2 < len)); then
-      printf -v b1 '%d' "'${value:i+1:1}"; ((b1 < 0)) && ((b1+=256))
-      printf -v b2 '%d' "'${value:i+2:1}"; ((b2 < 0)) && ((b2+=256))
+      printf -v b1 '%d' "'${value:i+1:1}"; b1=$((b1 & 255))
+      printf -v b2 '%d' "'${value:i+2:1}"; b2=$((b2 & 255))
       cp=$(( ((code & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63) ))
       if ((cp >= 0x2010 && cp <= 0x27BF)); then
         ((computed_width+=1))
