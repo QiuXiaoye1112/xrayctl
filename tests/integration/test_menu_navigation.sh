@@ -130,3 +130,20 @@ done
 )
 
 pass 'rename preserves nested menu context across protocols, repeated renames, cancellation and failures'
+
+# Initial quota setup must not leave the management lock in an idle menu.
+(
+  LOCK_FILE="$TEST_ROOT/quota-menu.lock"
+  marker="$TEST_ROOT/quota-lock-state"
+  exec 9>&-
+  unset XRAYCTL_MANAGEMENT_LOCK_HELD
+  traffic_user_ensure_configured() { acquire_lock; }
+  traffic_is_enabled() { return 1; }
+  traffic_users_show() {
+    if flock -n "$LOCK_FILE" true; then printf free >"$marker"; else printf blocked >"$marker"; fi
+  }
+  traffic_limit_menu <<<0 >/dev/null
+  assert_eq free "$(cat "$marker")" 'quota menu initialization retained the management lock'
+  assert_eq 0 "${XRAYCTL_MANAGEMENT_LOCK_HELD:-0}" 'quota menu leaked the lock-held flag'
+)
+pass 'idle quota menu releases initialization locks for background enforcement'

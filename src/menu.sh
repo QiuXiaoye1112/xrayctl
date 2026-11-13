@@ -761,7 +761,7 @@ traffic_menu() {
 traffic_limit_menu() {
   local choice
   local XRAYCTL_UI_CRUMB="首页 › 流量限制"
-  traffic_user_ensure_configured || true
+  run_menu_action traffic_user_ensure_configured
   while true; do
     if traffic_is_enabled; then run_menu_action traffic_collect || true; fi
     clear_screen
