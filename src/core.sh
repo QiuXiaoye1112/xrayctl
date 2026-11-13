@@ -490,14 +490,15 @@ display_width() {
     fi
     char=${value:i:1}
     printf -v code '%d' "'$char"
-    ((code < 0)) && ((code+=256))
+    # musl represents high C-locale bytes as U+DFxx; restore unsigned bytes.
+    code=$((code & 255))
     if ((code < 128)); then
       ((computed_width+=1))
     elif ((code >= 194 && code <= 223 && i + 1 < len)); then
       ((computed_width+=1, i+=1))
     elif ((code >= 224 && code <= 239 && i + 2 < len)); then
-      printf -v b1 '%d' "'${value:i+1:1}"; ((b1 < 0)) && ((b1+=256))
-      printf -v b2 '%d' "'${value:i+2:1}"; ((b2 < 0)) && ((b2+=256))
+      printf -v b1 '%d' "'${value:i+1:1}"; b1=$((b1 & 255))
+      printf -v b2 '%d' "'${value:i+2:1}"; b2=$((b2 & 255))
       cp=$(( ((code & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63) ))
       if ((cp >= 0x2010 && cp <= 0x27BF)); then
         ((computed_width+=1))
