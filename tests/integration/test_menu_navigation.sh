@@ -32,7 +32,7 @@ setup_runtime_access() { :; }
 service_is_active() { return 1; }
 clear_screen() { :; }
 pause() { :; }
-heading() { printf 'heading|%s\n' "$1" >>"$EVENTS"; }
+ui_page() { printf 'heading|%s\n' "$1" >>"$EVENTS"; }
 show_node_summary() { :; }
 show_inbound() {
   inbound_exists "$1" || fail "detail menu retained a stale tag: $1"

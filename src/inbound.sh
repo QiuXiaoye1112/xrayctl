@@ -133,13 +133,12 @@ list_inbounds() {
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站。"; return; fi
   printf '  %s' "$C_DIM"
-  print_table_cell_clipped "标签" 18; printf ' │ '
-  print_table_cell_clipped "协议" 6; printf ' │ '
-  print_table_cell "端口" 6; printf ' │ '
-  print_table_cell_clipped "传输" 6; printf ' │ '
-  print_table_cell_clipped "安全" 8; printf ' │ '
-  print_table_cell "用户" 4; printf ' │ 监听%s\n' "$C_RESET"
-  ui_rule 2
+  print_table_cell_clipped "标签" 18; printf '  '
+  print_table_cell_clipped "协议" 6; printf '  '
+  print_table_cell "端口" 6; printf '  '
+  print_table_cell_clipped "传输" 6; printf '  '
+  print_table_cell_clipped "安全" 8; printf '  '
+  print_table_cell "用户" 4; printf '  监听%s\n' "$C_RESET"
   jq -r '.inbounds | to_entries[] |
     [.value.tag,.value.protocol,(.value.port|tostring),
      (if .value.protocol=="vless" then
@@ -159,12 +158,12 @@ list_inbounds() {
           none|noauth) sec_disp="${C_YELLOW}${security}${C_RESET}" ;;
           *) sec_disp="$security" ;;
         esac
-        printf '  '; print_table_cell_clipped "$tag" 18; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell_clipped "$protocol" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell "$port" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell_clipped "$method" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell "$sec_disp" 8; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell "$users" 4; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$listen"
+        printf '  '; print_table_cell_clipped "$tag" 18; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$protocol" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell "$port" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$method" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell "$sec_disp" 8; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell "$users" 4; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$listen"
       done
 }
 
@@ -327,22 +326,21 @@ list_clients() {
   fi
   if ((count == 0)); then info "还没有用户。"; return; fi
   printf '  %s' "$C_DIM"
-  print_table_cell "序号" 5; printf ' │ '
-  print_table_cell "用户" 16; printf ' │ 凭据 (%s)%s\n' "$([[ $protocol == vless ]] && printf 'UUID' || printf '密码')" "$C_RESET"
-  ui_rule 2
+  print_table_cell "序号" 5; printf '  '
+  print_table_cell "用户" 16; printf '  凭据 (%s)%s\n' "$([[ $protocol == vless ]] && printf 'UUID' || printf '密码')" "$C_RESET"
   case $protocol in
     vless)
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.xrayctlLabel // .value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
         | while IFS=$'\t' read -r number label credential; do
-        printf '  '; print_table_cell "$number" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell_clipped "$label" 16; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$credential"
+        printf '  '; print_table_cell "$number" 5; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$label" 16; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$credential"
       done
       ;;
     socks|http)
       jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|to_entries[]|[.key+1,.value.user,(.value.pass // "-")]|@tsv' "$CONFIG_FILE" \
         | while IFS=$'\t' read -r number label credential; do
-        printf '  '; print_table_cell "$number" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell_clipped "$label" 16; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$credential"
+        printf '  '; print_table_cell "$number" 5; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$label" 16; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$credential"
       done
       ;;
     *) die "${protocol} 不支持独立多用户管理。";;

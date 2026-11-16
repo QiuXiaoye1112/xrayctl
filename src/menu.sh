@@ -3,12 +3,11 @@ outbound_menu() {
   local choice XRAYCTL_UI_CRUMB="首页 › 出站管理"
   while true; do
     clear_screen
-    heading "出站管理"
+    ui_page "出站管理"
     list_outbound_overview
-    ui_menu_group "分流与模板"
-    ui_menu_item 1 "入站出站管理"
+    ui_menu_group "操作"
+    ui_menu_item 1 "设置入站出站"
     ui_menu_item 2 "用户域名模板库"
-    ui_menu_group "代理出站节点"
     ui_menu_item 3 "添加代理出站 (SOCKS5/HTTP)"
     ui_menu_item 4 "查看出站详情"
     ui_menu_item 5 "删除出站"
@@ -176,7 +175,7 @@ user_template_menu() {
   _outbound_user_identity identity "$inbound" "$label" || return 1
   while true; do
     clear_screen
-    heading "用户模板 · ${label}"
+    ui_page "用户模板 · ${label}"
     ui_section "已应用模板"
     template_bindings_display "$inbound" "$identity"
     ui_menu_group "模板操作"
@@ -209,7 +208,7 @@ user_outbound_detail_menu() {
     else
       display_default="跟随入站（$(_outbound_display_name "$(_outbound_inbound_default "$inbound")")）"
     fi
-    heading "用户出站管理 · ${label}"
+    ui_page "用户出站管理 · ${label}"
     printf '默认出站：%s\n模板：\n' "$display_default"
     template_bindings_display "$inbound" "$identity"
     heading '域名分流规则'
@@ -250,7 +249,7 @@ inbound_outbound_detail_menu() {
   local -a labels=()
   while inbound_exists "$inbound"; do
     clear_screen
-    heading "出站管理 · ${inbound}"
+    ui_page "出站管理 · ${inbound}"
     mapfile -t labels < <(_outbound_user_labels "$inbound")
     inbound_default=$(_outbound_inbound_default "$inbound")
     inbound_rule_count=$(jq -r --arg inbound "$inbound" '
@@ -380,7 +379,7 @@ template_manage_menu() {
   local XRAYCTL_UI_CRUMB="首页 › 出站管理 › 模板库 › ${name}"
   while domain_template_exists "$name"; do
     clear_screen
-    heading "模板 · ${name}"
+    ui_page "模板 · ${name}"
     ui_section "精确域名"
     jq -r --arg name "$name" '.domainTemplates.templates[]? |
       select(.name==$name) | .exact[]? // empty | "  "+.' "$META_FILE"
@@ -415,7 +414,7 @@ template_library_menu() {
   local XRAYCTL_UI_CRUMB="首页 › 出站管理 › 模板库"
   while true; do
     clear_screen
-    heading '模板库'
+    ui_page '模板库'
     ui_section "现有模板"
     while IFS=$'\t' read -r name exact suffix; do
       [[ -n $name ]] || continue
@@ -442,7 +441,7 @@ client_menu_for_tag() {
   local XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${tag} › 用户管理"
   while inbound_exists "$tag"; do
     clear_screen
-    heading "用户管理 · ${tag}"
+    ui_page "用户管理 · ${tag}"
     list_clients "$tag"
     ui_menu_group "凭据操作"
     ui_menu_item 1 "添加用户"
@@ -465,7 +464,7 @@ modify_inbound_menu() {
   while inbound_exists "$current_tag"; do
     clear_screen
     XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${current_tag} › 修改信息"
-    heading "修改入站信息 · ${current_tag}"
+    ui_page "修改入站信息 · ${current_tag}"
     ui_menu_group "基础与网络"
     ui_menu_item 1 "修改入站名称"
     ui_menu_item 2 "修改地址/端口"
@@ -506,7 +505,7 @@ manage_inbound_menu() {
     clear_screen
     XRAYCTL_UI_CRUMB="首页 › 入站管理 › ${tag}"
     protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
-    heading "入站 · ${tag}"
+    ui_page "入站 · ${tag}"
     show_node_summary "$tag"
     case $protocol in
       vless)
@@ -614,7 +613,7 @@ inbound_menu() {
   local XRAYCTL_UI_CRUMB="首页 › 入站管理"
   while true; do
     clear_screen
-    heading "入站管理"
+    ui_page "入站管理"
     list_inbounds
     printf '\n'
     ui_kv "配置文件" "$CONFIG_FILE" 10
@@ -641,7 +640,7 @@ certificate_menu() {
   local XRAYCTL_UI_CRUMB="首页 › TLS 证书"
   while true; do
     clear_screen
-    heading "TLS 证书"
+    ui_page "TLS 证书"
     if load_cloudflare_credentials 2>/dev/null; then
       cf_state=$(ui_badge ok "已配置")
     else
@@ -694,7 +693,7 @@ service_menu() {
   local XRAYCTL_UI_CRUMB="首页 › 服务管理"
   while true; do
     clear_screen
-    heading "服务管理"
+    ui_page "服务管理"
     svc_badge=$(_ui_state_badge "$(service_state_summary)")
     boot_badge=$(_ui_state_badge "$(startup_state_summary)")
     bbr_badge=$(_ui_state_badge "$(bbr_state_summary)")
@@ -739,6 +738,7 @@ traffic_menu() {
   traffic_is_enabled && run_menu_action traffic_collect
   while true; do
     clear_screen
+    ui_page "流量信息"
     traffic_show || true
     ui_menu_group "统计操作"
     ui_menu_item 1 "刷新"
@@ -765,6 +765,7 @@ traffic_limit_menu() {
   while true; do
     if traffic_is_enabled; then run_menu_action traffic_collect || true; fi
     clear_screen
+    ui_page "流量限制"
     traffic_users_show "" || true
     ui_menu_group "配额管理"
     ui_menu_item 1 "刷新流量"
@@ -811,7 +812,7 @@ traffic_user_menu() {
     mapfile -t user_labels < <(jq -r --arg tag "$tag" '[.[] | select(.tag==$tag) | .label] | reduce .[] as $label ([]; if index($label)==null then .+[$label] else . end) | .[]' <<<"$inventory")
     if ((${#user_labels[@]} == 0)); then warn '该入站没有用户。'; pause; return 0; fi
     IFS=$'\t' read -r period_start _ < <(traffic_period_bounds "$(traffic_now)")
-    heading "$tag"
+    ui_page "$tag"
     for index in "${!user_labels[@]}"; do
     label=${user_labels[$index]}
     id=$(traffic_user_id "$tag" "$label")
@@ -1117,7 +1118,7 @@ domain_rule_detail_menu() {
   local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${tag} › 公共分流"
   while inbound_exists "$tag"; do
     clear_screen
-    heading "域名分流 · ${tag}"
+    ui_page "域名分流 · ${tag}"
     printf '模板：\n'
     template_bindings_display "$tag"
     list_domain_rules "$tag" --menu
@@ -1152,7 +1153,7 @@ inbound_template_manage_menu() {
   local XRAYCTL_UI_CRUMB="首页 › 出站管理 › ${inbound} › 公共分流 › 模板"
   while inbound_exists "$inbound"; do
     clear_screen
-    heading "入站模板 · ${inbound}"
+    ui_page "入站模板 · ${inbound}"
     ui_section "已应用模板"
     template_bindings_display "$inbound"
     ui_menu_group "模板操作"

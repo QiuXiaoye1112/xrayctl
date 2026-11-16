@@ -120,32 +120,25 @@ ui_badge() {
 }
 
 ui_banner() {
-  local title=$1 right=${2-} width inner pad title_w right_w border
-  width=$(ui_width)
-  inner=$((width - 4))
-  display_width title_w "$title"
-  display_width right_w "$right"
-  pad=$((inner - title_w - right_w - 2))
-  ((pad >= 1)) || pad=1
-  border=$(ui_repeat '─' "$inner")
-  printf '\n  '; _ui_put "$_ANSI_CYAN" "╭${border}╮"; printf '\n'
-  printf '  '; _ui_put "$_ANSI_CYAN" '│'; printf ' '
-  _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "$title"
-  printf '%*s' "$pad" ''
-  _ui_put "$_ANSI_DIM" "$right"
-  printf ' '; _ui_put "$_ANSI_CYAN" '│'; printf '\n'
-  printf '  '; _ui_put "$_ANSI_CYAN" "╰${border}╯"; printf '\n'
+  printf '\n  '
+  _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "$1"
+  if [[ -n ${2:-} ]]; then
+    printf '  '
+    _ui_put "$_ANSI_DIM" "$2"
+  fi
+  printf '\n'
+  ui_rule 2
 }
 
 ui_section() {
   printf '\n  '
-  _ui_put "${_ANSI_BOLD}${_ANSI_BLUE}" "▸ ${1}"
+  _ui_put "$_ANSI_BOLD" "$1"
   printf '\n'
 }
 
 ui_menu_group() {
   printf '\n  '
-  _ui_put "${_ANSI_BOLD}${_ANSI_BLUE}" "▸ ${1}"
+  _ui_put "$_ANSI_DIM" "$1"
   printf '\n'
 }
 
@@ -188,73 +181,35 @@ ui_kv() {
 }
 
 ui_card_open() {
-  local title=$1 width bar_len title_w
-  width=$(ui_width)
-  display_width title_w "$title"
-  bar_len=$((width - title_w - 6))
-  ((bar_len >= 4)) || bar_len=4
-  printf '\n  '
-  _ui_put "$_ANSI_DIM" '┌─ '
-  _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "$title"
-  printf ' '
-  _ui_put "$_ANSI_DIM" "$(ui_repeat '─' "$bar_len")"
-  printf '\n'
+  ui_section "$1"
 }
 
 ui_card_kv() {
-  local label=$1 value=$2 width=${3:-12}
-  printf '  '
-  _ui_put "$_ANSI_DIM" '│'
-  printf ' '
-  if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
-    printf '%s' "$_ANSI_DIM"
-    print_table_cell "$label" "$width"
-    printf '%s' "$_ANSI_RESET"
-  else
-    print_table_cell "$label" "$width"
-  fi
-  printf ' %s\n' "$value"
+  ui_kv "$1" "$2" "${3:-12}"
 }
 
 ui_card_line() {
-  printf '  '
-  _ui_put "$_ANSI_DIM" '│'
-  printf ' %s\n' "$1"
+  printf '  %s\n' "$1"
 }
 
 ui_card_close() {
-  local width
-  width=$(( $(ui_width) - 3 ))
-  ((width > 10)) || width=10
-  printf '  '
-  _ui_put "$_ANSI_DIM" "└$(ui_repeat '─' "$width")"
-  printf '\n'
+  :
 }
 
 ui_wizard_step() {
-  local step=$1 total=$2 title=$3 hint=${4-} width bar_len header_text header_w badge
-  width=$(ui_width)
+  local step=$1 total=$2 title=$3 hint=${4-} badge
   if [[ -n $total && $total != 0 ]]; then
     badge="[${step}/${total}]"
   else
     badge="[步骤 ${step}]"
   fi
-  header_text="${badge} ${title}"
-  display_width header_w "$header_text"
-  bar_len=$((width - header_w - 6))
-  ((bar_len >= 4)) || bar_len=4
   printf '\n  '
-  _ui_put "$_ANSI_DIM" '┌─ '
   _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "$badge"
   printf ' '
   _ui_put "$_ANSI_BOLD" "$title"
-  printf ' '
-  _ui_put "$_ANSI_DIM" "$(ui_repeat '─' "$bar_len")"
   printf '\n'
   if [[ -n $hint ]]; then
     printf '  '
-    _ui_put "$_ANSI_DIM" '│'
-    printf ' '
     _ui_put "$_ANSI_DIM" "$hint"
     printf '\n'
   fi
@@ -312,24 +267,28 @@ info()    { print_notice "信息" "$C_GREEN" "${1-}" "${@:2}"; }
 warn()    { print_notice "警告" "$C_YELLOW" "${1-}" "${@:2}" >&2; }
 error()   { print_notice "错误" "$C_RED" "${1-}" "${@:2}" >&2; }
 die()     { error "$*"; exit 1; }
+# Content headings never repeat the page navigation.
 heading() {
-  local title="$*" width bar_len title_w
-  width=$(ui_width)
-  if [[ -n ${XRAYCTL_UI_CRUMB:-} ]]; then
-    printf '\n  '
-    _ui_put "$_ANSI_DIM" "$XRAYCTL_UI_CRUMB"
+  ui_section "$*"
+}
+
+ui_page() {
+  local title=$1 crumb=${XRAYCTL_UI_CRUMB:-}
+  printf '\n  '
+  if [[ -n $crumb ]]; then
+    _ui_put "$_ANSI_DIM" "$crumb"
     printf '\n'
+    # The final breadcrumb already identifies ordinary menu pages.
+    if [[ ${crumb##* › } != "$title" ]]; then
+      printf '  '
+      _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "$title"
+      printf '\n'
+    fi
   else
+    _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "$title"
     printf '\n'
   fi
-  display_width title_w "$title"
-  bar_len=$((width - title_w - 5))
-  ((bar_len >= 4)) || bar_len=4
-  printf '  '
-  _ui_put "${_ANSI_BOLD}${_ANSI_CYAN}" "▸ ${title}"
-  printf ' '
-  _ui_put "$_ANSI_DIM" "$(ui_repeat '─' "$bar_len")"
-  printf '\n'
+  ui_rule 2
 }
 clear_screen() { clear 2>/dev/null || true; }
 

@@ -279,9 +279,7 @@ list_outbound_overview() {
     printf '  %s○ 还没有入站%s\n' "$C_DIM" "$C_RESET"
   else
     printf '  %s' "$C_DIM"
-    print_table_cell "序号" 5; printf ' │ '
-    print_table_cell "入站" 22; printf ' │ 默认出站%s\n' "$C_RESET"
-    ui_rule 2
+    print_table_cell "入站" 22; printf '  默认出站%s\n' "$C_RESET"
     jq -r '
       (.routing.rules // []) as $rules | (.outbounds[0].tag // "未设置") as $native |
       .inbounds | to_entries[] |
@@ -289,8 +287,8 @@ list_outbound_overview() {
       [$number,$tag,([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
       | while IFS=$'\t' read -r number tag outbound; do
           local display; display=$(_outbound_display_name "$outbound")
-          printf '  '; print_table_cell "$number" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-          print_table_cell_clipped "$tag" 22; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$display"
+          printf '  '
+          print_table_cell_clipped "$tag" 22; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$display"
         done
   fi
 
@@ -301,17 +299,15 @@ list_outbound_overview() {
        .value.settings.address,(.value.settings.port|tostring),
        (if (.value.settings.user // "")=="" then "无" else .value.settings.user end)] | @tsv' "$CONFIG_FILE")
     printf '  %s' "$C_DIM"
-    print_table_cell "序号" 4; printf ' │ '
-    print_table_cell_clipped "标签" 16; printf ' │ '
-    print_table_cell "协议" 6; printf ' │ '
-    print_table_cell_clipped "地址" 22; printf ' │ 用户%s\n' "$C_RESET"
-    ui_rule 2
+    print_table_cell_clipped "标签" 16; printf '  '
+    print_table_cell "协议" 6; printf '  '
+    printf '地址%s\n' "$C_RESET"
     while IFS=$'\t' read -r number tag protocol address port username; do
       endpoint=$(_outbound_endpoint_display "$address" "$port")
-      printf '  '; print_table_cell "$number" 4; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-      print_table_cell_clipped "$tag" 16; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-      print_table_cell "$protocol" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-      print_table_cell_clipped "$endpoint" 22; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$username"
+      printf '  '
+      print_table_cell_clipped "$tag" 16; printf '%s%s  ' "$C_DIM" "$C_RESET"
+      print_table_cell "$protocol" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+      printf '%s\n' "$endpoint"
     done <<<"$rows"
   else
     printf '  %s○ 还没有手动添加的代理出站%s\n' "$C_DIM" "$C_RESET"
