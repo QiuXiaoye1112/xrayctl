@@ -1559,7 +1559,7 @@ delete_domain_rule() {
       printf '%d) %s\n' "$((idx+1))" "${rule_domains[$idx]}"
     done
     while true; do
-      read -r -p '请选择要删除的规则（支持 1,3,2）: ' selection || { cancel_input; return 1; }
+      read -r -p '  请选择要删除的规则（支持 1,3,2）: ' selection || { cancel_input; return 1; }
       selection=$(printf '%s' "$selection" | tr -d '[:space:]')
       delete_indices=()
       IFS=',' read -r -a tokens <<<"$selection"

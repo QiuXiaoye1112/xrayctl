@@ -314,14 +314,14 @@ is_linux() { [[ $(uname -s) == "Linux" ]]; }
 
 pause() {
   [[ -t 0 ]] || return 0
-  read -r -p "按回车键继续..." _ || true
+  read -r -p "  按回车键继续..." _ || true
 }
 
 confirm() {
   local prompt=${1:-"确定继续吗？"} default=${2:-N} answer
   if [[ ! -t 0 ]]; then [[ $default == Y ]]; return; fi
   printf '\n' >&2
-  read -r -p "${prompt} [Y/N]: " answer || { cancel_input; return 1; }
+  read -r -p "  ${prompt} [Y/N]: " answer || { cancel_input; return 1; }
   answer=${answer:-$default}
   [[ $answer =~ ^[Yy]$ ]]
 }
@@ -340,10 +340,10 @@ prompt_value() {
   local __var=$1 prompt=$2 default=${3-} input_value
   while true; do
     if [[ -n $default ]]; then
-      if ! read -r -p "${prompt} [${default}]: " input_value; then cancel_input; return 1; fi
+      if ! read -r -p "  ${prompt} [${default}]: " input_value; then cancel_input; return 1; fi
       input_value=${input_value:-$default}
     else
-      if ! read -r -p "${prompt}: " input_value; then cancel_input; return 1; fi
+      if ! read -r -p "  ${prompt}: " input_value; then cancel_input; return 1; fi
       if [[ -z $input_value ]]; then warn "此项不能为空，请重新输入。"; continue; fi
     fi
     printf -v "$__var" '%s' "$input_value"
@@ -353,18 +353,18 @@ prompt_value() {
 
 prompt_optional_value() {
   local __var=$1 prompt=$2 input_value=""
-  if ! read -r -p "${prompt}: " input_value; then cancel_input; return 1; fi
+  if ! read -r -p "  ${prompt}: " input_value; then cancel_input; return 1; fi
   printf -v "$__var" '%s' "$input_value"
 }
 
 prompt_secret() {
   local __var=$1 prompt=$2 generated=${3-} secret_value=""
   if [[ -n $generated ]]; then
-    if ! read -r -p "${prompt}（留空自动生成）: " secret_value; then cancel_input; return 1; fi
+    if ! read -r -p "  ${prompt}（留空自动生成）: " secret_value; then cancel_input; return 1; fi
     secret_value=${secret_value:-$generated}
   else
     while [[ -z $secret_value ]]; do
-      if ! read -r -p "${prompt}: " secret_value; then cancel_input; return 1; fi
+      if ! read -r -p "  ${prompt}: " secret_value; then cancel_input; return 1; fi
       [[ -n $secret_value ]] || warn "密码不能为空，请重新输入。"
     done
   fi
@@ -374,7 +374,7 @@ prompt_secret() {
 prompt_hidden_secret() {
   local __var=$1 prompt=$2 value=""
   while [[ -z $value ]]; do
-    printf '%s: ' "$prompt"
+    printf '  %s: ' "$prompt"
     if ! read -r -s value; then cancel_input; return 1; fi
     printf '\n'
     [[ -n $value ]] || warn "不能为空，请重新输入。"
@@ -394,7 +394,7 @@ choose() {
     printf ' %s\n' "${options[$i]}"
   done
   while true; do
-    read -r -p "请选择 [1-${#options[@]}]: " selected_value || { cancel_selection; return 1; }
+    read -r -p "  请选择 [1-${#options[@]}]: " selected_value || { cancel_selection; return 1; }
     if [[ $selected_value =~ ^[0-9]+$ ]] && (( selected_value >= 1 && selected_value <= ${#options[@]} )); then
       printf -v "$__var" '%s' "$selected_value"
       return 0

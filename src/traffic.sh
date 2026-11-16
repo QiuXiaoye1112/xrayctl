@@ -578,7 +578,7 @@ traffic_user_limit_set() {
   [[ -n $id ]] || return 1
   if [[ -z $quota_gb || -z $reset_day && -t 0 ]]; then interactive=1; fi
   while [[ -z $quota_gb ]]; do
-    read -r -p "每月流量额度（GB）: " quota_gb || { cancel_input; return 0; }
+    read -r -p "  每月流量额度（GB）: " quota_gb || { cancel_input; return 0; }
     traffic_limit_quota_bytes "$quota_gb" >/dev/null || { warn "请输入大于 0 的数字。"; quota_gb=""; }
   done
   quota=$(traffic_limit_quota_bytes "$quota_gb") || { warn "流量额度无效。"; return 1; }
@@ -1505,8 +1505,8 @@ traffic_period_show() {
 traffic_period_set() {
   local day=${1-} clock=${2-} tmp rc=0
   traffic_require_root traffic-period-set
-  if [[ -z $day ]]; then read -r -p '每月起始日期（1-31）: ' day || { cancel_input; return 0; }; fi
-  if [[ -z $clock ]]; then read -r -p '起始时间（HH:MM）: ' clock || { cancel_input; return 0; }; fi
+  if [[ -z $day ]]; then read -r -p '  每月起始日期（1-31）: ' day || { cancel_input; return 0; }; fi
+  if [[ -z $clock ]]; then read -r -p '  起始时间（HH:MM）: ' clock || { cancel_input; return 0; }; fi
   if [[ ! $day =~ ^[0-9]+$ ]] || ((10#$day < 1 || 10#$day > 31)); then
     warn '日期必须是 1 到 31。'
     return 1

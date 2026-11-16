@@ -536,7 +536,7 @@ cloudflare_credentials_menu() {
       ui_menu_item 1 "配置 Cloudflare 凭据"
     fi
     ui_menu_footer "返回"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action save_cloudflare_credentials; pause;;
       2) if load_cloudflare_credentials; then
@@ -1119,7 +1119,7 @@ manage_inbound_certificate_menu() {
     ui_menu_item 1 "更换托管证书"
     ui_menu_item 2 "使用证书文件"
     ui_menu_footer "返回入站"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1)
         if select_managed_certificate identifier; then

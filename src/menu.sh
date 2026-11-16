@@ -12,7 +12,7 @@ outbound_menu() {
     ui_menu_item 4 "查看出站详情"
     ui_menu_item 5 "删除出站"
     ui_menu_footer "返回"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) inbound_outbound_menu;;
       2) template_library_menu;;
@@ -182,7 +182,7 @@ user_template_menu() {
     ui_menu_item 1 "应用模板"
     ui_menu_item 2 "移除模板"
     ui_menu_footer "返回"
-    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
+    read -r -p '  请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1)
         select_domain_template name || continue
@@ -219,7 +219,7 @@ user_outbound_detail_menu() {
     ui_menu_item 3 "添加规则"
     ui_menu_item 4 "删除规则"
     ui_menu_footer "返回"
-    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
+    read -r -p '  请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action outbound_user_default_set "$inbound" "$label" ""; pause;;
       2) user_template_menu "$inbound" "$label";;
@@ -287,7 +287,7 @@ inbound_outbound_detail_menu() {
     ui_menu_item 2 "公共域名分流"
     ui_menu_item 3 "用户出站管理"
     ui_menu_footer "返回"
-    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
+    read -r -p '  请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action assign_outbound "$inbound" ""; pause;;
       2) domain_rule_detail_menu "$inbound";;
@@ -336,7 +336,7 @@ delete_domain_template_domains_menu() {
     printf '%d) %s\n' "$((idx+1))" "${domains[$idx]}"
   done
   while true; do
-    read -r -p '请选择要删除的域名（支持 1,3,2）: ' selection || { cancel_selection; return 1; }
+    read -r -p '  请选择要删除的域名（支持 1,3,2）: ' selection || { cancel_selection; return 1; }
     selection=$(printf '%s' "$selection" | tr -d '[:space:]')
     [[ -n $selection ]] || return 1
     selected=()
@@ -390,7 +390,7 @@ template_manage_menu() {
     ui_menu_item 1 "添加域名"
     ui_menu_item 2 "删除域名"
     ui_menu_footer "返回"
-    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
+    read -r -p '  请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1)
         choose type "域名类型" "精确域名" "域名及所有子域名" || continue
@@ -425,7 +425,7 @@ template_library_menu() {
     ui_menu_item 2 "管理模板"
     ui_menu_item 3 "删除模板"
     ui_menu_footer "返回"
-    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
+    read -r -p '  请选择: ' choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action create_domain_template; pause;;
       2) if select_domain_template name; then template_manage_menu "$name"; fi;;
@@ -449,7 +449,7 @@ client_menu_for_tag() {
     ui_menu_item 3 "更换 UUID/密码"
     ui_menu_item 4 "删除用户"
     ui_menu_footer "返回入站"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action add_client "$tag"; pause;; 2) run_menu_action rename_client "$tag"; pause;;
       3) run_menu_action rotate_client_credential "$tag"; pause;; 4) run_menu_action delete_client "$tag"; pause;;
@@ -473,7 +473,7 @@ modify_inbound_menu() {
       ui_menu_item 3 "修改传输/安全"
     fi
     ui_menu_footer "返回入站"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1)
         # Keep the requested name in this shell: run_menu_action isolates writes
@@ -519,7 +519,7 @@ manage_inbound_menu() {
           ui_menu_item 4 "证书管理"
           ui_menu_item 5 "查看 JSON"
           ui_menu_footer "返回列表"
-          read -r -p "请选择: " choice || { cancel_selection; return 0; }
+          read -r -p "  请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
             4) manage_inbound_certificate_menu "$tag";; 5) run_menu_action show_inbound "$tag"; pause;;
@@ -533,7 +533,7 @@ manage_inbound_menu() {
           ui_menu_item 3 "修改入站信息"
           ui_menu_item 4 "查看 JSON"
           ui_menu_footer "返回列表"
-          read -r -p "请选择: " choice || { cancel_selection; return 0; }
+          read -r -p "  请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
             4) run_menu_action show_inbound "$tag"; pause;;
@@ -552,7 +552,7 @@ manage_inbound_menu() {
           ui_menu_item 3 "修改入站信息"
           ui_menu_item 4 "查看 JSON"
           ui_menu_footer "返回列表"
-          read -r -p "请选择: " choice || { cancel_selection; return 0; }
+          read -r -p "  请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
             4) run_menu_action show_inbound "$tag"; pause;;
@@ -564,7 +564,7 @@ manage_inbound_menu() {
           ui_menu_item 2 "修改入站信息"
           ui_menu_item 3 "查看 JSON"
           ui_menu_footer "返回列表"
-          read -r -p "请选择: " choice || { cancel_selection; return 0; }
+          read -r -p "  请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol" tag;;
             3) run_menu_action show_inbound "$tag"; pause;;
@@ -583,7 +583,7 @@ manage_inbound_menu() {
           ui_menu_item 3 "修改入站信息"
           ui_menu_item 4 "查看 JSON"
           ui_menu_footer "返回列表"
-          read -r -p "请选择: " choice || { cancel_selection; return 0; }
+          read -r -p "  请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) client_menu_for_tag "$tag";; 3) modify_inbound_menu "$tag" "$protocol" tag;;
             4) run_menu_action show_inbound "$tag"; pause;;
@@ -595,7 +595,7 @@ manage_inbound_menu() {
           ui_menu_item 2 "修改入站信息"
           ui_menu_item 3 "查看 JSON"
           ui_menu_footer "返回列表"
-          read -r -p "请选择: " choice || { cancel_selection; return 0; }
+          read -r -p "  请选择: " choice || { cancel_selection; return 0; }
           case $choice in
             1) run_menu_action print_links "$tag"; pause;; 2) modify_inbound_menu "$tag" "$protocol" tag;;
             3) run_menu_action show_inbound "$tag"; pause;;
@@ -609,7 +609,7 @@ manage_inbound_menu() {
 }
 
 inbound_menu() {
-  local choice tag
+  local choice tag XRAYCTL_INPUT_CANCELLED=0
   local XRAYCTL_UI_CRUMB="首页 › 入站管理"
   while true; do
     clear_screen
@@ -624,10 +624,17 @@ inbound_menu() {
     ui_menu_item 3 "全部分享链接"
     ui_menu_item 4 "删除入站"
     ui_menu_footer "返回"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action add_inbound; pause;;
-      2) if select_inbound tag; then manage_inbound_menu "$tag"; fi;;
+      2)
+        if select_inbound tag; then
+          manage_inbound_menu "$tag"
+        elif [[ ${XRAYCTL_INPUT_CANCELLED:-0} == 1 ]]; then
+          pause
+          XRAYCTL_INPUT_CANCELLED=0
+        fi
+        ;;
       3) run_menu_action print_all_share_links; pause;;
       4) run_menu_action delete_inbound; pause;;
       0) return;; *) warn "无效选项。"; pause;;
@@ -659,7 +666,7 @@ certificate_menu() {
     ui_menu_item 5 "Cloudflare 凭据"
     ui_menu_item 6 "立即续期所有证书"
     ui_menu_footer "返回"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action issue_certificate; pause;;
       2) run_menu_action import_certificate; pause;;
@@ -712,7 +719,7 @@ service_menu() {
     ui_menu_item 5 "安装 Xray"
     ui_menu_item 6 "BBR启用/关闭"
     ui_menu_footer "返回"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action toggle_service_running; pause;; 2) run_menu_action service_action restart; pause;;
       3) run_menu_action toggle_service_startup; pause;; 4) run_menu_action show_logs 100; pause;;
@@ -746,7 +753,7 @@ traffic_menu() {
     ui_menu_item 3 "清空全部入站流量记录"
     ui_menu_item 4 "设置月度统计起点"
     ui_menu_footer "返回"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action traffic_collect;;
       2) run_menu_action traffic_clear_tag_records; pause;;
@@ -771,7 +778,7 @@ traffic_limit_menu() {
     ui_menu_item 1 "刷新流量"
     ui_menu_item 2 "管理用户额度"
     ui_menu_footer "返回"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) continue;;
       2) traffic_user_menu;;
@@ -846,7 +853,7 @@ traffic_user_menu() {
     ui_menu_item 2 "重置用户流量"
     ui_menu_item 3 "取消用户额度"
     ui_menu_footer "返回"
-    read -r -p '请选择: ' choice || { cancel_selection; return 0; }
+    read -r -p '  请选择: ' choice || { cancel_selection; return 0; }
     case $choice in 0) return 0;; 1|2|3) ;; *) warn '无效选项。'; pause; continue;; esac
     if ((${#user_labels[@]} == 1)); then
       label=${user_labels[0]}
@@ -854,7 +861,7 @@ traffic_user_menu() {
       printf '\n选择用户\n'
       for index in "${!user_labels[@]}"; do printf '  %s) %s\n' "$((index+1))" "${user_labels[$index]}"; done
       while true; do
-        read -r -p '输入用户序号: ' selected || { cancel_selection; return 0; }
+        read -r -p '  输入用户序号: ' selected || { cancel_selection; return 0; }
         if [[ $selected =~ ^[0-9]+$ ]] && ((${#selected} <= 6)) && ((10#$selected >= 1 && 10#$selected <= ${#user_labels[@]})); then
           label=${user_labels[$((10#$selected-1))]}
           break
@@ -890,7 +897,7 @@ main_menu() {
     ui_menu_item 6 "服务管理"
     ui_menu_item 7 "卸载"
     ui_menu_footer "退出"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) inbound_menu;; 2) outbound_menu;; 3) certificate_menu;; 4) traffic_limit_menu;;
       5) traffic_menu;; 6) service_menu;;
@@ -1127,7 +1134,7 @@ domain_rule_detail_menu() {
     ui_menu_item 2 "添加规则"
     ui_menu_item 3 "删除规则"
     ui_menu_footer "返回"
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) inbound_template_manage_menu "$tag";;
       2) if run_menu_action add_domain_rule "$tag" "" "" "" --prompt; then pause; fi;;
@@ -1161,7 +1168,7 @@ inbound_template_manage_menu() {
     ui_menu_item 2 "移除模板"
     ui_menu_item 3 "修改出站"
     ui_menu_footer "返回"
-    read -r -p '请选择: ' choice || { cancel_selection; return 1; }
+    read -r -p '  请选择: ' choice || { cancel_selection; return 1; }
     case $choice in
       1) if apply_domain_template_menu "$inbound"; then :; fi; pause;;
       2)
