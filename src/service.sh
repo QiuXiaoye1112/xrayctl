@@ -548,17 +548,15 @@ show_main_summary() {
   if declare -F certificate_count >/dev/null 2>&1; then
     certs=$(certificate_count 2>/dev/null || printf '0')
   fi
-  printf '  状态 %s   %s│%s  Xray %s%s%s   %s│%s  BBR %s   %s│%s  入站 %s%s%s  证书 %s%s%s\n' \
-    "$svc" "$C_DIM" "$C_RESET" \
-    "$C_BOLD" "$(xray_version_summary)" "$C_RESET" "$C_DIM" "$C_RESET" \
-    "$bbr" "$C_DIM" "$C_RESET" \
-    "$C_BOLD" "$(node_count_summary)" "$C_RESET" \
-    "$C_BOLD" "$certs" "$C_RESET"
+  printf '  状态 %s   Xray %s%s%s   BBR %s\n' \
+    "$svc" "$C_BOLD" "$(xray_version_summary)" "$C_RESET" "$bbr"
+  printf '  入站 %s%s%s 个   证书 %s%s%s 张\n' \
+    "$C_BOLD" "$(node_count_summary)" "$C_RESET" "$C_BOLD" "$certs" "$C_RESET"
 }
 
 show_main_inbounds() {
   command_exists jq && [[ -r $CONFIG_FILE ]] || return 0
-  local count tag protocol port method security users outbound sec_disp out_disp
+  local count tag protocol port users outbound out_disp
   count=$(jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null) || return 0
   ui_section "入站概览"
   if ((count == 0)); then
@@ -566,47 +564,29 @@ show_main_inbounds() {
     return 0
   fi
   printf '  %s' "$C_DIM"
-  print_table_cell_clipped "标签" 16; printf ' │ '
-  print_table_cell_clipped "协议" 6; printf ' │ '
-  print_table_cell "端口" 6; printf ' │ '
-  print_table_cell_clipped "传输" 5; printf ' │ '
-  print_table_cell_clipped "安全" 8; printf ' │ '
-  print_table_cell "用户" 4; printf ' │ 默认出站%s\n' "$C_RESET"
-  ui_rule 2
+  print_table_cell_clipped "标签" 16; printf '  '
+  print_table_cell_clipped "协议" 6; printf '  '
+  print_table_cell "端口" 6; printf '  '
+  print_table_cell "用户" 4; printf '  默认出站%s\n' "$C_RESET"
   jq -r '
     (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
     .inbounds[] |
     .tag as $tag |
     [$tag,.protocol,
      (.port|tostring),
-     (if .protocol=="vless" then
-        (if (.streamSettings.network // .streamSettings.method // "raw")=="websocket" then "ws" else (.streamSettings.network // .streamSettings.method // "raw") end)
-      else "-" end),
-     (if .protocol=="vless" then (.streamSettings.security // "none")
-      elif .protocol=="socks" then (.settings.auth // "noauth")
-      elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
-      else "noauth" end),
      (if .protocol=="vless" then (.settings.clients // [] | length)
       else ((.settings.accounts // .settings.users // []) | length) end | tostring),
      ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
-    | while IFS=$'\t' read -r tag protocol port method security users outbound; do
-        case $security in
-          reality) sec_disp="${C_CYAN}${security}${C_RESET}" ;;
-          tls|password) sec_disp="${C_GREEN}${security}${C_RESET}" ;;
-          none|noauth) sec_disp="${C_YELLOW}${security}${C_RESET}" ;;
-          *) sec_disp="$security" ;;
-        esac
+    | while IFS=$'\t' read -r tag protocol port users outbound; do
         if declare -F _outbound_display_name >/dev/null 2>&1; then
           out_disp=$(_outbound_display_name "$outbound")
         else
           out_disp=$outbound
         fi
-        printf '  '; print_table_cell_clipped "$tag" 16; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell_clipped "$protocol" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell "$port" 6; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell_clipped "$method" 5; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell "$sec_disp" 8; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-        print_table_cell "$users" 4; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$out_disp"
+        printf '  '; print_table_cell_clipped "$tag" 16; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$protocol" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell "$port" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell "$users" 4; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$out_disp"
       done
 }
 

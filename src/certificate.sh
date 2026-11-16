@@ -519,20 +519,24 @@ cloudflare_credentials_menu() {
   local choice deps
   while true; do
     clear_screen
-    heading "Cloudflare 凭据管理"
+    ui_page "Cloudflare 凭据管理"
     if load_cloudflare_credentials; then
       local email
       email=$(grep 'dns_cloudflare_email' "$CLOUDFLARE_INI" 2>/dev/null | sed 's/.*=\s*//')
       printf 'Cloudflare 邮箱: %s\n' "${email:-未知}"
       printf 'Global API Key: 已配置\n'
       cf_credentials_summary
-      printf '\n1) 更新 Global API Key\n2) 删除保存的凭据\n0) 返回\n'
+      ui_menu_group "凭据操作"
+      ui_menu_item 1 "更新 Global API Key"
+      ui_menu_item 2 "删除保存的凭据"
     else
       printf 'Cloudflare 凭据: 未配置\n'
       cf_credentials_summary
-      printf '\n1) 配置 Cloudflare 凭据\n0) 返回\n'
+      ui_menu_group "凭据操作"
+      ui_menu_item 1 "配置 Cloudflare 凭据"
     fi
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    ui_menu_footer "返回"
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1) run_menu_action save_cloudflare_credentials; pause;;
       2) if load_cloudflare_credentials; then
@@ -1110,10 +1114,12 @@ manage_inbound_certificate_menu() {
     current_key=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.tlsSettings.certificates[0].keyFile // "未设置"' "$CONFIG_FILE")
     current_sni=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.tlsSettings.serverName // "未设置"' "$CONFIG_FILE")
     clear_screen
-    heading "证书管理 · ${tag}"
+    ui_page "证书管理 · ${tag}"
     printf '证书: %s\n私钥: %s\nSNI: %s\n\n' "$current_cert" "$current_key" "$current_sni"
-    printf '1) 更换托管证书\n2) 使用证书文件\n0) 返回入站\n'
-    read -r -p "请选择: " choice || { cancel_selection; return 0; }
+    ui_menu_item 1 "更换托管证书"
+    ui_menu_item 2 "使用证书文件"
+    ui_menu_footer "返回入站"
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
       1)
         if select_managed_certificate identifier; then

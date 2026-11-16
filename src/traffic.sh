@@ -578,7 +578,7 @@ traffic_user_limit_set() {
   [[ -n $id ]] || return 1
   if [[ -z $quota_gb || -z $reset_day && -t 0 ]]; then interactive=1; fi
   while [[ -z $quota_gb ]]; do
-    read -r -p "每月流量额度（GB）: " quota_gb || { cancel_input; return 0; }
+    read -r -p "  每月流量额度（GB）: " quota_gb || { cancel_input; return 0; }
     traffic_limit_quota_bytes "$quota_gb" >/dev/null || { warn "请输入大于 0 的数字。"; quota_gb=""; }
   done
   quota=$(traffic_limit_quota_bytes "$quota_gb") || { warn "流量额度无效。"; return 1; }
@@ -681,11 +681,10 @@ traffic_users_show() {
     if [[ $tag != "$current_tag" ]]; then
       printf '\n  %s▸ %s%s\n' "$C_BOLD$C_CYAN" "$tag" "$C_RESET"
       printf '  %s' "$C_DIM"
-      print_table_cell '用户名称' 12; printf ' │ '
+      print_table_cell '用户名称' 12; printf '  '
       print_table_cell_right '已用流量' 10; printf ' / '
-      print_table_cell '月度额度' 10; printf ' │ '
-      print_table_cell '状态' 8; printf ' │ 占用%s\n' "$C_RESET"
-      ui_rule 2
+      print_table_cell '月度额度' 10; printf '  '
+      print_table_cell '状态' 8; printf '  占用%s\n' "$C_RESET"
       current_tag=$tag
     fi
     if [[ -z $id || $id == '-' ]]; then
@@ -718,10 +717,10 @@ traffic_users_show() {
     if [[ $ambiguous == true ]]; then used='统计冲突'
     elif [[ $user_state == '已配置' ]]; then used=$(traffic_format_bytes "$current_bytes")
     else used='未统计'; fi
-    printf '  '; print_table_cell_clipped "$label" 12; printf ' %s│%s ' "$C_DIM" "$C_RESET"
+    printf '  '; print_table_cell_clipped "$label" 12; printf '%s%s  ' "$C_DIM" "$C_RESET"
     print_table_cell_right "$used" 10; printf ' / '
-    print_table_cell "$quota" 10; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-    print_table_cell "$status_disp" 8; printf ' %s│%s %s\n' "$C_DIM" "$C_RESET" "$bar"
+    print_table_cell "$quota" 10; printf '%s%s  ' "$C_DIM" "$C_RESET"
+    print_table_cell "$status_disp" 8; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$bar"
   done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --argjson inventory "$inventory" --arg periodStart "$period_start" --arg filter "$filter" '
     $state[0] as $s | .inbounds[]? | select($filter=="" or .tag==$filter) | .tag as $tag | .protocol as $protocol |
     if $protocol=="vless" then
@@ -1506,8 +1505,8 @@ traffic_period_show() {
 traffic_period_set() {
   local day=${1-} clock=${2-} tmp rc=0
   traffic_require_root traffic-period-set
-  if [[ -z $day ]]; then read -r -p '每月起始日期（1-31）: ' day || { cancel_input; return 0; }; fi
-  if [[ -z $clock ]]; then read -r -p '起始时间（HH:MM）: ' clock || { cancel_input; return 0; }; fi
+  if [[ -z $day ]]; then read -r -p '  每月起始日期（1-31）: ' day || { cancel_input; return 0; }; fi
+  if [[ -z $clock ]]; then read -r -p '  起始时间（HH:MM）: ' clock || { cancel_input; return 0; }; fi
   if [[ ! $day =~ ^[0-9]+$ ]] || ((10#$day < 1 || 10#$day > 31)); then
     warn '日期必须是 1 到 31。'
     return 1
@@ -1553,10 +1552,9 @@ traffic_show() {
   heading "流量信息"
   printf '  统计状态：%s  |  统计范围：%s ～ %s\n  最后采集：%s\n\n' "$status" "$start" "$end" "${last:-尚未采集}"
   printf '%s' "$C_DIM"
-  print_table_cell_clipped "标签" 20; printf ' │ '
-  print_table_cell_clipped "协议" 10; printf ' │ '
-  print_table_cell "端口" 7; printf ' │ %14s%s\n' "总流量" "$C_RESET"
-  ui_rule 0
+  print_table_cell_clipped "标签" 20; printf '  '
+  print_table_cell_clipped "协议" 10; printf '  '
+  print_table_cell "端口" 7; printf '  %14s%s\n' "总流量" "$C_RESET"
   display_order=$(jq -c '[.inbounds[]?.tag]' "$CONFIG_FILE" 2>/dev/null || printf '[]')
   rows=$(jq -r --arg start "$start" --arg finish "$end" --argjson period "$period" --argjson order "$display_order" '
     ($order | to_entries | map({key:.value,value:.key}) | from_entries) as $positions |
@@ -1570,9 +1568,9 @@ traffic_show() {
   if [[ -n $rows ]]; then
     while IFS=$'\t' read -r tag protocol port bytes deleted disabled; do
       if [[ $disabled == true ]]; then tag="${tag}(已禁用)"; elif [[ $deleted == true ]]; then tag="${tag}(已删除)"; fi
-      print_table_cell_clipped "$tag" 20; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-      print_table_cell_clipped "$protocol" 10; printf ' %s│%s ' "$C_DIM" "$C_RESET"
-      print_table_cell "$port" 7; printf ' %s│%s %s%14s%s\n' "$C_DIM" "$C_RESET" "$C_BOLD" "$(traffic_format_bytes "$bytes")" "$C_RESET"
+      print_table_cell_clipped "$tag" 20; printf '%s%s  ' "$C_DIM" "$C_RESET"
+      print_table_cell_clipped "$protocol" 10; printf '%s%s  ' "$C_DIM" "$C_RESET"
+      print_table_cell "$port" 7; printf '%s%s  %s%14s%s\n' "$C_DIM" "$C_RESET" "$C_BOLD" "$(traffic_format_bytes "$bytes")" "$C_RESET"
     done <<<"$rows"
   fi
   if [[ $period == true ]]; then
@@ -1580,7 +1578,6 @@ traffic_show() {
   else
     total=$(traffic_range_total "$start" "$end")
   fi
-  ui_rule 0
   printf '全部入站：%s%s%s\n' "$C_BOLD$C_CYAN" "$(traffic_format_bytes "$total")" "$C_RESET"
 }
 
