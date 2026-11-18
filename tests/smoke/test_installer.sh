@@ -79,10 +79,12 @@ PATH="$TEST_ROOT/bin:$PATH" bash "$REPO_ROOT/install.sh" 26.3.27 >/dev/null
 assert_eq 'install 26.3.27' "$(<"$XRAYCTL_TEST_INVOCATION")" 'explicit version should install the core'
 
 # Alpine uses the same distinction between manager update and core install.
+export XRAYCTL_TEST_REAL_GREP
+XRAYCTL_TEST_REAL_GREP=$(command -v grep)
 cat >"$TEST_ROOT/bin/grep" <<'SH'
 #!/bin/sh
 if [ "$#" -eq 3 ] && [ "$1" = -q ] && [ "$2" = '^ID=alpine$' ] && [ "$3" = /etc/os-release ]; then exit 0; fi
-exec /usr/bin/grep "$@"
+exec "$XRAYCTL_TEST_REAL_GREP" "$@"
 SH
 cat >"$TEST_ROOT/bin/apk" <<'SH'
 #!/bin/sh
