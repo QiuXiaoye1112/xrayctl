@@ -23,6 +23,7 @@ tests=(
   "tests/integration/test_user_identity_transaction.sh"
   "tests/integration/test_certificate_transaction.sh"
   "tests/integration/test_lifecycle.sh"
+  "tests/integration/test_script_update.sh"
   "tests/integration/test_outbound_routing.sh"
   "tests/integration/test_client_rotate_automation.sh"
   "tests/integration/test_outbound_restore_automation.sh"

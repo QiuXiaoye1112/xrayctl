@@ -7,6 +7,7 @@ readonly REPO_ROOT=$(cd "${TEST_DIR}/../.." && pwd)
 readonly TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-installer.XXXXXX")
 
 cleanup_test_root() {
+  if [[ -n ${fake_core_pid:-} ]]; then kill "$fake_core_pid" 2>/dev/null || true; wait "$fake_core_pid" 2>/dev/null || true; fi
   [[ -n ${TEST_ROOT:-} && $TEST_ROOT == "${TMPDIR:-/tmp}"/xrayctl-installer.* ]] || return 1
   rm -rf "$TEST_ROOT"
 }
@@ -65,6 +66,57 @@ grep -Eq '^https://raw\.githubusercontent\.com/QiuXiaoye1112/xrayctl/0123456789a
   || fail 'bootstrap did not pin the distribution to the resolved main commit'
 grep -q '^# xrayctl - Xray Linux terminal manager' "$XRAYCTL_COMMAND_PATH" \
   || fail 'bootstrap did not install the verified distribution'
+
+# Existing installations update only the manager unless a core version is requested.
+export XRAYCTL_XRAY_BIN="$TEST_ROOT/xray-core"
+export XRAYCTL_CONFIG_FILE="$TEST_ROOT/config.json"
+printf '#!/bin/sh\nexit 0\n' >"$XRAYCTL_XRAY_BIN"
+chmod +x "$XRAYCTL_XRAY_BIN"
+printf '{}\n' >"$XRAYCTL_CONFIG_FILE"
+PATH="$TEST_ROOT/bin:$PATH" bash "$REPO_ROOT/install.sh" >/dev/null
+assert_eq 'internal-script-update' "$(<"$XRAYCTL_TEST_INVOCATION")" 'existing install should only update the manager'
+PATH="$TEST_ROOT/bin:$PATH" bash "$REPO_ROOT/install.sh" 26.3.27 >/dev/null
+assert_eq 'install 26.3.27' "$(<"$XRAYCTL_TEST_INVOCATION")" 'explicit version should install the core'
+
+# Alpine uses the same distinction between manager update and core install.
+cat >"$TEST_ROOT/bin/grep" <<'SH'
+#!/bin/sh
+if [ "$#" -eq 3 ] && [ "$1" = -q ] && [ "$2" = '^ID=alpine$' ] && [ "$3" = /etc/os-release ]; then exit 0; fi
+exec /usr/bin/grep "$@"
+SH
+cat >"$TEST_ROOT/bin/apk" <<'SH'
+#!/bin/sh
+exit 0
+SH
+cat >"$TEST_ROOT/bin/update-ca-certificates" <<'SH'
+#!/bin/sh
+exit 0
+SH
+chmod +x "$TEST_ROOT/bin/grep" "$TEST_ROOT/bin/apk" "$TEST_ROOT/bin/update-ca-certificates"
+if [[ -r /etc/os-release ]]; then
+  PATH="$TEST_ROOT/bin:$PATH" sh "$REPO_ROOT/alpine/install.sh" >/dev/null
+  assert_eq 'internal-script-update' "$(<"$XRAYCTL_TEST_INVOCATION")" 'Alpine existing install should only update the manager'
+  PATH="$TEST_ROOT/bin:$PATH" sh "$REPO_ROOT/alpine/install.sh" 26.3.27 >/dev/null
+  assert_eq 'install 26.3.27' "$(<"$XRAYCTL_TEST_INVOCATION")" 'Alpine explicit version should install the core'
+fi
+
+# Exercise the real distribution through the update entry point while a core
+# process is running; all paths and credentials are confined to the fixture.
+printf '#!/bin/sh\nexec sleep 180\n' >"$XRAYCTL_XRAY_BIN"
+chmod +x "$XRAYCTL_XRAY_BIN"
+"$XRAYCTL_XRAY_BIN" &
+fake_core_pid=$!
+export XRAYCTL_TEST_DOWNLOAD="$REPO_ROOT/dist/xrayctl" XRAYCTL_TESTING=1 XRAYCTL_PLATFORM=systemd
+export XRAYCTL_CONFIG_DIR="$TEST_ROOT/config" XRAYCTL_META_FILE="$TEST_ROOT/meta.json"
+export XRAYCTL_TRAFFIC_FILE="$TEST_ROOT/traffic.json" XRAYCTL_LOCK_FILE="$TEST_ROOT/lock"
+export XRAYCTL_TMP_DIR="$TEST_ROOT/runtime" XRAYCTL_SYMLINK_PATH="$TEST_ROOT/bin-link/xrayctl"
+mkdir -p "$XRAYCTL_CONFIG_DIR"
+printf '%s\n' '{"schema":4,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{"legacyCertScanV1":true,"legacyCertbotSymlinkV1":true}}' >"$XRAYCTL_META_FILE"
+PATH="$TEST_ROOT/bin:$PATH" bash "$REPO_ROOT/install.sh" >/dev/null
+kill -0 "$fake_core_pid" 2>/dev/null || fail 'manager update stopped the running core process'
+[[ -L $XRAYCTL_SYMLINK_PATH ]] || fail 'manager update did not refresh the quick-command link'
+export XRAYCTL_TEST_DOWNLOAD="$TEST_ROOT/payloads/good"
+PATH="$TEST_ROOT/bin:$PATH" bash "$REPO_ROOT/install.sh" >/dev/null
 
 before=$(openssl dgst -sha256 "$XRAYCTL_COMMAND_PATH" | awk '{print $NF}')
 export XRAYCTL_TEST_REF_SHA=invalid

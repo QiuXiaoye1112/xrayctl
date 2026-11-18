@@ -23,7 +23,8 @@ update-ca-certificates >/dev/null 2>&1 || true
 tmp_base="${XRAYCTL_TMP_DIR:-/var/tmp}"
 mkdir -p "$tmp_base" || die "无法创建引导安装临时目录。"
 temp_dir=$(mktemp -d "$tmp_base/xrayctl-alpine-bootstrap.XXXXXX")
-cleanup() { rm -rf "$temp_dir"; }
+staged=""
+cleanup() { rm -rf "$temp_dir"; [ -z "$staged" ] || rm -f "$staged"; }
 trap cleanup EXIT HUP INT TERM
 
 info "正在下载统一 xrayctl 发行版。"
@@ -53,8 +54,19 @@ if [ -e "$TARGET" ] && ! grep -q '^# xrayctl - Xray Linux terminal manager' "$TA
   die "${TARGET} 已存在且不是 xrayctl，拒绝覆盖。"
 fi
 
+mode=install
+if [ "$#" -eq 0 ] && [ -f "$TARGET" ] && [ -x "${XRAYCTL_XRAY_BIN:-/usr/local/bin/xray}" ] && [ -f "${XRAYCTL_CONFIG_FILE:-${XRAYCTL_CONFIG_DIR:-/usr/local/etc/xray}/config.json}" ]; then
+  mode=update
+fi
 install -d -m 755 "$(dirname "$TARGET")"
-install -m 755 "${temp_dir}/xrayctl" "$TARGET"
-info "正在安装或修复 Xray。"
-"$TARGET" install "${1-}"
+staged=$(mktemp "${TARGET}.tmp.XXXXXX")
+install -m 755 "${temp_dir}/xrayctl" "$staged"
+mv -f "$staged" "$TARGET"
+if [ "$mode" = update ]; then
+  info "正在更新 xrayctl 管理脚本。"
+  "$TARGET" internal-script-update
+else
+  info "正在安装或修复 Xray。"
+  "$TARGET" install "${1-}"
+fi
 info "安装完成。运行 xrayctl 打开管理菜单。"

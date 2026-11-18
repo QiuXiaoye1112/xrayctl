@@ -109,7 +109,7 @@ Alpine Linux（以 root 运行）：
 wget -qO- https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/main/alpine/install.sh | sh
 ```
 
-安装器会安装管理命令和 Xray 核心；运行 `xrayctl` 进入菜单，或使用 `xrayctl install [版本]` 安装或修复核心。bootstrap 下载的是仓库 main 分支的发行文件；本地修改发布到该分支后上述远程命令才会生效。
+首次运行安装器会安装管理命令和 Xray 核心；已有安装再次运行时只更新管理脚本，保留正在运行的核心。运行 `xrayctl` 进入菜单，或使用 `xrayctl install [版本]` 安装或修复核心。bootstrap 下载的是仓库 main 分支的发行文件；本地修改发布到该分支后上述远程命令才会生效。
 
 ## 常用命令
 
