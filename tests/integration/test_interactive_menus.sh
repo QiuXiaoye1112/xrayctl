@@ -180,7 +180,7 @@ select_outbound() {
   if ((include_blocked)); then printf -v "$destination" '%s' blocked; else printf -v "$destination" '%s' direct; fi
 }
 : >"$EVENT_LOG"; set_inputs 3 3 1 example.com 0 0; inbound_outbound_menu >/dev/null
-assert_recorded 'outbound_user_domain_add node alice suffix example.com blocked '
+assert_recorded 'outbound_user_domain_add node alice suffix example.com direct '
 : >"$EVENT_LOG"; set_inputs 2 2 0 0; inbound_outbound_menu >/dev/null
 assert_recorded 'add_domain_rule node    --prompt'
 : >"$EVENT_LOG"; set_inputs 2 3 0 0; inbound_outbound_menu >/dev/null
