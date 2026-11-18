@@ -68,4 +68,27 @@ cp "$root/with-inbound.json" "$CONFIG_FILE"
 traffic_collect
 [[ $(wc -l <"$root/rule-installs") -eq 2 ]]
 jq -e --arg epoch "$epoch" '.rulesInventory.first.port==443 and .rulesEpoch==$epoch and .inbounds.first.deleted==false and .totals.daily["2026-11-18"]==400' "$TRAFFIC_FILE" >/dev/null
-printf 'ok - empty install, last inbound removal, and first inbound after reboot collect safely\n'
+# A user-stats API failure must not stop independent inbound rule refresh.
+tmp=$(temp_file)
+jq '.inbounds += [{tag:"second",protocol:"vless",port:444,settings:{clients:[],decryption:"none"}}]' "$CONFIG_FILE" >"$tmp"
+mv -f "$tmp" "$CONFIG_FILE"
+traffic_user_collect_locked() { return 1; }
+rc=0
+traffic_collect || rc=$?
+[[ $rc == 2 ]] || { printf 'expected user-stats failure, got %s\n' "$rc" >&2; exit 1; }
+jq -e '.rulesInventory.second.port==444 and .totals.daily["2026-11-17"]==12345' "$TRAFFIC_FILE" >/dev/null
+traffic_user_collect_locked() { :; }
+
+# A broken or missing config must not be interpreted as an empty inventory.
+# Otherwise a rule refresh can remove live counter chains and lose traffic.
+state_before=$(cat "$TRAFFIC_FILE")
+printf '{invalid json' >"$CONFIG_FILE"
+traffic_rules_clear() { : >"$root/incorrectly-cleared"; }
+if traffic_rules_restore 2>/dev/null; then printf 'invalid config accepted during rule restore\n' >&2; exit 1; fi
+if traffic_update_file '{}' 2>/dev/null; then printf 'invalid config accepted during collection\n' >&2; exit 1; fi
+[[ ! -e $root/incorrectly-cleared && $(cat "$TRAFFIC_FILE") == "$state_before" ]]
+printf '%s\n' '{"inbounds":false}' >"$CONFIG_FILE"
+if traffic_inventory_json 2>/dev/null; then printf 'invalid inbound type accepted\n' >&2; exit 1; fi
+rm -f "$CONFIG_FILE"
+if traffic_inventory_json 2>/dev/null; then printf 'missing config accepted as empty\n' >&2; exit 1; fi
+printf 'ok - empty inventory transitions and invalid configs preserve traffic rules\n'
