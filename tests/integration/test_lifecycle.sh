@@ -71,12 +71,12 @@ add_client vless-node >/dev/null
 assert_eq 2 "$(jq '.inbounds[0].settings.clients|length' "$CONFIG_FILE")" "client add failed"
 
 rename_client vless-node bob robert >/dev/null
-assert_eq 1 "$(jq '[.inbounds[0].settings.clients[]|select(.email=="robert")]|length' "$CONFIG_FILE")" "client rename failed"
+assert_eq 1 "$(jq '[.inbounds[0].settings.clients[]|select((.xrayctlLabel // .email)=="robert")]|length' "$CONFIG_FILE")" "client rename failed"
 
 generate_uuid() { printf '%s\n' 323e4567-e89b-12d3-a456-426614174000; }
 rotate_client_credential vless-node robert 1 >/dev/null
 assert_eq 323e4567-e89b-12d3-a456-426614174000 \
-  "$(jq -r '.inbounds[0].settings.clients[]|select(.email=="robert")|.id' "$CONFIG_FILE")" \
+  "$(jq -r '.inbounds[0].settings.clients[]|select((.xrayctlLabel // .email)=="robert")|.id' "$CONFIG_FILE")" \
   "client credential rotation failed"
 
 prompt_value() { printf -v "$1" '%s' 127.0.0.1; }

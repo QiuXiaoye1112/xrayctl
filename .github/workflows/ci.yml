@@ -50,6 +50,7 @@ jobs:
           bash tests/run.sh
       - name: Verify the pinned Xray release with real processes
         run: |
+          XRAYCTL_REAL_XRAY_BIN="$XRAYCTL_REAL_XRAY_BIN" XRAYCTL_TEST_AUTO_STATS=1 bash tests/integration/test_user_quota_real_xray.sh
           for xray in "$XRAYCTL_PINNED_XRAY_BIN" "$XRAYCTL_REAL_XRAY_BIN"; do
             XRAYCTL_REAL_XRAY_BIN="$xray" bash tests/unit/test_user_identity.sh
             XRAYCTL_REAL_XRAY_BIN="$xray" bash tests/integration/test_real_xray_user_traffic.sh

@@ -501,6 +501,19 @@ state_apply_candidate_file() {
     fi
     rm -f "$candidate"
     candidate=$normalized
+  elif traffic_user_has_clients "$candidate" && ! jq -e '.xrayctlUserStats.enabled==true' "$candidate" >/dev/null; then
+    # Prepare the first authenticated users in the same configuration commit,
+    # so enabling statistics does not require an extra core restart.
+    address=$(jq -r '.api.listen // ""' "$candidate") || { rm -f "$candidate"; return 1; }
+    if [[ -z $address ]]; then address=$(traffic_user_choose_address "$candidate") || address=""; fi
+    normalized=$(temp_file) || { rm -f "$candidate"; return 1; }
+    if [[ -n $address ]] && traffic_user_prepare_config "$candidate" "$normalized" "$address"; then
+      rm -f "$candidate"
+      candidate=$normalized
+    else
+      rm -f "$normalized"
+      warn "用户统计暂无法自动启用，入站仍会继续配置；请检查统计 API 和用户标识。"
+    fi
   fi
   if "$operation" "$candidate" "$@"; then
     rc=0
