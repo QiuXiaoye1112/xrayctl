@@ -378,10 +378,10 @@ client_label_exists() {
 client_account_identity_exists_globally() {
   local label=$1 except_tag=${2-} except_label=${3-}
   [[ -r $CONFIG_FILE ]] || return 1
-  jq -e --arg label "$label" --arg exceptTag "$except_tag" --arg exceptLabel "$except_label" '
+  jq -e --arg user_label "$label" --arg exceptTag "$except_tag" --arg exceptLabel "$except_label" '
     [.inbounds[]? as $inbound | select($inbound.protocol=="socks" or $inbound.protocol=="http") |
       ($inbound.settings.accounts // $inbound.settings.users // [])[]? |
-      select(.user==$label and ($inbound.tag!=$exceptTag or .user!=$exceptLabel))] | length>0
+      select(.user==$user_label and ($inbound.tag!=$exceptTag or .user!=$exceptLabel))] | length>0
   ' "$CONFIG_FILE" >/dev/null
 }
 

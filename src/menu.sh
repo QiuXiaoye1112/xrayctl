@@ -816,7 +816,7 @@ traffic_user_menu() {
   while true; do
     clear_screen
     inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
-    mapfile -t user_labels < <(jq -r --arg tag "$tag" '[.[] | select(.tag==$tag) | .label] | reduce .[] as $label ([]; if index($label)==null then .+[$label] else . end) | .[]' <<<"$inventory")
+    mapfile -t user_labels < <(jq -r --arg tag "$tag" '[.[] | select(.tag==$tag) | .label] | reduce .[] as $user_label ([]; if index($user_label)==null then .+[$user_label] else . end) | .[]' <<<"$inventory")
     if ((${#user_labels[@]} == 0)); then warn '该入站没有用户。'; pause; return 0; fi
     IFS=$'\t' read -r period_start _ < <(traffic_period_bounds "$(traffic_now)")
     ui_page "$tag"
