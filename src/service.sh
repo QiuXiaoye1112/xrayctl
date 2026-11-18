@@ -296,9 +296,13 @@ install_or_update_xray() {
     fi
   fi
   [[ -x $XRAY_BIN ]] || { rm -f "$preserved_config"; die "Xray 安装后未找到：$XRAY_BIN"; }
-  _service_restore_or_initialize_config "$preserved_config"
-  _service_prepare_user_stats || return 1
+  # Create the runtime group before restoring or preparing configuration. A
+  # previous interrupted install may have left a config but no runtime group.
   setup_runtime_access
+  _service_restore_or_initialize_config "$preserved_config"
+  chown "$RUNTIME_OWNER:$RUNTIME_GROUP" "$CONFIG_FILE"
+  chmod 640 "$CONFIG_FILE"
+  _service_prepare_user_stats || return 1
   [[ $(platform_init_system) != openrc ]] || write_openrc_service
   install_quick_command
   validate_candidate "$CONFIG_FILE"

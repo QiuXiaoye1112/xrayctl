@@ -38,7 +38,10 @@ user_template_apply in-a alice Beta proxy >/dev/null
 user_template_apply in-a bob Gamma direct >/dev/null
 add_domain_rule in-a exact manual.public.example direct >/dev/null
 outbound_user_domain_add in-a alice exact manual.personal.example direct >/dev/null
-assert_eq 1 "$(jq '[.routing.rules[]|select(.template=="Beta" and .domain==["domain:shared.example.com"] and .user==["alice"] and .outboundTag=="proxy")]|length' "$CONFIG_FILE")" 'overlapping user template was not active before deletion'
+alice_id="" bob_id=""
+_outbound_user_identity alice_id in-a alice
+_outbound_user_identity bob_id in-a bob
+assert_eq 1 "$(jq --arg alice_id "$alice_id" '[.routing.rules[]|select(.template=="Beta" and .domain==["domain:shared.example.com"] and .user==[$alice_id] and .outboundTag=="proxy")]|length' "$CONFIG_FILE")" 'overlapping user template was not active before deletion'
 assert_eq 1 "$(jq '[.routing.rules[]|select(.template=="Beta" and .domain==["domain:shared.example.com"] and (.user // [])==[] and .outboundTag=="proxy")]|length' "$CONFIG_FILE")" 'overlapping inbound template was not active before deletion'
 
 before_config=$(jq -Sc . "$CONFIG_FILE"); before_meta=$(jq -Sc . "$META_FILE")
@@ -61,12 +64,12 @@ assert_eq 0 "$(jq '[.domainTemplates.templates[]?|select(.name=="Beta")]|length'
 assert_eq 0 "$(jq '[.domainTemplates.bindings[]?,.domainTemplates.userBindings[]?|select(.template=="Beta")]|length' "$META_FILE")" 'deleted template bindings remain'
 assert_eq 0 "$(jq '[.routing.rules[]?|select(.template=="Beta" or .domain==["domain:beta-only.example.com"]) ]|length' "$CONFIG_FILE")" 'deleted template rules remain'
 assert_eq 1 "$(jq '[.routing.rules[]|select(.template=="Alpha" and .domain==["domain:shared.example.com"] and (.user // [])==[] and .outboundTag=="direct")]|length' "$CONFIG_FILE")" 'inbound overlap did not fall back to Alpha'
-assert_eq 1 "$(jq '[.routing.rules[]|select(.template=="Alpha" and .domain==["domain:shared.example.com"] and .user==["alice"] and .outboundTag=="direct")]|length' "$CONFIG_FILE")" 'user overlap did not fall back to Alpha'
+assert_eq 1 "$(jq --arg alice_id "$alice_id" '[.routing.rules[]|select(.template=="Alpha" and .domain==["domain:shared.example.com"] and .user==[$alice_id] and .outboundTag=="direct")]|length' "$CONFIG_FILE")" 'user overlap did not fall back to Alpha'
 assert_eq 1 "$(jq '[.routing.rules[]|select(.domain==["full:manual.public.example"]) ]|length' "$CONFIG_FILE")" 'unrelated public rule removed'
 assert_eq 1 "$(jq '[.routing.rules[]|select(.domain==["full:manual.personal.example"]) ]|length' "$CONFIG_FILE")" 'unrelated personal rule removed'
-assert_eq 1 "$(jq '[.routing.rules[]|select(.template=="Gamma" and .user==["bob"]) ]|length' "$CONFIG_FILE")" 'another user template was removed'
+assert_eq 1 "$(jq --arg bob_id "$bob_id" '[.routing.rules[]|select(.template=="Gamma" and .user==[$bob_id]) ]|length' "$CONFIG_FILE")" 'another user template was removed'
 assert_eq 1 "$(jq '[.routing.rules[]|select(.ruleTag=="xrayctl-outbound:in-a")]|length' "$CONFIG_FILE")" 'inbound default removed'
-assert_eq 1 "$(jq '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-outbound:"))|select(.user==["alice"]) ]|length' "$CONFIG_FILE")" 'user default removed'
+assert_eq 1 "$(jq --arg alice_id "$alice_id" '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-outbound:"))|select(.user==[$alice_id]) ]|length' "$CONFIG_FILE")" 'user default removed'
 # Deleting the final binding must also remove its last generated inbound rule.
 delete_domain_template Alpha >/dev/null
 assert_eq 0 "$(jq '[.routing.rules[]?|select(.template=="Alpha")]|length' "$CONFIG_FILE")" 'last template rules remain after deletion'
