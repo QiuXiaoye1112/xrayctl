@@ -95,7 +95,7 @@ user_domain_add_menu() {
   choose match '匹配方式' '域名及所有子域名' '仅精确域名' || return 0
   [[ $match == 1 ]] && match=suffix || match=exact
   prompt_domain_list domains '域名（多个请用英文逗号分隔）' || return 0
-  select_outbound outbound 1 1 local_ip 1 || return 0
+  select_outbound outbound 1 1 local_ip 0 || return 0
   run_menu_action outbound_user_domain_add "$inbound" "$label" "$match" "$domains" "$outbound" "$local_ip"
   pause
 }
