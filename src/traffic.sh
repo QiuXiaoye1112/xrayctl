@@ -87,8 +87,8 @@ traffic_user_prepare_identities() {
       jq -e --arg id "$identity" '[.. | objects | .email? // empty | select(type=="string" and ascii_downcase == ($id|ascii_downcase))] | length == 0' "$working" >/dev/null && break
     done
     next=$(temp_file) || { rm -f "$working"; return 1; }
-    jq --argjson i "$index" --argjson j "$client_index" --arg label "$label" --arg identity "$identity" \
-      '.inbounds[$i].settings.clients[$j] |= (.xrayctlLabel=$label | .email=$identity)' "$working" >"$next" || { rm -f "$next" "$working"; return 1; }
+    jq --argjson i "$index" --argjson j "$client_index" --arg user_label "$label" --arg identity "$identity" \
+      '.inbounds[$i].settings.clients[$j] |= (.xrayctlLabel=$user_label | .email=$identity)' "$working" >"$next" || { rm -f "$next" "$working"; return 1; }
     mv -f "$next" "$working" || { rm -f "$next" "$working"; return 1; }
     mappings=$(jq -nc --argjson maps "$mappings" --arg old "$original" --arg new "$identity" '$maps + [{old:$old,new:$new}]') || { rm -f "$working"; return 1; }
   done < <(jq -r '.inbounds | to_entries[] | select(.value.protocol=="vless") | .key as $i | (.value.settings.clients // [] | to_entries[]) | select(.value.xrayctlLabel == null) | [$i,.key] | @tsv' "$input")
@@ -231,8 +231,8 @@ traffic_user_rolled_limits_json() {
       next_boundary=$(traffic_limit_next_timestamp "$start" "$anchor_day" "$anchor_time") || return 1
       end=$next_boundary; used=0
     done
-    jq -nc --arg tag "$tag" --arg id "$id" --arg start "$start" --arg end "$end" --argjson used "$used" \
-      '{tag:$tag,id:$id,start:$start,end:$end,used:$used}'
+    jq -nc --arg tag "$tag" --arg id "$id" --arg start "$start" --arg cycle_end "$end" --argjson used "$used" \
+      '{tag:$tag,id:$id,start:$start,end:$cycle_end,used:$used}'
   done < <(jq -r '.inbounds | to_entries[]? | .key as $tag | (.value.users // {} | to_entries[]?) |
     select(.value.limit.enabled==true) | [$tag,.key,((.value.limit.anchorDay // .value.limit.resetDay // 0)|tostring),
       (.value.limit.anchorTime // ""),(.value.limit.cycleStart // ""),(.value.limit.cycleEnd // ""),
@@ -547,7 +547,7 @@ traffic_user_select() {
   [[ -n $picked_label ]] || select_client picked_label "$picked_tag" || return 1
   client_label_exists "$picked_tag" "$picked_label" || { warn "找不到用户：${picked_label}"; return 1; }
   inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
-  if jq -e --arg tag "$picked_tag" --arg label "$picked_label" 'any(.[]; .tag==$tag and .label==$label and .ambiguous)' <<<"$inventory" >/dev/null; then
+  if jq -e --arg tag "$picked_tag" --arg user_label "$picked_label" 'any(.[]; .tag==$tag and .label==$user_label and .ambiguous)' <<<"$inventory" >/dev/null; then
     warn "账号名称在多个入站重复，Xray 汇总同名账号流量，无法安全设置独立额度；请先重命名其中一个账号。"
     return 1
   fi
@@ -556,14 +556,14 @@ traffic_user_select() {
 }
 
 traffic_user_id() {
-  jq -r --arg tag "$1" --arg label "$2" '
+  jq -r --arg tag "$1" --arg user_label "$2" '
     .inbounds[]? | select(.tag==$tag) |
     if .protocol=="vless" then
-      .settings.clients[]? | select((.xrayctlLabel // .email)==$label) | .email
+      .settings.clients[]? | select((.xrayctlLabel // .email)==$user_label) | .email
     elif .protocol=="socks" and .settings.auth=="password" then
-      (.settings.accounts // .settings.users // [])[]? | select(.user==$label) | .user
+      (.settings.accounts // .settings.users // [])[]? | select(.user==$user_label) | .user
     elif .protocol=="http" then
-      (.settings.accounts // .settings.users // [])[]? | select(.user==$label) | .user
+      (.settings.accounts // .settings.users // [])[]? | select(.user==$user_label) | .user
     else empty end
   ' "$CONFIG_FILE"
 }
@@ -605,9 +605,9 @@ traffic_user_limit_set() {
   fi
   traffic_lock_acquire || return 1
   tmp=$(temp_file)
-  jq --arg tag "$tag" --arg id "$id" --arg label "$label" --argjson quota "$quota" --argjson day "$reset_day" --arg time "$anchor_time" --arg now "$now" --arg end "$cycle_end" '
-    .inbounds[$tag].users[$id]=((.inbounds[$tag].users[$id] // {}) + {label:$label}) |
-    .inbounds[$tag].users[$id].limit |= ((. // {enabled:true,cycleStart:$now,usedBytes:0}) + {enabled:true,quotaBytes:$quota,resetDay:$day,anchorDay:$day,anchorTime:$time,cycleEnd:$end})
+  jq --arg tag "$tag" --arg id "$id" --arg user_label "$label" --argjson quota "$quota" --argjson day "$reset_day" --arg time "$anchor_time" --arg now "$now" --arg cycle_end "$cycle_end" '
+    .inbounds[$tag].users[$id]=((.inbounds[$tag].users[$id] // {}) + {label:$user_label}) |
+    .inbounds[$tag].users[$id].limit |= ((. // {enabled:true,cycleStart:$now,usedBytes:0}) + {enabled:true,quotaBytes:$quota,resetDay:$day,anchorDay:$day,anchorTime:$time,cycleEnd:$cycle_end})
   ' "$TRAFFIC_FILE" >"$tmp" || rc=1
   if ((rc==0)); then traffic_write_file "$tmp" || rc=1; fi
   rm -f "$tmp"; traffic_lock_release
@@ -653,10 +653,10 @@ traffic_user_reset() {
   fi
   traffic_lock_acquire || return 1
   tmp=$(temp_file)
-  jq --arg tag "$tag" --arg id "$id" --arg now "$now" --arg end "$end" '
+  jq --arg tag "$tag" --arg id "$id" --arg now "$now" --arg cycle_end "$end" '
     .inbounds[$tag].users[$id].uplinkBytes=0 | .inbounds[$tag].users[$id].downlinkBytes=0 | .inbounds[$tag].users[$id].cycles={} |
     if .inbounds[$tag].users[$id].limit.enabled==true then
-      .inbounds[$tag].users[$id].limit.usedBytes=0 | .inbounds[$tag].users[$id].limit.cycleStart=$now | .inbounds[$tag].users[$id].limit.cycleEnd=$end
+      .inbounds[$tag].users[$id].limit.usedBytes=0 | .inbounds[$tag].users[$id].limit.cycleStart=$now | .inbounds[$tag].users[$id].limit.cycleEnd=$cycle_end
     else . end
   ' "$TRAFFIC_FILE" >"$tmp" || rc=1
   if ((rc==0)); then traffic_write_file "$tmp" || rc=1; fi

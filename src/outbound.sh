@@ -502,16 +502,16 @@ _outbound_user_identity() {
   protocol=$(jq -r --arg inbound "$inbound" '.inbounds[]? | select(.tag==$inbound) | .protocol' "$CONFIG_FILE") || return 1
   case $protocol in
     vless)
-      resolved_identity=$(jq -r --arg inbound "$inbound" --arg label "$label" \
-        '.inbounds[]? | select(.tag==$inbound) | .settings.clients[]? | select((.xrayctlLabel // .email)==$label) | .email // empty' "$CONFIG_FILE") || return 1
+      resolved_identity=$(jq -r --arg inbound "$inbound" --arg user_label "$label" \
+        '.inbounds[]? | select(.tag==$inbound) | .settings.clients[]? | select((.xrayctlLabel // .email)==$user_label) | .email // empty' "$CONFIG_FILE") || return 1
       [[ -n $resolved_identity ]] || { warn "该 VLESS 用户没有 Xray email 身份，无法安全添加用户路由。"; return 1; }
       ;;
     socks)
       jq -e --arg inbound "$inbound" '.inbounds[]? | select(.tag==$inbound and .protocol=="socks" and .settings.auth=="password")' "$CONFIG_FILE" >/dev/null || { warn "无认证 SOCKS5 入站不支持用户路由。"; return 1; }
-      resolved_identity=$(jq -r --arg inbound "$inbound" --arg label "$label" '.inbounds[]? | select(.tag==$inbound) | (.settings.accounts // .settings.users // [])[]? | select(.user==$label) | .user' "$CONFIG_FILE") || return 1
+      resolved_identity=$(jq -r --arg inbound "$inbound" --arg user_label "$label" '.inbounds[]? | select(.tag==$inbound) | (.settings.accounts // .settings.users // [])[]? | select(.user==$user_label) | .user' "$CONFIG_FILE") || return 1
       ;;
     http)
-      resolved_identity=$(jq -r --arg inbound "$inbound" --arg label "$label" '.inbounds[]? | select(.tag==$inbound) | (.settings.accounts // .settings.users // [])[]? | select(.user==$label) | .user' "$CONFIG_FILE") || return 1
+      resolved_identity=$(jq -r --arg inbound "$inbound" --arg user_label "$label" '.inbounds[]? | select(.tag==$inbound) | (.settings.accounts // .settings.users // [])[]? | select(.user==$user_label) | .user' "$CONFIG_FILE") || return 1
       ;;
     *) warn "${protocol:-该协议} 入站不支持用户级出站规则。"; return 1;;
   esac
