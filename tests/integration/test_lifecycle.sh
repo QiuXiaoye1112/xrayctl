@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+readonly TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+readonly REPO_ROOT=$(cd "${TEST_DIR}/../.." && pwd)
+readonly TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/xrayctl-lifecycle.XXXXXX")
+
+cleanup_test_root() {
+  [[ -n ${TEST_ROOT:-} && $TEST_ROOT == "${TMPDIR:-/tmp}"/xrayctl-lifecycle.* ]] || return 1
+  rm -rf "$TEST_ROOT"
+}
+trap cleanup_test_root EXIT
+
+export XRAYCTL_CONFIG_DIR="${TEST_ROOT}/config"
+export XRAYCTL_CONFIG_FILE="${XRAYCTL_CONFIG_DIR}/config.json"
+export XRAYCTL_META_FILE="${XRAYCTL_CONFIG_DIR}/meta.json"
+export XRAYCTL_TRAFFIC_FILE="${TEST_ROOT}/traffic.json"
+export XRAYCTL_LOCK_FILE="${TEST_ROOT}/xrayctl.lock"
+export XRAYCTL_CERT_DIR="${XRAYCTL_CONFIG_DIR}/certs"
+export XRAYCTL_LOG_DIR="${TEST_ROOT}/logs"
+export XRAYCTL_BACKUP_DIR="${TEST_ROOT}/backups"
+export XRAYCTL_XRAY_BIN="${TEST_ROOT}/missing-xray"
+export XRAYCTL_RUNTIME_OWNER
+XRAYCTL_RUNTIME_OWNER=$(id -un)
+export XRAYCTL_RUNTIME_GROUP
+XRAYCTL_RUNTIME_GROUP=$(id -gn)
+
+mkdir -p "$XRAYCTL_CONFIG_DIR" "$XRAYCTL_CERT_DIR"
+cat >"$XRAYCTL_CONFIG_FILE" <<'JSON'
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [],
+  "outbounds": [
+    {"protocol": "freedom", "tag": "direct"},
+    {"protocol": "blackhole", "tag": "blocked"}
+  ],
+  "routing": {"domainStrategy": "IPIfNonMatch", "rules": []}
+}
+JSON
+
+# shellcheck source=../helpers/assert.sh
+source "${REPO_ROOT}/tests/helpers/assert.sh"
+# shellcheck source=../../xrayctl.sh
+source "${REPO_ROOT}/xrayctl.sh"
+trap - ERR
+trap cleanup_test_root EXIT
+traffic_collect() { :; }
+
+ensure_runtime_dependencies() { :; }
+require_xray_installed() { :; }
+setup_runtime_access() { :; }
+service_is_active() { return 1; }
+show_inbound() { :; }
+print_links() { :; }
+confirm() { return 0; }
+
+build_inbound() {
+  printf -v "$1" '%s' "$(jq -c . "${REPO_ROOT}/tests/fixtures/protocols/vless.json")"
+  printf -v "$2" '%s' edge.example.com
+  printf -v "$3" '%s' ''
+}
+
+add_inbound >/dev/null
+assert_eq 1 "$(jq '.inbounds|length' "$CONFIG_FILE")" "inbound add did not update config"
+assert_eq edge.example.com "$(jq -r '.inbounds["vless-node"].host' "$META_FILE")" "inbound add did not update metadata"
+
+prompt_client_label() { printf -v "$1" '%s' bob; }
+generate_uuid() { printf '%s\n' 223e4567-e89b-12d3-a456-426614174000; }
+add_client vless-node >/dev/null
+assert_eq 2 "$(jq '.inbounds[0].settings.clients|length' "$CONFIG_FILE")" "client add failed"
+
+rename_client vless-node bob robert >/dev/null
+assert_eq 1 "$(jq '[.inbounds[0].settings.clients[]|select((.xrayctlLabel // .email)=="robert")]|length' "$CONFIG_FILE")" "client rename failed"
+
+generate_uuid() { printf '%s\n' 323e4567-e89b-12d3-a456-426614174000; }
+rotate_client_credential vless-node robert 1 >/dev/null
+assert_eq 323e4567-e89b-12d3-a456-426614174000 \
+  "$(jq -r '.inbounds[0].settings.clients[]|select((.xrayctlLabel // .email)=="robert")|.id' "$CONFIG_FILE")" \
+  "client credential rotation failed"
+
+prompt_value() { printf -v "$1" '%s' 127.0.0.1; }
+prompt_port() { printf -v "$1" '%s' 8443; }
+prompt_public_host() { printf -v "$1" '%s' modified.example.com; }
+modify_inbound_basic vless-node >/dev/null
+assert_eq 8443 "$(jq -r '.inbounds[0].port' "$CONFIG_FILE")" "inbound port modification failed"
+assert_eq modified.example.com "$(jq -r '.inbounds["vless-node"].host' "$META_FILE")" "inbound host metadata modification failed"
+
+candidate=$(temp_file)
+jq '.outbounds += [{tag:"proxy-out",protocol:"socks",settings:{address:"127.0.0.1",port:1080}}]' \
+  "$CONFIG_FILE" >"$candidate"
+apply_candidate "$candidate" >/dev/null
+assign_outbound vless-node proxy-out >/dev/null
+assert_eq proxy-out "$(jq -r '.routing.rules[]|select(.ruleTag=="xrayctl-outbound:vless-node")|.outboundTag' "$CONFIG_FILE")" \
+  "outbound assignment failed"
+
+detect_local_ips() { printf '%s\t%s\t%s\n' '203.0.113.10 (IPv4)' 203.0.113.10 eth0; }
+selected_option_count=0
+choose() { selected_option_count=$#; printf -v "$1" '%s' 1; }
+tag=""
+select_outbound tag 0 0
+assert_eq proxy-out "$tag" "selected outbound was lost through local variable shadowing"
+assert_eq 3 "$selected_option_count" "delete selector included an unconfigured local IP outbound"
+
+_expected_menu_failure() { return 1; }
+trap on_error ERR
+menu_failure_output=$(run_menu_action _expected_menu_failure 2>&1)
+trap - ERR
+[[ $menu_failure_output != *"命令在第"* ]] || fail "expected menu failure triggered the global ERR trace"
+[[ $menu_failure_output == *"操作未完成"* ]] || fail "menu failure did not produce the concise retry warning"
+
+# An unconfigured traffic page is informational. User quota management attempts
+# automatic setup and reports a single concrete failure if that setup cannot start.
+traffic_status_output=$(traffic_users_show "" 2>&1)
+[[ $traffic_status_output == *"信息 · 用户流量统计尚未配置。"* ]] || fail "unconfigured user traffic was not shown as information"
+[[ $traffic_status_output != *"警告 ·"* ]] || fail "read-only traffic status emitted a warning"
+traffic_user_managed_config() { return 1; }
+select_inbound() { printf -v "$1" '%s' vless-node; }
+pause() { :; }
+traffic_user_enable() { traffic_runtime_ensure; }
+traffic_runtime_ensure() { : >"${XRAYCTL_TRAFFIC_FILE}.runtime-ensure"; warn "流量统计自动启动失败。"; return 1; }
+traffic_menu_output=$(traffic_user_menu 2>&1)
+warning_count=$(printf '%s\n' "$traffic_menu_output" | grep -c '警告 ·' || true)
+assert_eq 1 "$warning_count" "automatic traffic startup failure showed duplicate warnings"
+[[ $traffic_menu_output == *"流量统计自动启动失败。"* ]] || fail "user quota menu did not report automatic startup failure"
+[[ -f ${XRAYCTL_TRAFFIC_FILE}.runtime-ensure ]] || fail "user quota menu did not try to start default traffic collection"
+[[ $traffic_menu_output != *"请先开启流量统计"* ]] || fail "user quota menu still asks users to enable default traffic collection"
+[[ $traffic_menu_output != *"操作未完成"* ]] || fail "user quota menu repeated its specific warning"
+
+before_failed_assignment=$(jq -S . "$CONFIG_FILE")
+service_is_active() { return 0; }
+restart_service() { return 1; }
+assert_failure assign_outbound vless-node direct
+assert_eq "$before_failed_assignment" "$(jq -S . "$CONFIG_FILE")" \
+  "failed outbound assignment did not preserve the previous config"
+service_is_active() { return 1; }
+
+preserved_config=$(temp_file)
+cp "$CONFIG_FILE" "$preserved_config"
+printf '%s\n' '{"inbounds":[],"outbounds":[]}' >"$CONFIG_FILE"
+_service_restore_or_initialize_config "$preserved_config"
+assert_eq "$before_failed_assignment" "$(jq -S . "$CONFIG_FILE")" \
+  "reinstall did not restore the config preserved before core installation"
+
+delete_client vless-node robert 1 >/dev/null
+assert_eq 1 "$(jq '.inbounds[0].settings.clients|length' "$CONFIG_FILE")" "client delete failed"
+
+traffic_init_file
+candidate=$(temp_file)
+jq '.inbounds["vless-node"]={protocol:"vless",port:8443,daily:{},cycles:{},limit:{enabled:true,usedBytes:123,quotaBytes:1000}}' "$TRAFFIC_FILE" >"$candidate"
+install -m 600 "$candidate" "$TRAFFIC_FILE"; rm -f "$candidate"
+traffic_init_file
+delete_inbound vless-node 1 >/dev/null
+assert_eq 0 "$(jq '.inbounds|length' "$CONFIG_FILE")" "inbound delete failed"
+assert_eq null "$(jq -r '.inbounds["vless-node"]' "$META_FILE")" "inbound metadata delete failed"
+assert_eq null "$(jq -r '.inbounds["vless-node"].limit' "$TRAFFIC_FILE")" "legacy inbound quota state survived delete"
+assert_eq 0 "$(jq '[.routing.rules[]?|select(.ruleTag=="xrayctl-outbound:vless-node")]|length' "$CONFIG_FILE")" \
+  "inbound delete left routing state"
+
+ensure_backup_dir
+assert_eq xrayctl-backup-directory-v1 "$(cat "$BACKUP_OWNERSHIP_MARKER")" \
+  "backup ownership marker was not created"
+SNAPSHOT_META=$(temp_file)
+printf '%s\n' '{"certificates":{},"managedResources":{}}' >"$SNAPSHOT_META"
+_uninstall_remove_backups
+[[ ! -e $BACKUP_DIR ]] || fail "owned backup directory survived erase without metadata"
+
+mkdir -p "$BACKUP_DIR"
+printf '%s\n' foreign >"${BACKUP_DIR}/foreign.txt"
+assert_failure _uninstall_remove_backups
+[[ -f ${BACKUP_DIR}/foreign.txt ]] || fail "unowned backup directory was removed"
+
+(
+  platform_init_system() { printf 'systemd\n'; }
+  RUNTIME_USER=xray-owned
+  RUNTIME_GROUP=xrayctl
+  MOCK_UID=997
+  MOCK_PASSWD=''
+  id() {
+    if [[ ${1-} == -u ]]; then printf '%s\n' "$MOCK_UID"; return 0; fi
+    return 0
+  }
+  getent() {
+    if [[ ${1-} == group && ( ${2-} == "$RUNTIME_GROUP" || ${2-} == "$RUNTIME_USER" ) ]]; then return 0; fi
+    if [[ ${1-} == passwd && ${2-} == "$RUNTIME_USER" && -n $MOCK_PASSWD ]]; then
+      printf '%s\n' "$MOCK_PASSWD"
+      return 0
+    fi
+    return 1
+  }
+  userdel() { printf 'userdel:%s\n' "$*" >>"${TEST_ROOT}/user-cleanup.log"; }
+  groupdel() { printf 'groupdel:%s\n' "$*" >>"${TEST_ROOT}/user-cleanup.log"; }
+
+  # 1. Owned user recorded in metadata is removed on systemd.
+  printf '%s\n' '{"certificates":{},"managedResources":{"runtimeUserOwned":"xray-owned","runtimeGroupOwned":"xrayctl"}}' >"$SNAPSHOT_META"
+  _uninstall_remove_runtime_group
+  grep -Fxq 'userdel:xray-owned' "${TEST_ROOT}/user-cleanup.log" || fail "owned systemd user was not removed"
+  grep -Fxq 'groupdel:xrayctl' "${TEST_ROOT}/user-cleanup.log" || fail "owned systemd group was not removed"
+
+  # 2. Dedicated system xray user is removed even without runtimeUserOwned metadata.
+  : >"${TEST_ROOT}/user-cleanup.log"
+  RUNTIME_USER=xray
+  MOCK_UID=996
+  MOCK_PASSWD='xray:x:996:996:Xray:/var/empty:/usr/sbin/nologin'
+  printf '%s\n' '{"certificates":{},"managedResources":{}}' >"$SNAPSHOT_META"
+  _uninstall_remove_runtime_group
+  grep -Fxq 'userdel:xray' "${TEST_ROOT}/user-cleanup.log" || fail "dedicated xray system user was not removed on systemd"
+  grep -Fxq 'groupdel:xray' "${TEST_ROOT}/user-cleanup.log" || fail "dedicated xray primary group was not removed on systemd"
+  grep -Fxq 'groupdel:xrayctl' "${TEST_ROOT}/user-cleanup.log" || fail "xrayctl group was not removed on systemd"
+
+  # 3. Non-system pre-existing xray user (uid >= 1000, login shell) is never removed without ownership.
+  : >"${TEST_ROOT}/user-cleanup.log"
+  MOCK_UID=1001
+  MOCK_PASSWD='xray:x:1001:1001:Regular User:/home/xray:/bin/bash'
+  _uninstall_remove_runtime_group
+  if grep -q '^userdel:' "${TEST_ROOT}/user-cleanup.log"; then
+    fail "non-system xray user was unexpectedly removed"
+  fi
+
+  # 4. root is never removed even if listed in metadata.
+  : >"${TEST_ROOT}/user-cleanup.log"
+  RUNTIME_USER=root
+  MOCK_UID=0
+  printf '%s\n' '{"certificates":{},"managedResources":{"runtimeUserOwned":"root"}}' >"$SNAPSHOT_META"
+  _uninstall_remove_runtime_group
+  if grep -q '^userdel:' "${TEST_ROOT}/user-cleanup.log"; then
+    fail "root user was unexpectedly passed to userdel"
+  fi
+)
+
+rm -f "$candidate" "$SNAPSHOT_META"
+pass "inbound, client, metadata, and outbound lifecycle remains consistent"

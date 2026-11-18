@@ -1,0 +1,673 @@
+#!/usr/bin/env bash
+service_exists() { platform_service_exists; }
+service_is_active() { platform_service_is_active; }
+service_is_enabled() { platform_service_is_enabled; }
+
+restart_service() {
+  if service_exists; then
+    if [[ ${TRAFFIC_LOCK_HELD:-0} != 1 ]] && service_is_active && traffic_user_managed_config; then
+      traffic_user_collect_serialized || warn "重启前未能采集用户流量，未采集部分可能丢失。"
+    fi
+    platform_service_restart
+    if ! service_is_active; then
+      platform_service_logs 20 >&2 || true
+      return 1
+    fi
+    # A simple service can report active before Xray opens logs/listeners.
+    sleep 1
+    if ! service_is_active; then
+      platform_service_logs 20 >&2 || true
+      return 1
+    fi
+  fi
+}
+
+is_xrayctl_certbot_venv() {
+  [[ -d $CERTBOT_VENV ]] || return 1
+  [[ -x ${CERTBOT_VENV}/bin/python ]] || return 1
+  [[ -x ${CERTBOT_VENV}/bin/certbot ]] || return 1
+  [[ -x ${CERTBOT_VENV}/bin/pip ]] || return 1
+}
+
+is_xrayctl_quick_command() {
+  [[ -f $QUICK_COMMAND ]] || return 1
+  grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null
+}
+
+is_xrayctl_symlink() {
+  [[ -L $QUICK_SYMLINK ]] || return 1
+  local target
+  target=$(readlink -f "$QUICK_SYMLINK" 2>/dev/null || true)
+  [[ $target == "$QUICK_COMMAND" ]]
+}
+
+is_xrayctl_certbot_symlink() {
+  [[ -L /usr/local/bin/certbot ]] || return 1
+  local target
+  target=$(readlink -f /usr/local/bin/certbot 2>/dev/null || true)
+  [[ $target == "${CERTBOT_VENV}/bin/certbot" ]]
+}
+
+setup_runtime_access() {
+  local created_group=0 created_user=0 log_user="$RUNTIME_USER"
+  local -a log_files=("${LOG_DIR}/access.log" "${LOG_DIR}/error.log")
+  if [[ $(platform_init_system) == openrc ]]; then
+    if ! grep -qE "^${RUNTIME_GROUP}:" /etc/group 2>/dev/null; then addgroup -S "$RUNTIME_GROUP"; created_group=1; fi
+    if ! id "$RUNTIME_USER" >/dev/null 2>&1; then
+      adduser -S -D -H -s /sbin/nologin -G "$RUNTIME_GROUP" "$RUNTIME_USER"
+      created_user=1
+    fi
+  else
+    if ! getent group "$RUNTIME_GROUP" >/dev/null 2>&1; then groupadd --system "$RUNTIME_GROUP"; created_group=1; fi
+  fi
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR" || return 1
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CERT_DIR" || return 1
+  if [[ $(platform_init_system) == systemd ]]; then
+    # The official installer and existing units may use a different service user.
+    log_user=root
+    if service_exists; then
+      log_user=$(systemctl show "$SERVICE_NAME" --property=User --value) || return 1
+      log_user=${log_user:-root}
+    fi
+  else
+    log_files+=("${LOG_DIR}/openrc.log" "${LOG_DIR}/openrc-error.log")
+  fi
+  [[ ! -L $LOG_DIR ]] || { error "日志目录不能是符号链接：$LOG_DIR"; return 1; }
+  # Keep directory entries under manager ownership so the service cannot swap
+  # a managed log for a symlink before a privileged permission repair.
+  install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$LOG_DIR" || return 1
+  local log_file
+  for log_file in "${log_files[@]}"; do
+    if [[ -L $log_file || ( -e $log_file && ! -f $log_file ) ]]; then
+      error "日志路径必须是普通文件：$log_file"
+      return 1
+    fi
+  done
+  touch "${log_files[@]}" || return 1
+  chown "$log_user:$RUNTIME_GROUP" "${log_files[@]}" || return 1
+  chmod 640 "${log_files[@]}" || return 1
+  if [[ -f $CONFIG_FILE ]]; then
+    chown "$RUNTIME_OWNER:$RUNTIME_GROUP" "$CONFIG_FILE"
+    chmod 640 "$CONFIG_FILE"
+  fi
+  if [[ $(platform_init_system) == systemd ]]; then
+    install -d -m 755 "$SYSTEMD_OVERRIDE_DIR"
+    cat >"${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-access.conf" <<EOF
+[Service]
+SupplementaryGroups=${RUNTIME_GROUP}
+EOF
+    rm -f "${SYSTEMD_OVERRIDE_DIR}/20-xrayctl-certificates.conf"
+    platform_daemon_reload
+  fi
+  meta_resource_register "configDir" "$CONFIG_DIR"
+  meta_resource_register "certDir" "$CERT_DIR"
+  meta_resource_register "runtimeGroup" "$RUNTIME_GROUP"
+  ((created_group == 0)) || meta_resource_register "runtimeGroupOwned" "$RUNTIME_GROUP"
+  ((created_user == 0)) || meta_resource_register "runtimeUserOwned" "$RUNTIME_USER"
+}
+
+setup_certificate_access() { setup_runtime_access; }
+
+xray_release_asset() {
+  case $(uname -m) in
+    x86_64|amd64) printf '%s\n' Xray-linux-64.zip ;;
+    aarch64|arm64) printf '%s\n' Xray-linux-arm64-v8a.zip ;;
+    armv7l|armv7|armhf) printf '%s\n' Xray-linux-arm32-v7a.zip ;;
+    *) die "暂不支持此 Alpine 架构：$(uname -m)" ;;
+  esac
+}
+
+write_openrc_service() {
+  cat >"$OPENRC_SERVICE" <<EOF
+#!/sbin/openrc-run
+name="Xray"
+description="Xray Service managed by xrayctl"
+command="${XRAY_BIN}"
+command_args="run -config ${CONFIG_FILE}"
+command_user="${RUNTIME_USER}:${RUNTIME_GROUP}"
+capabilities="^cap_net_bind_service"
+command_background=true
+pidfile="/run/${SERVICE_NAME}.pid"
+output_log="${LOG_DIR}/openrc.log"
+error_log="${LOG_DIR}/openrc-error.log"
+export XRAY_LOCATION_ASSET="${XRAY_SHARE_DIR}"
+
+depend() {
+  need net
+  after firewall
+}
+
+start_pre() {
+  checkpath --directory --mode 0750 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}"
+  "${XRAY_BIN}" run -test -format json -config "${CONFIG_FILE}"
+  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/access.log"
+  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/error.log"
+  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/openrc.log"
+  checkpath --file --mode 0640 --owner ${RUNTIME_USER}:${RUNTIME_GROUP} "${LOG_DIR}/openrc-error.log"
+}
+EOF
+  chmod 755 "$OPENRC_SERVICE"
+}
+
+install_xray_core_openrc() {
+  local requested=${1-} version asset base archive digest expected actual work
+  install_packages unzip
+  asset=$(xray_release_asset)
+  if [[ -n $requested ]]; then
+    version="v${requested#v}"
+  else
+    version=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      --connect-timeout 15 --max-time 60 "$XRAY_RELEASE_API" | jq -r '.tag_name // empty')
+    [[ $version == v* ]] || die "无法获取 Xray 最新版本。"
+  fi
+  base="${XRAY_RELEASE_BASE}/${version}"
+  work=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-openrc.XXXXXX")
+  archive="${work}/${asset}"
+  digest="${archive}.dgst"
+  info "正在下载 Xray ${version}。"
+  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+    "${base}/${asset}" -o "$archive" || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray 下载失败。"; }
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 60 \
+    "${base}/${asset}.dgst" -o "$digest" || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray 校验文件下载失败。"; }
+  expected=$(awk -F'= ' '$1=="SHA2-256" {print $2; exit}' "$digest")
+  actual=$(sha256sum "$archive" | awk '{print $1}')
+  [[ -n $expected && $actual == "$expected" ]] \
+    || { find "$work" -mindepth 1 -delete; rmdir "$work"; die "Xray SHA-256 校验失败。"; }
+  unzip -q "$archive" -d "$work/unpacked"
+  install -d -m 755 "$(dirname "$XRAY_BIN")" "$XRAY_SHARE_DIR"
+  install -m 755 "$work/unpacked/xray" "$XRAY_BIN"
+  install -m 644 "$work/unpacked/geoip.dat" "${XRAY_SHARE_DIR}/geoip.dat"
+  install -m 644 "$work/unpacked/geosite.dat" "${XRAY_SHARE_DIR}/geosite.dat"
+  find "$work" -mindepth 1 -delete
+  rmdir "$work"
+}
+
+_service_snapshot_existing_config() {
+  local __var=$1 snapshot=""
+  if [[ -f $CONFIG_FILE ]]; then
+    validate_candidate "$CONFIG_FILE" || return 1
+    snapshot=$(temp_file)
+    cp -p "$CONFIG_FILE" "$snapshot" || { rm -f "$snapshot"; return 1; }
+  fi
+  printf -v "$__var" '%s' "$snapshot"
+}
+
+_service_restore_or_initialize_config() {
+  local preserved_config=${1-}
+  if [[ -n $preserved_config ]]; then
+    [[ -f $preserved_config ]] || { error "安装前配置快照丢失，拒绝覆盖现有配置。"; return 1; }
+    validate_candidate "$preserved_config" || { rm -f "$preserved_config"; return 1; }
+    install -d -m 750 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$CONFIG_DIR"
+    install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$preserved_config" "$CONFIG_FILE"
+    rm -f "$preserved_config"
+    ensure_config
+  else
+    write_default_config
+  fi
+}
+
+# Configure the local statistics API before the install's normal service start.
+# Conflicting existing APIs are left untouched and reported to the operator.
+_service_prepare_user_stats() {
+  traffic_user_managed_config && return 0
+  local address candidate staged
+  address=$(jq -r '.api.listen // ""' "$CONFIG_FILE") || return 1
+  if [[ -z $address ]]; then address=$(traffic_user_choose_address "$CONFIG_FILE") || address=""; fi
+  candidate=$(temp_file) || return 1
+  if [[ -z $address ]] || ! traffic_user_prepare_config "$CONFIG_FILE" "$candidate" "$address" || ! validate_candidate "$candidate"; then
+    rm -f "$candidate"
+    warn "用户统计暂无法自动启用，请检查统计 API 和用户标识。"
+    return 0
+  fi
+  staged=$(mktemp "${CONFIG_FILE}.tmp.XXXXXX") || { rm -f "$candidate"; return 1; }
+  if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$staged" || ! mv -f "$staged" "$CONFIG_FILE"; then
+    rm -f "$candidate" "$staged"
+    return 1
+  fi
+  rm -f "$candidate"
+}
+
+_service_install_output() {
+  awk '
+    {
+      original = $0
+      gsub(/\033\[[0-9;]*m/, "")
+      if ($0 ~ /^Downloading verification file/) details = 1
+      if (!details) { print original; fflush(); next }
+      message = ""
+      if ($0 ~ /^Downloading verification file/) message = "信息 · 正在下载校验文件..."
+      else if ($0 ~ /^info: Extract the Xray package/) message = "信息 · 正在解压并安装核心..."
+      else if ($0 ~ /^info: Stop the Xray service/) message = "信息 · 正在停止 Xray 服务..."
+      else if ($0 ~ /^WARNING: The .* user already exists/) message = "警告 · 复用已有的 Xray 用户，请确保该账户仅供 Xray 使用。"
+      else if ($0 ~ /^WARNING: Ensure this account is dedicated/) next
+      else if ($0 ~ /^info: Systemd service files have been installed/) message = "信息 · 服务配置已安装。"
+      else if ($0 ~ /^warning: The following are the actual parameters/ || $0 ~ /^warning: Please make sure the configuration file path/ || $0 ~ /^warning: Failed to enable and start the Xray service/) next
+      else if ($0 ~ /^info: Xray .* is installed\./) message = "信息 · 核心安装完成。"
+      else if ($0 ~ /^info: Start the Xray service/) { message = "信息 · 正在启动 Xray 服务..."; details = 0 }
+      else if (tolower($0) ~ /^(warning|error):/) message = $0
+      if (message != "") { print message; fflush() }
+    }
+  '
+}
+
+# Refresh xrayctl-owned resources without touching the running Xray core.
+update_script_resources() {
+  ensure_runtime_dependencies internal-script-update
+  install_quick_command
+  if traffic_is_enabled; then
+    case $(platform_init_system) in
+      systemd) traffic_systemd_refresh_write_paths || return 1 ;;
+      openrc)
+        if [[ -f $TRAFFIC_OPENRC_SERVICE && -r $META_FILE ]] && \
+           jq -e --arg unit "$TRAFFIC_OPENRC_SERVICE" '.managedResources.trafficService==$unit' "$META_FILE" >/dev/null 2>&1; then
+          platform_openrc_service xrayctl-traffic-collect restart || return 1
+        fi
+        ;;
+    esac
+  fi
+  info "xrayctl 管理脚本已更新，Xray 核心未重启。"
+}
+
+install_or_update_xray() {
+  ensure_runtime_dependencies install
+  local version=${1:-$XRAY_CORE_PINNED_VERSION} installer install_log status preserved_config="" had_runtime_user=0
+  id "$RUNTIME_USER" >/dev/null 2>&1 && had_runtime_user=1
+  if service_is_active && traffic_user_managed_config; then
+    traffic_user_collect_serialized || warn "安装前未能采集用户流量，未采集部分可能丢失。"
+  fi
+  _service_snapshot_existing_config preserved_config
+  if [[ $(platform_init_system) == openrc ]]; then
+    install_xray_core_openrc "$version"
+  else
+    installer=$(temp_file)
+    info "从 XTLS 官方仓库下载安装脚本。"
+    curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 "$OFFICIAL_INSTALLER_URL" -o "$installer"
+    chmod 700 "$installer"
+    install_log=$(temp_file)
+    local -a installer_args=(install)
+    [[ -z $version ]] || installer_args+=(--version "${version#v}")
+    [[ -f $CONFIG_FILE ]] || write_default_config
+    if TMPDIR=$(runtime_tmp_dir) TERM="${TERM:-xterm}" bash "$installer" "${installer_args[@]}" 2>&1 | tee "$install_log" | _service_install_output; then
+      rm -f "$installer" "$install_log"
+    else
+      status=$?
+      error "Xray 安装失败，安装器输出如下："
+      cat "$install_log" >&2
+      rm -f "$installer" "$install_log" "$preserved_config"
+      return "$status"
+    fi
+  fi
+  [[ -x $XRAY_BIN ]] || { rm -f "$preserved_config"; die "Xray 安装后未找到：$XRAY_BIN"; }
+  # Create the runtime group before restoring or preparing configuration. A
+  # previous interrupted install may have left a config but no runtime group.
+  setup_runtime_access
+  if ((had_runtime_user == 0)) && id "$RUNTIME_USER" >/dev/null 2>&1; then
+    meta_resource_register "runtimeUserOwned" "$RUNTIME_USER"
+  fi
+  _service_restore_or_initialize_config "$preserved_config"
+  chown "$RUNTIME_OWNER:$RUNTIME_GROUP" "$CONFIG_FILE"
+  chmod 640 "$CONFIG_FILE"
+  _service_prepare_user_stats || return 1
+  [[ $(platform_init_system) != openrc ]] || write_openrc_service
+  install_quick_command
+  validate_candidate "$CONFIG_FILE"
+  platform_service_enable >/dev/null
+  restart_service
+  traffic_runtime_ensure || true
+  info "Xray 已安装/修复：$($XRAY_BIN version | sed -n '1p')"
+}
+
+install_quick_command() {
+  local source=${BASH_SOURCE[0]:-} downloaded="" backup="" download_url="" ref_json="" commit=""
+  mkdir -p "$(dirname "$QUICK_COMMAND")" "$(dirname "$QUICK_SYMLINK")"
+
+  if [[ -n $source && -r $source ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$source" 2>/dev/null; then
+    :
+  elif [[ -f $QUICK_COMMAND ]] && grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null; then
+    source=$QUICK_COMMAND
+  else
+    downloaded=$(temp_file)
+    info "正在下载快捷命令脚本。"
+    download_url=$SCRIPT_DOWNLOAD_URL
+    if [[ -z ${XRAYCTL_SCRIPT_URL:-} ]]; then
+      ref_json=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
+        --connect-timeout 15 --max-time 30 \
+        "https://api.github.com/repos/QiuXiaoye1112/xrayctl/git/ref/heads/main?xrayctl_cache=$(date +%s)") \
+        || die "无法查询 xrayctl main 的提交版本。"
+      commit=$(printf '%s\n' "$ref_json" | sed -nE 's/.*"sha":[[:space:]]*"([0-9a-f]{40})".*/\1/p')
+      [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "无法确认 xrayctl main 的提交版本，拒绝安装可能过期的文件。"
+      download_url="https://raw.githubusercontent.com/QiuXiaoye1112/xrayctl/${commit}/dist/xrayctl"
+    fi
+    if [[ $download_url == *\?* ]]; then
+      download_url="${download_url}&xrayctl_cache=$(date +%s)"
+    else
+      download_url="${download_url}?xrayctl_cache=$(date +%s)"
+    fi
+    if ! curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+      --connect-timeout 15 --max-time 120 "$download_url" -o "$downloaded"; then
+      rm -f "$downloaded"
+      die "快捷命令脚本下载失败。"
+    fi
+    grep -q '^# xrayctl - Xray Linux terminal manager' "$downloaded" \
+      || { rm -f "$downloaded"; die "快捷命令脚本校验失败。"; }
+    source=$downloaded
+  fi
+  if [[ -e $QUICK_COMMAND && ! $source -ef $QUICK_COMMAND ]] && ! grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_COMMAND" 2>/dev/null; then
+    [[ -z $downloaded ]] || rm -f "$downloaded"
+    die "${QUICK_COMMAND} 已存在且不是本脚本，拒绝覆盖。"
+  fi
+  if [[ ! -e $QUICK_COMMAND ]] || ! [[ $source -ef $QUICK_COMMAND ]]; then
+    install -m 755 "$source" "$QUICK_COMMAND"
+  else
+    chmod 755 "$QUICK_COMMAND"
+  fi
+  [[ -z $downloaded ]] || rm -f "$downloaded"
+  if [[ -e $QUICK_SYMLINK && ! -L $QUICK_SYMLINK && ! $QUICK_SYMLINK -ef $QUICK_COMMAND ]]; then
+    if ! grep -q '^# xrayctl - Xray Linux terminal manager' "$QUICK_SYMLINK" 2>/dev/null; then
+      die "${QUICK_SYMLINK} 已存在且不是本脚本，拒绝覆盖。"
+    fi
+    # Older layouts installed a regular script at the symlink path; keep it as
+    # a fallback copy instead of refusing the upgrade.
+    backup="${QUICK_SYMLINK}.bak-$(timestamp)"
+    cp -p "$QUICK_SYMLINK" "$backup" || die "无法备份旧版快捷命令：${QUICK_SYMLINK}"
+    info "旧版快捷命令已备份：${backup}"
+  fi
+  ln -sfn "$QUICK_COMMAND" "$QUICK_SYMLINK"
+  info "快捷命令已安装：xrayctl"
+  meta_resource_register "quickCommand" "$QUICK_COMMAND"
+  meta_resource_register "quickSymlink" "$QUICK_SYMLINK"
+}
+
+show_status() {
+  local traffic_state backend svc_state svc_badge bbr_state bbr_badge inbound_cnt="0" cert_cnt="0"
+  heading "Xray 运行状态"
+  svc_state=$(service_state_summary)
+  case $svc_state in
+    运行中) svc_badge=$(ui_badge ok "运行中") ;;
+    已停止) svc_badge=$(ui_badge err "已停止") ;;
+    *)      svc_badge=$(ui_badge muted "$svc_state") ;;
+  esac
+  bbr_state=$(bbr_state_summary)
+  case $bbr_state in
+    已启用) bbr_badge=$(ui_badge ok "已启用") ;;
+    未启用) bbr_badge=$(ui_badge muted "未启用") ;;
+    *)      bbr_badge=$(ui_badge warn "$bbr_state") ;;
+  esac
+  [[ -r $CONFIG_FILE ]] && inbound_cnt=$(jq '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?')
+  if declare -F certificate_count >/dev/null 2>&1; then
+    cert_cnt=$(certificate_count 2>/dev/null || printf '0')
+  fi
+  if traffic_is_enabled; then traffic_state=$(ui_badge ok "运行中"); else traffic_state=$(ui_badge muted "已停止"); fi
+  backend=$(traffic_recorded_backend); backend=${backend:-未设置}
+
+  ui_card_open "核心与服务概览"
+  ui_card_kv "Xray 核心" "$(xray_version_summary)" 12
+  ui_card_kv "服务状态" "${svc_badge}  (自启: $(startup_state_summary))" 12
+  ui_card_kv "TCP BBR" "$bbr_badge" 12
+  ui_card_kv "入站 / 证书" "${inbound_cnt} 个入站 / ${cert_cnt} 张证书" 12
+  ui_card_kv "流量统计" "${traffic_state} (${backend})" 12
+  ui_card_kv "用户额度" "已配置 $(traffic_user_limit_count) 个用户" 12
+  ui_card_kv "配置文件" "$CONFIG_FILE" 12
+  ui_card_close
+
+  if xray_installed; then
+    ui_section "Xray 版本信息"
+    "$XRAY_BIN" version | sed -n '1,2p' | sed 's/^/  /'
+  fi
+  if service_exists; then
+    ui_section "服务单元详情"
+    platform_service_status 2>/dev/null | sed -n '1,10p' | sed 's/^/  /' || true
+  fi
+}
+
+service_action() {
+  ensure_runtime_dependencies service
+  local action=$1
+  service_exists || die "Xray 服务不存在。"
+  if [[ $action == stop || $action == restart || $action == disable ]] && service_is_active && traffic_user_managed_config; then
+    traffic_user_collect_serialized || warn "服务操作前未能采集用户流量，未采集部分可能丢失。"
+  fi
+  case $action in
+    start) platform_service_start ;;
+    stop) platform_service_stop ;;
+    restart) platform_service_restart ;;
+    enable) platform_service_enable; platform_service_start ;;
+    disable) platform_service_stop || true; platform_service_disable ;;
+    *) die "未知服务操作：$action";;
+  esac
+  info "服务操作完成：$action"
+}
+
+show_logs() {
+  local lines=${1:-100}
+  [[ $lines =~ ^[0-9]+$ ]] || die "日志行数必须是数字。"
+  platform_service_logs "$lines"
+}
+
+_check_bbr_available() {
+  if [[ ! -r /proc/sys/net/ipv4/tcp_available_congestion_control || ! -e /proc/sys/net/ipv4/tcp_congestion_control ]]; then
+    warn "当前内核未暴露 TCP 拥塞控制接口，无法在此容器内管理 BBR。"
+    return 1
+  fi
+  if ! has_net_admin; then
+    warn "当前 NAT/容器没有 NET_ADMIN 权限，无法修改内核拥塞控制。"
+    return 1
+  fi
+  local available
+  available=$(< /proc/sys/net/ipv4/tcp_available_congestion_control)
+  if [[ " $available " != *" bbr "* ]]; then
+    warn "当前内核不支持 BBR。可用算法：${available}"
+    return 1
+  fi
+  return 0
+}
+
+bbr_manager() {
+  local own=0 peer=0 current=""
+  [[ -f $BBR_CONFIG ]] && own=1
+  [[ -f $SBCTL_BBR_CONFIG ]] && peer=1
+  if ((own && peer)); then printf 'both'; return; fi
+  if ((own)); then printf 'xrayctl'; return; fi
+  if ((peer)); then printf 'sbctl'; return; fi
+  [[ -r /proc/sys/net/ipv4/tcp_congestion_control ]] && current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  if [[ $current == bbr ]]; then printf 'external'; else printf 'none'; fi
+}
+
+bbr_remove_known_persistence() {
+  rm -f -- "$BBR_CONFIG" "$SBCTL_BBR_CONFIG"
+  meta_resource_remove_existing "bbrConfig"
+}
+
+_enable_bbr() {
+  local qdisc_enabled=0 config=$BBR_CONFIG
+  if command_exists modprobe; then run_bounded 5 modprobe tcp_bbr >/dev/null 2>&1 || true; fi
+  if [[ -e /proc/sys/net/core/default_qdisc ]]; then
+    if run_bounded 5 sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then qdisc_enabled=1;
+    else warn "无法设置 net.core.default_qdisc，跳过 fq。"; fi
+  fi
+  if ! run_bounded 5 sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
+    error "无法写入拥塞控制参数或操作超时。"
+    return 1
+  fi
+  rm -f -- "$SBCTL_BBR_CONFIG"
+  if ((qdisc_enabled)); then
+    printf '%s\n' '# managed by xrayctl' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' >"$config"
+  else
+    printf '%s\n' '# managed by xrayctl' 'net.ipv4.tcp_congestion_control=bbr' >"$config"
+  fi
+  if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) != bbr ]]; then
+    error "BBR 校验失败。"
+    return 1
+  fi
+  info "BBR 已启用。"
+  meta_resource_register "bbrConfig" "$config"
+}
+
+_disable_bbr() {
+  local current default_cc
+  current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  if [[ $current != bbr ]]; then
+    bbr_remove_known_persistence
+    info "BBR 当前未启用；已清理 xrayctl/sbctl 的已知持久化配置。"
+    return 0
+  fi
+  default_cc=$(sed 's/ /\n/g' /proc/sys/net/ipv4/tcp_available_congestion_control | grep -vF bbr | head -1)
+  [[ -n $default_cc ]] || default_cc=cubic
+  if ! run_bounded 5 sysctl -w net.ipv4.tcp_congestion_control="$default_cc" >/dev/null 2>&1; then
+    error "无法恢复默认拥塞控制算法 ${default_cc}。"
+    return 1
+  fi
+  run_bounded 5 sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
+  bbr_remove_known_persistence
+  if [[ $(< /proc/sys/net/ipv4/tcp_congestion_control) == bbr ]]; then
+    error "BBR 关闭失败，当前仍为 bbr。"
+    return 1
+  fi
+  info "BBR 已关闭，拥塞控制恢复为 ${default_cc}。"
+}
+
+manage_bbr() {
+  ensure_system_context bbr
+  _check_bbr_available || return 0
+  local current manager
+  current=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+  manager=$(bbr_manager)
+  if [[ $current == bbr ]]; then
+    info "当前拥塞控制: BBR（管理方：${manager}）"
+    if [[ -t 0 ]]; then
+      if confirm "BBR 已启用，是否关闭？" N; then
+        _disable_bbr
+      fi
+    fi
+  else
+    info "当前拥塞控制: ${current}"
+    if [[ -t 0 ]]; then
+      if confirm "BBR 未启用，是否开启？" Y; then
+        _enable_bbr
+      fi
+    else
+      info "非交互模式下跳过 BBR 配置；请在终端运行 xrayctl bbr 进行管理。"
+    fi
+  fi
+}
+
+node_count_summary() {
+  if command_exists jq && [[ -r $CONFIG_FILE ]]; then
+    jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?'
+  else
+    printf '0'
+  fi
+}
+
+
+xray_version_summary() {
+  local output first
+  xray_installed || { printf '未安装'; return; }
+  output=$("$XRAY_BIN" version 2>/dev/null || true)
+  first=${output%%$'\n'*}
+  if [[ $first =~ ^Xray[[:space:]]+([^[:space:]]+) ]]; then printf '%s' "${BASH_REMATCH[1]}"; else printf '已安装'; fi
+}
+
+service_state_summary() {
+  if ! service_exists; then printf '未安装';
+  elif service_is_active; then printf '运行中';
+  else printf '已停止'; fi
+}
+
+startup_state_summary() {
+  if ! service_exists; then printf '未安装';
+  elif service_is_enabled; then printf '已开启';
+  else printf '已关闭'; fi
+}
+
+_ui_state_badge() {
+  local label=$1
+  case $label in
+    运行中|已开启|已启用) ui_badge ok "$label" ;;
+    已停止)               ui_badge err "$label" ;;
+    未安装|已关闭|未启用) ui_badge muted "$label" ;;
+    *)                    ui_badge warn "$label" ;;
+  esac
+}
+
+show_main_summary() {
+  local svc bbr certs="0"
+  svc=$(_ui_state_badge "$(service_state_summary)")
+  bbr=$(_ui_state_badge "$(bbr_state_summary)")
+  if declare -F certificate_count >/dev/null 2>&1; then
+    certs=$(certificate_count 2>/dev/null || printf '0')
+  fi
+  printf '  状态 %s   Xray %s%s%s   BBR %s\n' \
+    "$svc" "$C_BOLD" "$(xray_version_summary)" "$C_RESET" "$bbr"
+  printf '  入站 %s%s%s 个   证书 %s%s%s 张\n' \
+    "$C_BOLD" "$(node_count_summary)" "$C_RESET" "$C_BOLD" "$certs" "$C_RESET"
+}
+
+show_main_inbounds() {
+  command_exists jq && [[ -r $CONFIG_FILE ]] || return 0
+  local count tag protocol port users outbound out_disp
+  count=$(jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null) || return 0
+  ui_section "入站概览"
+  if ((count == 0)); then
+    printf '  %s○ 暂无入站节点，请选择 [1] 入站管理 创建首个节点%s\n' "$C_DIM" "$C_RESET"
+    return 0
+  fi
+  printf '  %s' "$C_DIM"
+  print_table_cell_clipped "标签" 16; printf '  '
+  print_table_cell_clipped "协议" 6; printf '  '
+  print_table_cell "端口" 6; printf '  '
+  print_table_cell "用户" 4; printf '  默认出站%s\n' "$C_RESET"
+  jq -r '
+    (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
+    .inbounds[] |
+    .tag as $tag |
+    [$tag,.protocol,
+     (.port|tostring),
+     (if .protocol=="vless" then (.settings.clients // [] | length)
+      else ((.settings.accounts // .settings.users // []) | length) end | tostring),
+     ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r tag protocol port users outbound; do
+        if declare -F _outbound_display_name >/dev/null 2>&1; then
+          out_disp=$(_outbound_display_name "$outbound")
+        else
+          out_disp=$outbound
+        fi
+        printf '  '; print_table_cell_clipped "$tag" 16; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$protocol" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell "$port" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell "$users" 4; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$out_disp"
+      done
+}
+
+show_node_summary() {
+  local tag=$1 protocol port method security listen users outbound host out_disp
+  IFS=$'\t' read -r protocol port method security listen users outbound < <(
+    jq -r --arg tag "$tag" '
+      (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
+      .inbounds[]|select(.tag==$tag)|[
+        .protocol,
+        (.port|tostring),
+        (if .protocol=="vless" then (.streamSettings.network // .streamSettings.method // "raw") else "-" end),
+        (if .protocol=="vless" then (.streamSettings.security // "none")
+         elif .protocol=="socks" then (.settings.auth // "noauth")
+         elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
+         else "noauth" end),
+        (.listen // "0.0.0.0"),
+        (if .protocol=="vless" then (.settings.clients // [] | length)
+         else ((.settings.accounts // .settings.users // []) | length) end | tostring),
+        ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)
+      ]|@tsv' "$CONFIG_FILE"
+  )
+  host=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
+  if declare -F _outbound_display_name >/dev/null 2>&1; then
+    out_disp=$(_outbound_display_name "$outbound")
+  else
+    out_disp=$outbound
+  fi
+  ui_card_open "节点概览"
+  ui_card_kv "协议 / 安全" "${protocol^^} · ${method} · ${security}" 12
+  ui_card_kv "监听端口" "${listen}:${port}" 12
+  [[ -z $host ]] || ui_card_kv "连接地址" "$host" 12
+  ui_card_kv "用户 / 出站" "${users} 个用户  ·  默认出站 ${out_disp}" 12
+  ui_card_close
+}

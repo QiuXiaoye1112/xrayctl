@@ -1,0 +1,617 @@
+#!/usr/bin/env bash
+inbound_exists() { jq -e --arg tag "$1" '.inbounds[] | select(.tag==$tag)' "$CONFIG_FILE" >/dev/null; }
+
+inbound_configuration_is_supported() {
+  local tag=$1 protocol method
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  protocol_is_supported "$protocol" || return 1
+  if protocol_supports_stream "$protocol"; then
+    method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.network // .streamSettings.method // "raw"' "$CONFIG_FILE")
+    case $method in raw|xhttp|websocket) ;; *) return 1;; esac
+  fi
+}
+
+inbound_require_supported_configuration() {
+  inbound_configuration_is_supported "$1" \
+    || die "该入站使用已停止支持的协议或传输；仅允许查看或删除。"
+}
+
+port_in_config() {
+  local port=$1 except=${2-}
+  [[ -r $CONFIG_FILE ]] || return 1
+  jq -e --argjson port "$port" --arg except "$except" '.inbounds[] | select(.port==$port and .tag!=$except)' "$CONFIG_FILE" >/dev/null 2>&1
+}
+
+port_in_use_os() {
+  local port=$1
+  if command_exists ss; then ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)$port$";
+  elif command_exists netstat; then netstat -lntu 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$";
+  else return 1; fi
+}
+
+suggest_available_port() {
+  local __var=$1 candidate hex offset i
+  for ((i=0; i<128; i++)); do
+    hex=$(random_hex 2)
+    offset=$((16#$hex % 35535))
+    if ((offset < 20000)); then
+      candidate=$((10000 + offset))
+    else
+      candidate=$((50001 + offset - 20000))
+    fi
+    port_in_config "$candidate" && continue
+    port_in_use_os "$candidate" && continue
+    printf -v "$__var" '%s' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+prompt_tag() {
+  local __var=$1 default=${2:-node-$(random_hex 2)} value
+  while true; do
+    prompt_value value "入站标签" "$default" || return 1
+    validate_tag "$value" || { warn "标签格式不正确。"; continue; }
+    inbound_exists "$value" && { warn "标签已存在。"; continue; }
+    printf -v "$__var" '%s' "$value"; return
+  done
+}
+
+prompt_port() {
+  local __var=$1 default=${2:-443} except=${3-} value current_port=""
+  while true; do
+    prompt_value value "监听端口" "$default" || return 1
+    validate_port "$value" || { warn "端口必须是 1-65535。"; continue; }
+    port_in_config "$value" "$except" && { warn "该端口已被另一条 Xray 入站使用。"; continue; }
+    [[ -z $except ]] || current_port=$(jq -r --arg tag "$except" '.inbounds[]|select(.tag==$tag)|.port // empty' "$CONFIG_FILE")
+    if port_in_use_os "$value" && ! { [[ -n $except && $value == "$current_port" ]] && service_is_active; }; then
+      warn "系统检测到端口 ${value} 已被占用，请换一个端口。"
+      continue
+    fi
+    printf -v "$__var" '%s' "$value"; return
+  done
+}
+
+prompt_public_host() {
+  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} preferred=${3:-} value ipv4="" ipv6="" address_choice prompt_label="客户端连接地址" cert_id cert_subject
+  local labels=() values=()
+  if [[ -z $default ]]; then
+    ipv4=$(detect_public_ipv4 || true)
+    ipv6=$(detect_public_ipv6 || true)
+    if [[ -n $preferred ]]; then labels+=("证书域名/IP  ${preferred}"); values+=("$preferred"); fi
+    while IFS= read -r cert_id; do
+      [[ -n $cert_id ]] || continue
+      cert_subject=$(meta_cert_get_field "$cert_id" subject 2>/dev/null || true)
+      [[ -n $cert_subject ]] || continue
+      [[ $cert_subject == "$preferred" ]] && continue
+      [[ " ${values[*]} " == *" $cert_subject "* ]] && continue
+      labels+=("证书域名/IP  ${cert_subject}"); values+=("$cert_subject")
+    done < <(meta_cert_list 2>/dev/null || true)
+    if [[ -n $ipv4 && $ipv4 != "$preferred" ]]; then labels+=("IPv4  ${ipv4}"); values+=("$ipv4"); fi
+    if [[ -n $ipv6 && $ipv6 != "$preferred" ]]; then labels+=("IPv6  ${ipv6}"); values+=("$ipv6"); fi
+    if ((${#values[@]} > 1)); then
+      labels+=("域名/其他地址")
+      choose address_choice "选择客户端连接地址" "${labels[@]}" || return 1
+      if ((address_choice <= ${#values[@]})); then
+        printf -v "$__var" '%s' "${values[$((address_choice-1))]}"
+        return 0
+      fi
+      prompt_label="客户端连接域名/IP"
+    elif ((${#values[@]} == 1)); then
+      default=${values[0]}
+    else
+      prompt_label="客户端连接域名/IP"
+    fi
+  fi
+  while true; do
+    prompt_value value "$prompt_label" "$default" || return 1
+    if [[ -n $value && $value != *" "* ]]; then
+      printf -v "$__var" '%s' "$value"
+      return
+    fi
+    warn "地址无效。"
+  done
+}
+
+add_inbound() {
+  ensure_runtime_dependencies inbound-add; require_xray_installed; ensure_config
+  local inbound="" host="" public_key="" tag tmp
+  build_inbound inbound host public_key || return 1
+  : "$public_key"
+  tag=$(jq -r '.tag' <<<"$inbound")
+  tmp=$(temp_file)
+  jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  traffic_after_config_change || warn "入站已创建，但流量规则暂未同步，采集任务会自动重试。"
+  info "入站 ${tag} 已创建并部署生效。"
+  print_links "$tag" "" || true
+}
+
+list_inbounds() {
+  ensure_config
+  local count tag protocol port method security listen users sec_disp
+  count=$(jq '.inbounds|length' "$CONFIG_FILE")
+  if ((count == 0)); then info "还没有入站。"; return; fi
+  printf '  %s' "$C_DIM"
+  print_table_cell_clipped "标签" 18; printf '  '
+  print_table_cell_clipped "协议" 6; printf '  '
+  print_table_cell "端口" 6; printf '  '
+  print_table_cell_clipped "传输" 6; printf '  '
+  print_table_cell_clipped "安全" 8; printf '  '
+  print_table_cell "用户" 4; printf '  监听%s\n' "$C_RESET"
+  jq -r '.inbounds | to_entries[] |
+    [.value.tag,.value.protocol,(.value.port|tostring),
+     (if .value.protocol=="vless" then
+        (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end)
+      else "-" end),
+     (if .value.protocol=="vless" then (.value.streamSettings.security // "none")
+      elif .value.protocol=="socks" then (.value.settings.auth // "noauth")
+      elif (((.value.settings.accounts // .value.settings.users // [])|length)>0) then "password"
+      else "noauth" end),
+     (if .value.protocol=="vless" then (.value.settings.clients // [] | length)
+      else ((.value.settings.accounts // .settings.users // []) | length) end | tostring),
+     (.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
+    | while IFS=$'\t' read -r tag protocol port method security users listen; do
+        case $security in
+          reality) sec_disp="${C_CYAN}${security}${C_RESET}" ;;
+          tls|password) sec_disp="${C_GREEN}${security}${C_RESET}" ;;
+          none|noauth) sec_disp="${C_YELLOW}${security}${C_RESET}" ;;
+          *) sec_disp="$security" ;;
+        esac
+        printf '  '; print_table_cell_clipped "$tag" 18; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$protocol" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell "$port" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$method" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell "$sec_disp" 8; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell "$users" 4; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$listen"
+      done
+}
+
+show_inbound() {
+  local tag=$1
+  inbound_exists "$tag" || die "找不到入站：$tag"
+  jq --arg tag "$tag" '.inbounds[] | select(.tag==$tag)' "$CONFIG_FILE"
+}
+
+select_inbound() {
+  local __var=$1 protocols=${2-} entries count answer selected_tag
+  local tags=()
+  ensure_config
+  if [[ -n $protocols ]]; then
+    entries=$(jq -r --arg re "$protocols" '.inbounds[] | select(.protocol|test($re)) | .tag' "$CONFIG_FILE")
+  else entries=$(jq -r '.inbounds[].tag' "$CONFIG_FILE"); fi
+  count=$(grep -c . <<<"$entries" || true)
+  ((count > 0)) || { warn "没有可选入站。"; pause; return 1; }
+  while IFS= read -r selected_tag; do [[ -z $selected_tag ]] || tags+=("$selected_tag"); done <<<"$entries"
+  if ((count == 1)); then
+    printf -v "$__var" '%s' "${tags[0]}"
+    return 0
+  fi
+  choose answer "选择入站" "${tags[@]}" || return 1
+  selected_tag=${tags[$((answer-1))]}
+  printf -v "$__var" '%s' "$selected_tag"
+}
+
+prompt_renamed_inbound_tag() {
+  local __var=$1 old_tag=$2 candidate
+  while true; do
+    prompt_validated_value candidate "新的入站名称" "$old_tag" validate_tag "名称只能包含字母、数字、点、下划线和横线。" || return 1
+    if [[ $candidate != "$old_tag" ]] && { inbound_exists "$candidate" || outbound_exists "$candidate"; }; then
+      warn "名称已被入站或出站使用，请重新输入。"
+      continue
+    fi
+    printf -v "$__var" '%s' "$candidate"
+    return 0
+  done
+}
+
+rename_inbound() {
+  ensure_runtime_dependencies inbound-rename; require_xray_installed; ensure_config
+  local old_tag=${1-} new_tag=${2-} tmp
+  [[ -n $old_tag ]] || select_inbound old_tag || return
+  inbound_exists "$old_tag" || die "找不到入站：$old_tag"
+  inbound_require_supported_configuration "$old_tag"
+  [[ -n $new_tag ]] || prompt_renamed_inbound_tag new_tag "$old_tag" || return 1
+  validate_tag "$new_tag" || die "入站名称格式无效。"
+  if [[ $new_tag == "$old_tag" ]]; then info "入站名称未更改。"; return 0; fi
+  if inbound_exists "$new_tag" || outbound_exists "$new_tag"; then
+    die "名称已被入站或出站使用：$new_tag"
+  fi
+  tmp=$(temp_file)
+  jq --arg old "$old_tag" --arg new "$new_tag" '
+    (.inbounds[]|select(.tag==$old)|.tag)=$new |
+    .routing=(.routing // {domainStrategy:"IPIfNonMatch",rules:[]}) |
+    .routing.rules=((.routing.rules // []) | map(
+      if (.inboundTag|type)=="array" then
+        .inboundTag |= map(if .==$old then $new else . end)
+      elif .inboundTag==$old then .inboundTag=$new
+      else . end |
+      if (.ruleTag // "")==("xrayctl-outbound:"+$old) then .ruleTag=("xrayctl-outbound:"+$new) else . end
+    ))' "$CONFIG_FILE" >"$tmp"
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_rename "$old_tag" "$new_tag" || return
+  traffic_after_config_change "$old_tag" "$new_tag" || warn "入站已重命名，但流量记录暂未同步，采集任务会自动重试。"
+  info "入站已重命名：${old_tag} → ${new_tag}。"
+}
+
+modify_inbound_basic() {
+  ensure_runtime_dependencies inbound-modify; ensure_config
+  local tag=${1-} current listen port host tmp old_port
+  [[ -n $tag ]] || select_inbound tag || return
+  inbound_exists "$tag" || die "找不到入站：$tag"
+  inbound_require_supported_configuration "$tag"
+  current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
+  old_port=$(jq -r '.port' <<<"$current")
+  prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")" || return 1
+  prompt_port port "$old_port" "$tag" || return 1
+  prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
+  tmp=$(temp_file)
+  jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
+    '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
+  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
+  current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
+}
+
+modify_inbound_transport() {
+  ensure_runtime_dependencies inbound-transport; require_xray_installed; ensure_config
+  local tag=${1-} protocol stream public_key="" tmp method security
+  [[ -n $tag ]] || select_inbound tag '^vless$' || return
+  inbound_exists "$tag" || die "找不到入站：$tag"
+  inbound_require_supported_configuration "$tag"
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  [[ $protocol == vless ]] || die "${protocol} 已停止支持或没有可修改的流式传输。"
+  warn "修改传输后，所有客户端都要同步更新配置。"
+  confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
+  build_stream_settings "$protocol" stream public_key || return 1
+  : "$public_key"
+  method=$(jq -r '.network // .method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
+  tmp=$(temp_file)
+  jq --arg tag "$tag" --argjson stream "$stream" --arg method "$method" --arg security "$security" '
+    (.inbounds[]|select(.tag==$tag)|.streamSettings)=$stream |
+    if (.inbounds[]|select(.tag==$tag)|.protocol)=="vless" then
+      (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(
+        if $method=="raw" and $security!="none" then .flow="xtls-rprx-vision" else del(.flow) end
+      )
+    else . end' "$CONFIG_FILE" >"$tmp"
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" || return
+  traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
+  info "传输已更新，请重新导出客户端分享链接。"
+}
+
+delete_inbound() {
+  ensure_runtime_dependencies inbound-delete; ensure_config
+  local tag=${1-} assume_yes=${2:-0} tmp user_count rule_tag
+  [[ -n $tag ]] || select_inbound tag || return
+  inbound_exists "$tag" || die "找不到入站：$tag"
+  user_count=$(jq --arg tag "$tag" '
+    [.inbounds[]|select(.tag==$tag)|((.settings.clients // .settings.accounts // .settings.users // [])|length)][0]' "$CONFIG_FILE")
+  [[ $assume_yes == 1 ]] || confirm "删除入站 ${tag} 及其 ${user_count} 个用户？" N || return 0
+  rule_tag="xrayctl-outbound:${tag}"
+  tmp=$(temp_file)
+  jq --arg tag "$tag" --arg ruleTag "$rule_tag" '
+    .inbounds |= map(select(.tag!=$tag)) |
+    .routing.rules = [
+      (.routing.rules // [])[] |
+      select((.ruleTag // "") != $ruleTag) |
+      if (.inboundTag|type)=="array" then .inboundTag |= map(select(.!=$tag)) else . end |
+      select(
+        if (.inboundTag|type)=="array" then (.inboundTag|length)>0
+        elif (.inboundTag|type)=="string" then .inboundTag!=$tag
+        else true end
+      )
+    ]' "$CONFIG_FILE" >"$tmp"
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_delete "$tag" || return
+  traffic_after_config_change "$tag" || warn "入站已删除，但流量记录暂未同步，采集任务会自动重试。"
+  info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
+}
+
+http_inbound_has_auth() {
+  jq -e --arg tag "$1" '
+    [.inbounds[]|select(.tag==$tag)|((.settings.accounts // .settings.users // [])|length)][0] > 0' \
+    "$CONFIG_FILE" >/dev/null
+}
+
+
+list_clients() {
+  ensure_config
+  local tag=${1-} protocol count number label credential
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
+  heading "${tag} 的用户"
+  if [[ $protocol == socks || $protocol == http ]]; then
+    count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|length' "$CONFIG_FILE")
+  else
+    count=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])|length' "$CONFIG_FILE")
+  fi
+  if ((count == 0)); then info "还没有用户。"; return; fi
+  printf '  %s' "$C_DIM"
+  print_table_cell "序号" 5; printf '  '
+  print_table_cell "用户" 16; printf '  凭据 (%s)%s\n' "$([[ $protocol == vless ]] && printf 'UUID' || printf '密码')" "$C_RESET"
+  case $protocol in
+    vless)
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.xrayctlLabel // .value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
+        | while IFS=$'\t' read -r number label credential; do
+        printf '  '; print_table_cell "$number" 5; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$label" 16; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$credential"
+      done
+      ;;
+    socks|http)
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])|to_entries[]|[.key+1,.value.user,(.value.pass // "-")]|@tsv' "$CONFIG_FILE" \
+        | while IFS=$'\t' read -r number label credential; do
+        printf '  '; print_table_cell "$number" 5; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$label" 16; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$credential"
+      done
+      ;;
+    *) die "${protocol} 不支持独立多用户管理。";;
+  esac
+}
+
+select_client() {
+  local __var=$1 tag=$2 protocol answer current_label
+  local labels=()
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  if [[ $protocol == socks || $protocol == http ]]; then
+    while IFS= read -r current_label; do [[ -z $current_label ]] || labels+=("$current_label"); done < <(
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[].user' "$CONFIG_FILE"
+    )
+  else
+    while IFS= read -r current_label; do [[ -z $current_label ]] || labels+=("$current_label"); done < <(
+      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|(.settings.clients // [])[] | (.xrayctlLabel // .email)' "$CONFIG_FILE"
+    )
+  fi
+  ((${#labels[@]} > 0)) || { warn "该入站没有可选用户。"; pause; return 1; }
+  choose answer "选择用户" "${labels[@]}" || return 1
+  printf -v "$__var" '%s' "${labels[$((answer-1))]}"
+}
+
+client_label_exists() {
+  local tag=$1 label=$2 protocol
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  if [[ $protocol == socks || $protocol == http ]]; then
+    jq -e --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]?|select(.user==$client_label)' "$CONFIG_FILE" >/dev/null
+  else
+    jq -e --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select((.xrayctlLabel // .email)==$client_label)' "$CONFIG_FILE" >/dev/null
+  fi
+}
+
+client_account_identity_exists_globally() {
+  local label=$1 except_tag=${2-} except_label=${3-}
+  [[ -r $CONFIG_FILE ]] || return 1
+  jq -e --arg user_label "$label" --arg exceptTag "$except_tag" --arg exceptLabel "$except_label" '
+    [.inbounds[]? as $inbound | select($inbound.protocol=="socks" or $inbound.protocol=="http") |
+      ($inbound.settings.accounts // $inbound.settings.users // [])[]? |
+      select(.user==$user_label and ($inbound.tag!=$exceptTag or .user!=$exceptLabel))] | length>0
+  ' "$CONFIG_FILE" >/dev/null
+}
+
+
+prompt_client_label() {
+  local __var=$1 tag=$2 prompt=$3 default=${4-} current=${5-} protocol=${6-} label_candidate
+  [[ -n $protocol ]] || protocol=$(jq -r --arg tag "$tag" '.inbounds[]?|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  while true; do
+    prompt_validated_value label_candidate "$prompt" "$default" validate_email_label "用户名称无效，请重新输入。" || return 1
+    if [[ $label_candidate != "$current" ]]; then
+      if client_label_exists "$tag" "$label_candidate"; then
+        if [[ $protocol == socks || $protocol == http ]]; then warn "此用户名已存在"; else warn "用户名称已存在，请重新输入。"; fi
+        continue
+      fi
+      if [[ $protocol == socks || $protocol == http ]] && client_account_identity_exists_globally "$label_candidate" "$tag" "$current"; then
+        warn "此用户名已存在"
+        continue
+      fi
+    fi
+    printf -v "$__var" '%s' "$label_candidate"
+    return 0
+  done
+}
+
+add_client() {
+  ensure_runtime_dependencies client-add; require_xray_installed; ensure_config
+  local tag=${1-} protocol label id password user tmp flow method security
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
+  prompt_client_label label "$tag" "用户名称/邮箱" "user-$(random_hex 2)" || return 1
+  case $protocol in
+    vless)
+      id=$(generate_uuid)
+      method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.network // .streamSettings.method // "raw"' "$CONFIG_FILE")
+      security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
+      [[ $method == raw && $security != none ]] && flow=xtls-rprx-vision || flow=""
+      user=$(jq -n --arg id "$id" --arg email "$label" --arg flow "$flow" '{id:$id,email:$email,level:0}+(if $flow!="" then {flow:$flow} else {} end)')
+      ;;
+    socks|http) prompt_secret password "密码" "$(random_password)" || return 1; user=$(jq -n --arg user "$label" --arg pass "$password" '{user:$user,pass:$pass}') ;;
+    *) die "${protocol} 不支持多用户。";;
+  esac
+  tmp=$(temp_file)
+  if [[ $protocol == socks || $protocol == http ]]; then
+    jq --arg tag "$tag" --arg protocol "$protocol" --argjson user "$user" '
+      (.inbounds[]|select(.tag==$tag)|.settings) |= (
+        ((.accounts // .users // [])+[$user]) as $all |
+        .accounts=$all | .users=$all |
+        if $protocol=="socks" then .auth="password" else . end
+      ) |
+      del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
+  else jq --arg tag "$tag" --argjson user "$user" '(.inbounds[]|select(.tag==$tag)|.settings.clients) += [$user]' "$CONFIG_FILE" >"$tmp"; fi
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" apply_candidate || return
+  info "用户 ${label} 已添加。"
+  print_links "$tag" "$label" || true
+}
+
+delete_client() {
+  ensure_runtime_dependencies client-delete; ensure_config
+  local tag=${1-} label=${2-} assume_yes=${3:-0} protocol tmp count managed_id=""
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
+  [[ -n $label ]] || select_client label "$tag" || return
+  [[ $assume_yes == 1 ]] || confirm "从 ${tag} 删除用户 ${label}？" N || return 0
+  tmp=$(temp_file)
+  if [[ $protocol == socks || $protocol == http ]]; then
+    managed_id=$label
+    count=$(jq --arg tag "$tag" --arg client_label "$label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$client_label)]|length' "$CONFIG_FILE")
+    ((count > 0)) || die "找不到用户：$label"
+    jq --arg tag "$tag" --arg client_label "$label" --arg id "$managed_id" '
+      (.inbounds[]|select(.tag==$tag)|.settings) |= (
+        ((.accounts // .users // [])|map(select(.user!=$client_label))) as $all |
+        .accounts=$all | .users=$all
+      ) |
+      if (.routing.rules|type)=="array" then .routing.rules |= map(select(
+        (.ruleTag // "") != ("xrayctl-user-limit:"+$id) and
+        ((((.ruleTag // "") | startswith("xrayctl-user-outbound:")) and .inboundTag==[$tag] and .user==[$id])|not) and
+        ((((.ruleTag // "") | startswith("xrayctl-user-domain:")) and .inboundTag==[$tag] and .user==[$id])|not)
+      )) else . end |
+      del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
+  else
+    managed_id=$(jq -r --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select((.xrayctlLabel // .email)==$client_label)|.email // empty' "$CONFIG_FILE")
+    count=$(jq --arg tag "$tag" --arg client_label "$label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)]|length' "$CONFIG_FILE")
+    ((count > 0)) || die "找不到用户：$label"
+    jq --arg tag "$tag" --arg client_label "$label" --arg id "$managed_id" '
+      (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(select((.xrayctlLabel // .email)!=$client_label)) |
+      if (.routing.rules|type)=="array" then .routing.rules |= map(select(
+        ($id=="" or (.ruleTag // "") != ("xrayctl-user-limit:"+$id)) and
+        ((((.ruleTag // "") | startswith("xrayctl-user-outbound:")) and .inboundTag==[$tag] and .user==[$id])|not) and
+        ((((.ruleTag // "") | startswith("xrayctl-user-domain:")) and .inboundTag==[$tag] and .user==[$id])|not)
+      )) else . end
+    ' "$CONFIG_FILE" >"$tmp"
+  fi
+  state_apply_candidate_file "$tmp" state_commit_user_template_identity "$tag" "$managed_id" "" || return
+  if [[ -n $managed_id ]]; then
+    traffic_user_forget_client "$tag" "$managed_id" || warn "用户已删除，但流量记录暂未清理。"
+  fi
+}
+
+rotate_client_credential() {
+  local tag=${1-} label=${2-} assume_yes=${3:-0} protocol value generated tmp
+  if [[ $label == --yes ]]; then label=""; assume_yes=1; fi
+  if [[ ! -t 0 ]]; then
+    if [[ -z $tag || -z $label ]]; then
+      error "非交互模式必须指定入站和用户：xrayctl client rotate <入站> <用户> --yes"
+      return 2
+    fi
+    if [[ $assume_yes != 1 ]]; then
+      error "非交互凭据轮换必须显式添加 --yes；未修改任何凭据。"
+      return 2
+    fi
+  fi
+  ensure_runtime_dependencies client-rotate; ensure_config
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  inbound_exists "$tag" || die "找不到入站：$tag"
+  [[ -n $label ]] || select_client label "$tag" || return
+  client_label_exists "$tag" "$label" || die "找不到入站 ${tag} 的用户 ${label}。"
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
+  [[ $assume_yes == 1 ]] || confirm "旧凭据会立即失效，继续吗？" N || return 0
+  tmp=$(temp_file)
+  case $protocol in
+    vless)
+      generated=$(generate_uuid) || { rm -f "$tmp"; error "无法生成新 UUID，未修改凭据。"; return 1; }
+      validate_uuid "$generated" || { rm -f "$tmp"; error "生成的 UUID 无效，未修改凭据。"; return 1; }
+      if [[ $assume_yes == 1 ]]; then
+        value=$generated
+      else
+        prompt_validated_value value "新 UUID" "$generated" validate_uuid "UUID 格式无效，请重新输入。" || { rm -f "$tmp"; return 1; }
+      fi
+      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
+    socks|http)
+      generated=$(random_password) || { rm -f "$tmp"; error "无法生成新密码，未修改凭据。"; return 1; }
+      [[ -n $generated ]] || { rm -f "$tmp"; error "无法生成新密码，未修改凭据。"; return 1; }
+      if [[ $assume_yes == 1 ]]; then
+        value=$generated
+      else
+        prompt_secret value "新密码" "$generated" || { rm -f "$tmp"; return 1; }
+      fi
+      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '
+        (.inbounds[]|select(.tag==$tag)|.settings) |= (
+          ((.accounts // .users // [])|map(if .user==$client_label then .pass=$value else . end)) as $all |
+          .accounts=$all | .users=$all
+        ) |
+        del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp" ;;
+    *) die "不支持此协议。";;
+  esac
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" apply_candidate || return
+  info "新凭据：$value"
+}
+
+rename_client() {
+  ensure_runtime_dependencies client-rename; require_xray_installed; ensure_config
+  local tag=${1-} old_label=${2-} new_label=${3-} protocol count tmp old_identity new_identity
+  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  [[ -n $old_label ]] || select_client old_label "$tag" || return
+  protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
+  inbound_require_supported_configuration "$tag"
+  if [[ -z $new_label ]]; then
+    prompt_client_label new_label "$tag" "新的用户名称/邮箱" "" "$old_label" "$protocol" || return 1
+  else
+    validate_email_label "$new_label" || die "新用户名称无效。"
+    if [[ $new_label != "$old_label" ]]; then
+      if client_label_exists "$tag" "$new_label"; then die "用户名称已存在。"; fi
+      if [[ $protocol == socks || $protocol == http ]] && client_account_identity_exists_globally "$new_label" "$tag" "$old_label"; then die "SOCKS5/HTTP 用户名必须在所有入站中唯一。"; fi
+    fi
+  fi
+  tmp=$(temp_file)
+  if [[ $protocol == socks || $protocol == http ]]; then
+    count=$(jq --arg tag "$tag" --arg client_label "$old_label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$client_label)]|length' "$CONFIG_FILE")
+    ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
+    jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '
+      (.inbounds[]|select(.tag==$tag)|.settings) |= (
+        ((.accounts // .users // [])|map(if .user==$old then .user=$new else . end)) as $all |
+        .accounts=$all | .users=$all
+      ) |
+      if (.routing.rules|type)=="array" then .routing.rules |= map(
+        if (.ruleTag // "")==("xrayctl-user-limit:"+$old) then .ruleTag="xrayctl-user-limit:"+$new | .user=[$new]
+        elif .inboundTag==[$tag] and .user==[$old] and (((.ruleTag // "")|startswith("xrayctl-user-outbound:")) or ((.ruleTag // "")|startswith("xrayctl-user-domain:"))) then .user=[$new]
+        else . end
+      ) else . end |
+      del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
+  else
+    count=$(jq --arg tag "$tag" --arg client_label "$old_label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)]|length' "$CONFIG_FILE")
+    ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
+    old_identity=$(jq -r --arg tag "$tag" --arg old "$old_label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select((.xrayctlLabel // .email)==$old)|.email' "$CONFIG_FILE")
+    new_identity=$(jq -r --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select((.xrayctlLabel // .email)==$old)|if .xrayctlLabel!=null then .email else $new end' "$CONFIG_FILE")
+    jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" --arg oldIdentity "$old_identity" --arg newIdentity "$new_identity" '
+      (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(if (.xrayctlLabel // .email)==$old then if .xrayctlLabel != null then .xrayctlLabel=$new else .email=$new end else . end) |
+      if (.routing.rules|type)=="array" then .routing.rules |= map(
+        if .inboundTag==[$tag] and .user==[$oldIdentity] and (((.ruleTag // "")|startswith("xrayctl-user-outbound:")) or ((.ruleTag // "")|startswith("xrayctl-user-domain:"))) then .user=[$newIdentity] else . end
+      ) else . end
+    ' "$CONFIG_FILE" >"$tmp"
+  fi
+  local lock_owned=0
+  if [[ $protocol == socks || $protocol == http ]]; then
+    if [[ -f $TRAFFIC_FILE && ${TRAFFIC_LOCK_HELD:-0} != 1 ]]; then
+      traffic_lock_acquire || { rm -f "$tmp"; return 1; }
+      lock_owned=1
+    fi
+    if [[ -f $TRAFFIC_FILE ]] && jq -e --arg old "$old_label" --arg new "$new_label" '$old!=$new and any(.inbounds[]?; .users[$new]!=null)' "$TRAFFIC_FILE" >/dev/null; then
+      ((lock_owned == 0)) || traffic_lock_release
+      rm -f "$tmp"
+      warn "目标用户名已有历史流量记录，无法安全合并；请先清理该旧账号记录。"
+      return 1
+    fi
+  fi
+  if ! XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_user_template_identity "$tag" "${old_identity:-$old_label}" "${new_identity:-$new_label}"; then
+    ((lock_owned == 0)) || traffic_lock_release
+    return 1
+  fi
+  if [[ ($protocol == socks || $protocol == http) && -f $TRAFFIC_FILE ]]; then
+    traffic_user_rename_client_record_locked "$tag" "$old_label" "$new_label" || {
+      ((lock_owned == 0)) || traffic_lock_release
+      warn "账号已重命名，但历史流量记录迁移失败，请检查 traffic.json。"
+      return 1
+    }
+  fi
+  ((lock_owned == 0)) || traffic_lock_release
+  info "用户已重命名：${old_label} -> ${new_label}"
+}
+
+public_host_for_tag() {
+  local tag=$1 host
+  host=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
+  if [[ -z $host ]]; then
+    if [[ -n ${XRAYCTL_PUBLIC_HOST:-} ]]; then host=$XRAYCTL_PUBLIC_HOST;
+    elif [[ -t 0 ]]; then prompt_public_host host || return 1;
+    else die "缺少公网地址。请先运行 xrayctl inbound modify ${tag}，或设置 XRAYCTL_PUBLIC_HOST。"; fi
+  fi
+  printf '%s' "$host"
+}

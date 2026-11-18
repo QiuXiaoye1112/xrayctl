@@ -1,0 +1,23 @@
+{
+  "listen": "0.0.0.0",
+  "port": 443,
+  "protocol": "socks",
+  "settings": {
+    "accounts": [
+      {
+        "pass": "fixed-password",
+        "user": "alice"
+      }
+    ],
+    "auth": "password",
+    "ip": "0.0.0.0",
+    "udp": true,
+    "users": [
+      {
+        "pass": "fixed-password",
+        "user": "alice"
+      }
+    ]
+  },
+  "tag": "socks-node"
+}

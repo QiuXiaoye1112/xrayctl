@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+readonly TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+readonly REPO_ROOT=$(cd "${TEST_DIR}/.." && pwd)
+
+tests=(
+  "tests/architecture/test_architecture.sh"
+  "tests/unit/test_validators.sh"
+  "tests/unit/test_notices.sh"
+  "tests/unit/test_ui_layout.sh"
+  "tests/unit/test_platform.sh"
+  "tests/unit/test_protocol_builders.sh"
+  "tests/unit/test_interactive_builders.sh"
+  "tests/unit/test_input_cancellation.sh"
+  "tests/unit/test_traffic.sh"
+  "tests/unit/test_traffic_reliability.sh"
+  "tests/unit/test_empty_inventory_traffic.sh"
+  "tests/unit/test_user_identity.sh"
+  "tests/unit/test_auto_user_traffic.sh"
+  "tests/unit/test_install_user_stats.sh"
+  "tests/unit/test_account_user_traffic.sh"
+  "tests/integration/test_state.sh"
+  "tests/integration/test_user_identity_transaction.sh"
+  "tests/integration/test_certificate_transaction.sh"
+  "tests/integration/test_lifecycle.sh"
+  "tests/integration/test_script_update.sh"
+  "tests/integration/test_outbound_routing.sh"
+  "tests/integration/test_client_rotate_automation.sh"
+  "tests/integration/test_outbound_restore_automation.sh"
+  "tests/integration/test_bbr_logs.sh"
+  "tests/integration/test_outbound_ip_references.sh"
+  "tests/integration/test_menu_pause.sh"
+  "tests/integration/test_user_outbound_routing.sh"
+  "tests/integration/test_user_outbound_real_xray.sh"
+  "tests/integration/test_domain_templates.sh"
+  "tests/integration/test_template_library_delete.sh"
+  "tests/integration/test_coexistence.sh"
+  "tests/integration/test_share.sh"
+  "tests/integration/test_interactive_menus.sh"
+  "tests/integration/test_menu_navigation.sh"
+  "tests/integration/test_regressions.sh"
+  "tests/integration/test_runtime_access.sh"
+  "tests/integration/test_real_xray.sh"
+  "tests/integration/test_real_xray_user_traffic.sh"
+  "tests/integration/test_user_quota_real_xray.sh"
+  "tests/integration/test_account_user_quota_real_xray.sh"
+  "tests/integration/test_systemd_user_quota.sh"
+  "tests/integration/test_traffic_timer_systemd.sh"
+  "tests/integration/test_openrc_user_quota.sh"
+  "tests/smoke/test_cli.sh"
+  "tests/smoke/test_build.sh"
+  "tests/smoke/test_installer.sh"
+  "tests/smoke/test_docs.sh"
+)
+
+for test_file in "${tests[@]}"; do
+  printf '\n==> %s\n' "$test_file"
+  case_root=$(mktemp -d)
+  if XRAYCTL_TRAFFIC_FILE="$case_root/traffic.json" XRAYCTL_LOCK_FILE="$case_root/lock" bash "${REPO_ROOT}/${test_file}"; then
+    rm -rf "$case_root"
+  else
+    test_rc=$?
+    rm -rf "$case_root"
+    exit "$test_rc"
+  fi
+done
+
+printf '\n==> scripts/lint.sh\n'
+bash "${REPO_ROOT}/scripts/lint.sh"
+
+printf '\nall tests passed\n'
