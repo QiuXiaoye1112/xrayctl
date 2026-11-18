@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="199cae273576"
+readonly XRAYCTL_BUILD_COMMIT="dca93db9332e"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -4855,11 +4855,14 @@ traffic_set_backend() {
 }
 
 traffic_inventory_json() {
-  if [[ -f $CONFIG_FILE ]]; then
-    jq '[.inbounds[]? | {key:.tag,value:{protocol:.protocol,port:.port,disabled:false}}] | from_entries' "$CONFIG_FILE" 2>/dev/null || printf '{}\n'
-  else
-    printf '{}\n'
-  fi
+  [[ -r $CONFIG_FILE ]] || { warn "无法读取 Xray 配置，流量规则保持不变。"; return 1; }
+  jq -e '
+    if type != "object" or ((.inbounds | type) != "null" and (.inbounds | type) != "array") then
+      error("invalid inbound inventory")
+    else
+      [.inbounds[]? | {key:.tag,value:{protocol:.protocol,port:.port,disabled:false}}] | from_entries
+    end
+  ' "$CONFIG_FILE" 2>/dev/null || { warn "Xray 配置无法解析，流量规则保持不变。"; return 1; }
 }
 
 # Existing files contain daily totals only. Assign each old boundary day to
@@ -4894,11 +4897,11 @@ traffic_seed_periods() {
 
 traffic_update_file() {
   local samples=${1:-'{}'} mark_collected=${2:-1} today cutoff now period_start inventory tmp
+  inventory=$(traffic_inventory_json) || return 1
   traffic_init_file
   traffic_seed_periods || return 1
   today=$(traffic_today); cutoff=$(traffic_retention_start); now=$(traffic_now)
   period_start=$(traffic_period_start "$now") || return 1
-  inventory=$(traffic_inventory_json)
   tmp=$(temp_file)
   jq --arg today "$today" --arg cutoff "$cutoff" --arg periodStart "$period_start" --arg now "$now" --argjson markCollected "$mark_collected" \
      --arg counterEpoch "${TRAFFIC_COUNTER_EPOCH:-}" --argjson rawSnapshot "${TRAFFIC_RAW_SNAPSHOT:-null}" --argjson samples "$samples" --argjson inventory "$inventory" '
@@ -5319,7 +5322,7 @@ traffic_collect() {
   fi
   [[ -z $snapshot ]] || rm -f "$snapshot"
   inventory=$(traffic_inventory_json) || rc=1
-  if ((rc == 0)) && jq -e --argjson inventory "$inventory" '.rulesInventory!=null and .rulesInventory!=$inventory' "$TRAFFIC_FILE" >/dev/null; then
+  if ((rc == 0 || rc == 2)) && jq -e --argjson inventory "$inventory" '.rulesInventory!=null and .rulesInventory!=$inventory' "$TRAFFIC_FILE" >/dev/null; then
     traffic_rules_restore || rc=1
   fi
   traffic_lock_release
