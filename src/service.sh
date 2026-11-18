@@ -229,6 +229,24 @@ _service_install_output() {
   '
 }
 
+# Refresh xrayctl-owned resources without touching the running Xray core.
+update_script_resources() {
+  ensure_runtime_dependencies internal-script-update
+  install_quick_command
+  if traffic_is_enabled; then
+    case $(platform_init_system) in
+      systemd) traffic_systemd_refresh_write_paths || return 1 ;;
+      openrc)
+        if [[ -f $TRAFFIC_OPENRC_SERVICE && -r $META_FILE ]] && \
+           jq -e --arg unit "$TRAFFIC_OPENRC_SERVICE" '.managedResources.trafficService==$unit' "$META_FILE" >/dev/null 2>&1; then
+          platform_openrc_service xrayctl-traffic-collect restart || return 1
+        fi
+        ;;
+    esac
+  fi
+  info "xrayctl 管理脚本已更新，Xray 核心未重启。"
+}
+
 install_or_update_xray() {
   ensure_runtime_dependencies install
   local version=${1:-$XRAY_CORE_PINNED_VERSION} installer install_log status preserved_config=""

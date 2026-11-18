@@ -1113,6 +1113,7 @@ dispatch() {
         *) die "未知 cert 子命令：${1}";; esac;;
 
     bbr) manage_bbr;;
+    internal-script-update) update_script_resources;;
     internal-traffic-collect) internal_traffic_collect;;
     internal-traffic-ensure) traffic_runtime_ensure;;
     internal-traffic-watch) internal_traffic_watch;;

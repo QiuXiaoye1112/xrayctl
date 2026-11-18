@@ -20,7 +20,8 @@ bootstrap_tmp_dir() {
 }
 
 temp_dir=$(bootstrap_tmp_dir) || die "无法创建引导安装临时目录。"
-cleanup() { rm -rf "$temp_dir"; }
+staged=""
+cleanup() { rm -rf "$temp_dir"; [ -z "$staged" ] || rm -f "$staged"; }
 trap cleanup EXIT
 
 info "正在下载 xrayctl..."
@@ -50,10 +51,21 @@ if [[ -e $TARGET ]] && ! grep -q '^# xrayctl - Xray Linux terminal manager' "$TA
   die "${TARGET} 已存在且不是 xrayctl，拒绝覆盖。"
 fi
 
+mode=install
+if [[ $# -eq 0 && -f $TARGET && -x ${XRAYCTL_XRAY_BIN:-/usr/local/bin/xray} && -f ${XRAYCTL_CONFIG_FILE:-${XRAYCTL_CONFIG_DIR:-/usr/local/etc/xray}/config.json} ]]; then
+  mode=update
+fi
 install -d -m 755 "$(dirname "$TARGET")"
-install -m 755 "${temp_dir}/xrayctl" "$TARGET"
+staged=$(mktemp "${TARGET}.tmp.XXXXXX")
+install -m 755 "${temp_dir}/xrayctl" "$staged"
+mv -f "$staged" "$TARGET"
 
-info "正在安装/修复 Xray 核心和快捷命令..."
-"$TARGET" install "${1-}"
+if [[ $mode == update ]]; then
+  info "正在更新 xrayctl 管理脚本..."
+  "$TARGET" internal-script-update
+else
+  info "正在安装/修复 Xray 核心和快捷命令..."
+  "$TARGET" install "${1-}"
+fi
 
 info "安装完成。运行 xrayctl 打开管理菜单。"
