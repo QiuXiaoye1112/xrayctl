@@ -16,6 +16,7 @@ tests=(
   "tests/unit/test_input_cancellation.sh"
   "tests/unit/test_traffic.sh"
   "tests/unit/test_traffic_reliability.sh"
+  "tests/unit/test_empty_inventory_traffic.sh"
   "tests/unit/test_user_identity.sh"
   "tests/unit/test_account_user_traffic.sh"
   "tests/integration/test_state.sh"

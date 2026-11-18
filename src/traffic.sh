@@ -1343,6 +1343,7 @@ traffic_rules_restore() {
   selected=$(traffic_backend)
   inventory=$(traffic_inventory_json) || return 1
   if jq -e --arg epoch "$epoch" --argjson inventory "$inventory" ' .rulesInventory==$inventory and .rulesInventory!=null and .rulesEpoch==$epoch' "$TRAFFIC_FILE" >/dev/null 2>&1; then
+    [[ $inventory != '{}' ]] || return 0
     traffic_read_counters >/dev/null
     return $?
   fi
@@ -1379,36 +1380,58 @@ traffic_collect() {
   traffic_is_enabled || return 0
   traffic_require_root internal-traffic-collect
   traffic_lock_acquire || { warn "另一个流量采集任务正在运行。"; return 1; }
-  local counters samples rc=0 snapshot="" raw_samples epoch
+  local counters samples rc=0 snapshot="" raw_samples epoch inventory empty_rules=0
   epoch=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf unknown)
-  snapshot=$(temp_file) || { traffic_lock_release; return 1; }
-  cp -p "$TRAFFIC_FILE" "$snapshot" || { rm -f "$snapshot"; traffic_lock_release; return 1; }
   local previous_epoch
-  previous_epoch=$(jq -r '.kernelCounterEpoch // empty' "$TRAFFIC_FILE") || rc=1
+  previous_epoch=$(jq -r '.kernelCounterEpoch // .rulesEpoch // empty' "$TRAFFIC_FILE") || rc=1
   if ((rc == 0)) && [[ -n $previous_epoch && $previous_epoch != "$epoch" ]]; then
     warn "系统已重启，正在重新建立内核统计规则；重启前未采集的计数无法恢复。"
     traffic_rules_restore || rc=1
   fi
-  if ((rc == 0)); then counters=$(TRAFFIC_DETAILED_COUNTERS=1 traffic_read_counters) || rc=1; fi
+  # With no inbounds, rule installation deliberately leaves no counter chains.
+  # When the first inbound appears there are no old counters to sample, so
+  # establish the new rules before reading; an empty installation is a valid
+  # zero sample rather than a backend failure.
+  if ((rc == 0)) && jq -e '.rulesInventory == {}' "$TRAFFIC_FILE" >/dev/null; then
+    inventory=$(traffic_inventory_json) || rc=1
+    if ((rc == 0)); then
+      if jq -e 'length == 0' <<<"$inventory" >/dev/null; then
+        empty_rules=1
+      else
+        traffic_rules_restore || rc=1
+      fi
+    fi
+  fi
+  if ((rc == 0)); then
+    if ((empty_rules)); then counters=""; else counters=$(TRAFFIC_DETAILED_COUNTERS=1 traffic_read_counters) || rc=1; fi
+  fi
   if ((rc == 0)); then
     raw_samples=$(traffic_samples_json <<<"$counters") || rc=1
     if ((rc == 0)); then
       samples=$(jq -nc --arg epoch "$epoch" --argjson raw "$raw_samples" --slurpfile state "$TRAFFIC_FILE" '$raw | with_entries(. as $entry | .value=($entry.value - (if (($state[0].kernelCounterEpoch // $epoch)==$epoch and ($state[0].kernelCounters[$entry.key] // 0) <= $entry.value) then ($state[0].kernelCounters[$entry.key] // 0) else 0 end))) | reduce to_entries[] as $entry ({}; ($entry.key|split(":")|last) as $tag | .[$tag]=((.[$tag] // 0)+$entry.value))') || rc=1
     fi
   fi
-  if ((rc == 0)); then TRAFFIC_RAW_SNAPSHOT="$raw_samples" TRAFFIC_COUNTER_EPOCH="$epoch" traffic_update_file "$samples" || rc=1; fi
+  if ((rc == 0)); then
+    # Snapshot after restoring rules. A failed sample must not roll back the
+    # inventory of live rules or retry their installation and reset counters.
+    if ! snapshot=$(temp_file) || ! cp -p "$TRAFFIC_FILE" "$snapshot"; then
+      rm -f "$snapshot"
+      traffic_lock_release
+      return 1
+    fi
+    TRAFFIC_RAW_SNAPSHOT="$raw_samples" TRAFFIC_COUNTER_EPOCH="$epoch" traffic_update_file "$samples" || rc=1
+  fi
   # Totals and the cumulative counter baseline are committed atomically.
   # A failed write leaves both unchanged, allowing an idempotent retry.
   if ((rc != 0)); then
-    traffic_write_file "$snapshot" || true
+    [[ -z $snapshot ]] || traffic_write_file "$snapshot" || true
   elif ! traffic_user_collect_locked; then
     # User API failures must never prevent the independent inbound accounting
     # and firewall quota rules from being committed.
     warn "用户流量本次未采集；入站流量采集仍已完成。"
     rc=2
   fi
-  rm -f "$snapshot"
-  local inventory
+  [[ -z $snapshot ]] || rm -f "$snapshot"
   inventory=$(traffic_inventory_json) || rc=1
   if ((rc == 0)) && jq -e --argjson inventory "$inventory" '.rulesInventory!=null and .rulesInventory!=$inventory' "$TRAFFIC_FILE" >/dev/null; then
     traffic_rules_restore || rc=1
