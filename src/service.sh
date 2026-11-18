@@ -206,6 +206,27 @@ _service_restore_or_initialize_config() {
   fi
 }
 
+# Configure the local statistics API before the install's normal service start.
+# Conflicting existing APIs are left untouched and reported to the operator.
+_service_prepare_user_stats() {
+  traffic_user_managed_config && return 0
+  local address candidate staged
+  address=$(jq -r '.api.listen // ""' "$CONFIG_FILE") || return 1
+  if [[ -z $address ]]; then address=$(traffic_user_choose_address "$CONFIG_FILE") || address=""; fi
+  candidate=$(temp_file) || return 1
+  if [[ -z $address ]] || ! traffic_user_prepare_config "$CONFIG_FILE" "$candidate" "$address" || ! validate_candidate "$candidate"; then
+    rm -f "$candidate"
+    warn "用户统计暂无法自动启用，请检查统计 API 和用户标识。"
+    return 0
+  fi
+  staged=$(mktemp "${CONFIG_FILE}.tmp.XXXXXX") || { rm -f "$candidate"; return 1; }
+  if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$candidate" "$staged" || ! mv -f "$staged" "$CONFIG_FILE"; then
+    rm -f "$candidate" "$staged"
+    return 1
+  fi
+  rm -f "$candidate"
+}
+
 _service_install_output() {
   awk '
     {
@@ -276,6 +297,7 @@ install_or_update_xray() {
   fi
   [[ -x $XRAY_BIN ]] || { rm -f "$preserved_config"; die "Xray 安装后未找到：$XRAY_BIN"; }
   _service_restore_or_initialize_config "$preserved_config"
+  _service_prepare_user_stats || return 1
   setup_runtime_access
   [[ $(platform_init_system) != openrc ]] || write_openrc_service
   install_quick_command
