@@ -18,11 +18,12 @@ traffic_user_managed_config() {
 }
 
 traffic_user_has_clients() {
-  [[ -r $CONFIG_FILE ]] && jq -e '[.inbounds[]? | select(
+  local file=${1:-$CONFIG_FILE}
+  [[ -r $file ]] && jq -e '[.inbounds[]? | select(
     (.protocol=="vless" and ((.settings.clients // [])|length)>0) or
     (.protocol=="socks" and .settings.auth=="password" and ((.settings.accounts // .settings.users // [])|length)>0) or
     (.protocol=="http" and ((.settings.accounts // .settings.users // [])|length)>0)
-  )] | length>0' "$CONFIG_FILE" >/dev/null 2>&1
+  )] | length>0' "$file" >/dev/null 2>&1
 }
 
 # Xray StatsService uses the email field for every authenticated inbound user.
@@ -481,10 +482,10 @@ traffic_user_require_manager() {
 }
 
 traffic_user_choose_address() {
-  local port hex attempt
+  local file=${1:-$CONFIG_FILE} port hex attempt
   for ((attempt=0; attempt<100; attempt++)); do
     port=$((40000 + RANDOM % 20000))
-    if jq -e --argjson port "$port" '[.inbounds[]? | select(.port==$port)] | length>0' "$CONFIG_FILE" >/dev/null 2>&1; then continue; fi
+    if jq -e --argjson port "$port" '[.inbounds[]? | select(.port==$port)] | length>0' "$file" >/dev/null 2>&1; then continue; fi
     printf -v hex '%04X' "$port"
     if ! awk -v port=":$hex" 'NR>1 && $4=="0A" && substr($2,length($2)-length(port)+1)==port {found=1} END {exit !found}' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
       printf '127.0.0.1:%s' "$port"
@@ -1382,6 +1383,13 @@ traffic_rules_restore_serialized() {
 traffic_collect() {
   traffic_is_enabled || return 0
   traffic_require_root internal-traffic-collect
+  # Older installs may have users but no StatsService until the quota menu was
+  # opened. Initialize once outside the traffic lock; the guard prevents the
+  # initialization's own runtime check from recursing into this step.
+  if [[ ${XRAYCTL_USER_STATS_INITIALIZING:-0} != 1 ]] && ! traffic_user_managed_config && traffic_user_has_clients; then
+    ( XRAYCTL_USER_STATS_INITIALIZING=1; traffic_user_enable ) || \
+      warn "用户统计尚未自动启用，后台会继续重试；入站统计仍会采集。"
+  fi
   traffic_lock_acquire || { warn "另一个流量采集任务正在运行。"; return 1; }
   local counters samples rc=0 snapshot="" raw_samples epoch inventory empty_rules=0
   epoch=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf unknown)

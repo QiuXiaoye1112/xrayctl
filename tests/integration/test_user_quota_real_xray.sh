@@ -45,7 +45,17 @@ if [[ ${XRAYCTL_TEST_REALITY:-0} == 1 ]]; then
     if (.inbounds|length)>1 then .inbounds[1].streamSettings=.inbounds[0].streamSettings | .inbounds[1].settings.clients[].flow="xtls-rprx-vision" else . end' "$TEST_ROOT/input.json" >"$TEST_ROOT/reality-input.json"
   mv "$TEST_ROOT/reality-input.json" "$TEST_ROOT/input.json"
 fi
-traffic_user_prepare_config "$TEST_ROOT/input.json" "$CONFIG_FILE" "127.0.0.1:$api"
+if [[ ${XRAYCTL_TEST_AUTO_STATS:-0} == 1 ]]; then
+  # The normal candidate commit must provision statistics without entering a
+  # traffic menu or invoking the explicit enable command.
+  printf '%s\n' '{"inbounds":[],"outbounds":[],"routing":{"rules":[]}}' >"$CONFIG_FILE"
+  traffic_user_choose_address() { printf '127.0.0.1:%s' "$api"; }
+  capture_auto_config() { cp "$1" "$CONFIG_FILE"; }
+  state_apply_candidate_file "$TEST_ROOT/input.json" capture_auto_config
+  jq -e '.xrayctlUserStats.enabled==true' "$CONFIG_FILE" >/dev/null
+else
+  traffic_user_prepare_config "$TEST_ROOT/input.json" "$CONFIG_FILE" "127.0.0.1:$api"
+fi
 jq --argjson port "$inbound" --argjson alice "$alice" --argjson bob "$bob" '.inbounds[0].port=$alice | .inbounds[1].port=$bob | .outbounds[].settings.vnext[0].port=$port' "$root/tests/fixtures/user-traffic/client.json" >"$TEST_ROOT/client.json"
 if [[ ${XRAYCTL_TEST_DUPLICATE:-0} == 1 ]]; then
   jq --argjson port "$other_in" --argjson socks "$other_socks" '
