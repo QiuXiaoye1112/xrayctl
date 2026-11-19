@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="023d7b404def"
+readonly XRAYCTL_BUILD_COMMIT="c8cb7e5ab126"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -597,6 +597,22 @@ platform_service_is_active() {
   case $(platform_init_system) in
     systemd) systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null ;;
     openrc) platform_service_exists && platform_openrc_service "$SERVICE_NAME" status >/dev/null 2>&1 ;;
+  esac
+}
+
+platform_service_is_stopped() {
+  local state status=0
+  case $(platform_init_system) in
+    systemd)
+      state=$(systemctl show "$SERVICE_NAME" -p ActiveState --value 2>/dev/null) || return 1
+      [[ $state == inactive ]]
+      ;;
+    openrc)
+      platform_service_exists || return 1
+      platform_openrc_service "$SERVICE_NAME" status >/dev/null 2>&1 || status=$?
+      [[ $status == 3 ]]
+      ;;
+    *) return 1 ;;
   esac
 }
 
@@ -4350,7 +4366,13 @@ traffic_user_collect_locked() {
     warn "用户配置包含未登记或无效的统计标识，本次用户采集已跳过。"
     return 1
   fi
-  before=$(traffic_user_core_epoch) || { warn "无法确定 Xray 进程身份，用户流量采集已跳过。"; return 1; }
+  if ! before=$(traffic_user_core_epoch); then
+    # A deliberately stopped service has no process or user counters to sample.
+    # Keep the previous user totals and let inbound collection finish normally.
+    platform_service_is_stopped && return 0
+    warn "无法确定 Xray 进程身份，用户流量采集已跳过。"
+    return 1
+  fi
   samples=$(traffic_user_read_samples "$address") || { warn "Xray 用户统计 API 不可用，本次保留已有用户流量及限制。"; return 1; }
   after=$(traffic_user_core_epoch) || { warn "无法确认 Xray 进程身份，用户流量采集已跳过。"; return 1; }
   [[ $before == "$after" ]] || { warn "采集期间 Xray 已重启，本次用户流量采集已跳过。"; return 1; }
