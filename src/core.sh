@@ -40,6 +40,7 @@ SYSTEMD_OVERRIDE_DIR="${XRAYCTL_SYSTEMD_OVERRIDE_DIR:-/etc/systemd/system/${SYST
 LOCK_FILE="${XRAYCTL_LOCK_FILE:-/run/lock/xrayctl.lock}"
 JQ_INSTALL_PATH="${XRAYCTL_JQ_INSTALL_PATH:-/usr/local/bin/jq}"
 OBFS_SERVER_BIN="${XRAYCTL_OBFS_SERVER_BIN:-/usr/local/bin/obfs-server}"
+OBFS_UDP_CONFIG="${XRAYCTL_OBFS_UDP_CONFIG:-${CONFIG_DIR}/obfs-udp.json}"
 SIMPLE_OBFS_REPO_URL="${XRAYCTL_SIMPLE_OBFS_REPO_URL:-https://github.com/shadowsocks/simple-obfs.git}"
 BBR_CONFIG="${XRAYCTL_BBR_CONFIG:-/etc/sysctl.d/99-xrayctl-bbr.conf}"
 SBCTL_BBR_CONFIG="${XRAYCTL_SBCTL_BBR_CONFIG:-/etc/sysctl.d/99-sbctl-bbr.conf}"

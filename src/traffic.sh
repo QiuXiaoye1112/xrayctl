@@ -1010,11 +1010,11 @@ traffic_inventory_json() {
       error("invalid inbound inventory")
     else
       [.inbounds[]? | .tag as $tag |
-        {key:$tag,value:{
+        {key:$tag,value:({
           protocol:.protocol,
           port:(if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end),
           disabled:false
-        }}
+        } + (if .protocol=="shadowsocks" then {network:(.settings.network // "tcp,udp")} else {} end))}
       ] | from_entries
     end
   ' "$CONFIG_FILE" 2>/dev/null || { warn "Xray 配置无法解析，流量规则保持不变。"; return 1; }
@@ -1370,7 +1370,7 @@ traffic_restore_nft_rules() {
     .inbounds[]? | .tag as $tag |
     [$tag, .protocol,
      ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
-     (if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then "tcp" else (.settings.network // "-") end)] | @tsv
+     (.settings.network // "-")] | @tsv
   ' "$CONFIG_FILE" 2>/dev/null || true)
   ((count > 0)) || traffic_clear_nft_rules
 }
@@ -1396,7 +1396,7 @@ traffic_restore_iptables_rules() {
       .inbounds[]? | .tag as $tag |
       [$tag, .protocol,
        ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
-       (if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then "tcp" else (.settings.network // "-") end)] | @tsv
+       (.settings.network // "-")] | @tsv
     ' "$CONFIG_FILE" 2>/dev/null || true)
   done
   ((count > 0)) || traffic_clear_iptables_rules

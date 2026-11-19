@@ -338,7 +338,7 @@ modify_inbound_basic() {
     fi
     tmp=$(temp_file)
     jq --arg tag "$tag" --argjson localPort "$local_port" \
-      '(.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp")' \
+      '(.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp,udp")' \
       "$CONFIG_FILE" >"$tmp"
     obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port")
     state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" "$obfs_meta" || return
@@ -398,7 +398,7 @@ modify_inbound_transport() {
         fi
         tmp=$(temp_file)
         jq --arg tag "$tag" --argjson localPort "$local_port" '
-          (.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp")
+          (.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp,udp")
         ' "$CONFIG_FILE" >"$tmp"
         obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$ext_listen" "$ext_port" "$local_port")
         XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" "$obfs_meta" || return

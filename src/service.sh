@@ -433,6 +433,222 @@ obfs_service_is_active() {
   esac
 }
 
+obfs_udp_service_name() { printf 'xrayctl-ss2022-udp\n'; }
+obfs_udp_systemd_unit_path() { printf '%s/xrayctl-ss2022-udp.service\n' "$SYSTEMD_UNIT_DIR"; }
+obfs_udp_openrc_service_path() { printf '%s/xrayctl-ss2022-udp\n' "$OPENRC_INIT_DIR"; }
+
+obfs_udp_service_exists() {
+  local init_sys
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd) [[ -f $(obfs_udp_systemd_unit_path) ]] ;;
+    openrc) [[ -x $(obfs_udp_openrc_service_path) ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+obfs_udp_service_is_active() {
+  local svc init_sys
+  svc=$(obfs_udp_service_name)
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd) systemctl is-active --quiet "$svc" 2>/dev/null ;;
+    openrc) obfs_udp_service_exists && platform_openrc_service "$svc" status >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+obfs_udp_entries_json() {
+  local exclude_tag=${1-} meta_json
+  [[ -r $CONFIG_FILE && -r $META_FILE ]] || { printf '[]\n'; return 0; }
+  meta_json=$(meta_json_or_empty)
+  jq -c --arg exclude "$exclude_tag" --argjson meta "$meta_json" '
+    [.inbounds[]? |
+      select(.protocol=="shadowsocks" and .tag!=$exclude and
+        $meta.inbounds[.tag].obfs.enabled==true and
+        (.settings.network // "tcp")=="tcp,udp" and
+        (($meta.inbounds[.tag].obfs.port|type)=="number") and
+        (($meta.inbounds[.tag].obfs.localPort|type)=="number")) |
+      {
+        tag:.tag,
+        listen:($meta.inbounds[.tag].obfs.listen // "0.0.0.0"),
+        port:$meta.inbounds[.tag].obfs.port,
+        localPort:$meta.inbounds[.tag].obfs.localPort
+      }
+    ]
+  ' "$CONFIG_FILE" 2>/dev/null || printf '[]\n'
+}
+
+obfs_udp_has_entries() {
+  local exclude_tag=${1-}
+  obfs_udp_entries_json "$exclude_tag" | jq -e 'length > 0' >/dev/null 2>&1
+}
+
+obfs_udp_service_stop() {
+  local svc init_sys
+  svc=$(obfs_udp_service_name)
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd) systemctl stop "$svc" >/dev/null 2>&1 || true ;;
+    openrc)
+      if obfs_udp_service_exists; then
+        platform_openrc_service "$svc" stop >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
+}
+
+obfs_udp_service_remove() {
+  local svc init_sys
+  svc=$(obfs_udp_service_name)
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd)
+      systemctl disable --now "$svc" >/dev/null 2>&1 || true
+      rm -f "$(obfs_udp_systemd_unit_path)"
+      platform_daemon_reload
+      ;;
+    openrc)
+      if obfs_udp_service_exists; then
+        platform_openrc_service "$svc" stop >/dev/null 2>&1 || true
+        rc-update del "$svc" default >/dev/null 2>&1 || true
+      fi
+      rm -f "$(obfs_udp_openrc_service_path)"
+      ;;
+  esac
+  rm -f -- "$OBFS_UDP_CONFIG" "/run/${svc}.pid" "${LOG_DIR}/obfs-udp.log" "${LOG_DIR}/obfs-udp-error.log" 2>/dev/null || true
+}
+
+obfs_udp_write_config() {
+  local exclude_tag=${1-} entries tmp config_dir
+  entries=$(obfs_udp_entries_json "$exclude_tag")
+  tmp=$(temp_file) || return 1
+  if ! jq -n --argjson entries "$entries" '
+    {
+      log: {loglevel: "warning"},
+      inbounds: [
+        $entries[] | {
+          tag: ("obfs-udp-" + .tag),
+          listen: .listen,
+          port: .port,
+          protocol: "dokodemo-door",
+          settings: {
+            address: "127.0.0.1",
+            port: .localPort,
+            network: "udp"
+          }
+        }
+      ],
+      outbounds: [
+        {
+          tag: "loopback",
+          protocol: "freedom",
+          settings: {
+            finalRules: [{ip: ["127.0.0.1/32"], action: "allow"}]
+          }
+        }
+      ]
+    }
+  ' >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if xray_installed && ! "$XRAY_BIN" run -test -format json -config "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    error "生成的 SS2022 UDP 转发配置未通过 Xray 检查。"
+    return 1
+  fi
+  config_dir=$(dirname "$OBFS_UDP_CONFIG")
+  install -d -m 750 "$config_dir" || { rm -f "$tmp"; return 1; }
+  if ! install -m 640 -o "$RUNTIME_OWNER" -g "$RUNTIME_GROUP" "$tmp" "$OBFS_UDP_CONFIG"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
+obfs_udp_service_sync() {
+  local apply_runtime=${1:-1} exclude_tag=${2-} svc init_sys unit_path
+  if ! obfs_udp_has_entries "$exclude_tag"; then
+    if [[ -n $exclude_tag ]]; then
+      obfs_udp_service_stop
+    else
+      obfs_udp_service_remove
+    fi
+    return 0
+  fi
+  obfs_udp_write_config "$exclude_tag" || return 1
+  svc=$(obfs_udp_service_name)
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd)
+      unit_path=$(obfs_udp_systemd_unit_path)
+      install -d -m 755 "$SYSTEMD_UNIT_DIR" || return 1
+      cat >"$unit_path" <<EOF
+# managed by xrayctl
+[Unit]
+Description=xrayctl SS2022 obfs UDP relay
+After=network.target ${SYSTEMD_UNIT}
+
+[Service]
+Type=simple
+Environment=GOGC=20
+Environment=GOMEMLIMIT=32MiB
+ExecStart=${XRAY_BIN} run -format json -config ${OBFS_UDP_CONFIG}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      chmod 644 "$unit_path"
+      platform_daemon_reload
+      if service_exists || service_is_active; then
+        systemctl enable "$svc" >/dev/null 2>&1 || true
+      fi
+      if ((apply_runtime == 1)) && service_is_active; then
+        systemctl restart "$svc" || return 1
+      fi
+      ;;
+    openrc)
+      unit_path=$(obfs_udp_openrc_service_path)
+      install -d -m 755 "$OPENRC_INIT_DIR" "$LOG_DIR" || return 1
+      cat >"$unit_path" <<EOF
+#!/sbin/openrc-run
+# managed by xrayctl
+name="xrayctl SS2022 obfs UDP relay"
+description="xrayctl SS2022 obfs UDP relay"
+command="${XRAY_BIN}"
+command_args="run -format json -config ${OBFS_UDP_CONFIG}"
+command_background=true
+pidfile="/run/${svc}.pid"
+output_log="${LOG_DIR}/obfs-udp.log"
+error_log="${LOG_DIR}/obfs-udp-error.log"
+export GOGC=20
+export GOMEMLIMIT=32MiB
+
+$(printf 'depend() { need net; after %s; }' "$SERVICE_NAME")
+EOF
+      chmod 755 "$unit_path"
+      if service_exists || service_is_active; then
+        rc-update add "$svc" default >/dev/null 2>&1 || true
+      fi
+      if ((apply_runtime == 1)) && service_is_active; then
+        if obfs_udp_service_is_active; then
+          platform_openrc_service "$svc" restart || return 1
+        else
+          platform_openrc_service "$svc" zap >/dev/null 2>&1 || true
+          rm -f "/run/${svc}.pid"
+          platform_openrc_service "$svc" start || return 1
+        fi
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 obfs_service_setup() {
   local tag=$1 apply_runtime=${2:-1} listen="" port="" local_port="" obfs_bin svc init_sys unit_path
   [[ -r $META_FILE ]] || return 1
@@ -510,6 +726,7 @@ EOF
       return 1
       ;;
   esac
+  obfs_udp_service_sync "$apply_runtime" || return 1
 }
 
 obfs_service_stop() {
@@ -524,6 +741,7 @@ obfs_service_stop() {
       fi
       ;;
   esac
+  obfs_udp_service_sync 1 "$tag" || true
 }
 
 obfs_service_remove() {
@@ -545,6 +763,7 @@ obfs_service_remove() {
       ;;
   esac
   rm -f "/run/${svc}.pid" "${LOG_DIR}/obfs-${tag}.log" "${LOG_DIR}/obfs-${tag}-error.log" 2>/dev/null || true
+  obfs_udp_service_sync 1 || true
 }
 
 obfs_remove_all_services() {
@@ -568,6 +787,7 @@ obfs_remove_all_services() {
       done
       ;;
   esac
+  obfs_udp_service_remove || true
 }
 
 obfs_services_sync_action() {
@@ -620,6 +840,59 @@ obfs_services_sync_action() {
         ;;
     esac
   done < <(obfs_configured_tags)
+  if obfs_udp_has_entries; then
+    svc=$(obfs_udp_service_name)
+    if ! obfs_udp_service_exists; then
+      if [[ $action != stop && $action != disable ]]; then
+        obfs_udp_service_sync 0 || rc=1
+      fi
+    fi
+    if obfs_udp_service_exists; then
+      case $action in
+        start)
+          obfs_udp_write_config || rc=1
+          case $init_sys in
+            systemd) systemctl start "$svc" || rc=1 ;;
+            openrc) platform_openrc_service "$svc" start || rc=1 ;;
+          esac
+          ;;
+        stop)
+          obfs_udp_service_stop
+          ;;
+        restart)
+          obfs_udp_write_config || rc=1
+          case $init_sys in
+            systemd) systemctl restart "$svc" || rc=1 ;;
+            openrc)
+              if obfs_udp_service_is_active; then
+                platform_openrc_service "$svc" restart || rc=1
+              else
+                platform_openrc_service "$svc" zap >/dev/null 2>&1 || true
+                rm -f "/run/${svc}.pid"
+                platform_openrc_service "$svc" start || rc=1
+              fi
+              ;;
+          esac
+          ;;
+        enable)
+          obfs_udp_write_config || rc=1
+          case $init_sys in
+            systemd) systemctl enable "$svc" >/dev/null 2>&1 || rc=1; systemctl start "$svc" || rc=1 ;;
+            openrc) rc-update add "$svc" default >/dev/null 2>&1 || rc=1; platform_openrc_service "$svc" start || rc=1 ;;
+          esac
+          ;;
+        disable)
+          obfs_udp_service_stop
+          case $init_sys in
+            systemd) systemctl disable "$svc" >/dev/null 2>&1 || true ;;
+            openrc) rc-update del "$svc" default >/dev/null 2>&1 || true ;;
+          esac
+          ;;
+      esac
+    fi
+  elif obfs_udp_service_exists; then
+    obfs_udp_service_remove || true
+  fi
   return "$rc"
 }
 
@@ -649,6 +922,7 @@ obfs_services_reconcile() {
     [[ -n $tag ]] || continue
     obfs_service_setup "$tag" 1 || return 1
   done < <(obfs_configured_tags)
+  obfs_udp_service_sync 1 || return 1
 }
 
 _obfs_sync_menu_action() {
@@ -789,7 +1063,11 @@ obfs_state_summary() {
   done < <(obfs_configured_tags)
   if ((total > 0)); then
     if ((active == total)); then
-      printf '运行中 (%d/%d)\n' "$active" "$total"
+      if obfs_udp_has_entries && ! obfs_udp_service_is_active; then
+        printf '部分运行 (%d/%d, UDP 已停止)\n' "$active" "$total"
+      else
+        printf '运行中 (%d/%d)\n' "$active" "$total"
+      fi
     elif ((active > 0)); then
       printf '部分运行 (%d/%d)\n' "$active" "$total"
     else
@@ -803,7 +1081,7 @@ obfs_state_summary() {
 }
 
 show_obfs_status() {
-  local bin_path install_state svc tag listen port local_port obfs_host state_badge count=0 meta_json
+  local bin_path install_state svc tag listen port local_port obfs_host ss_network state_badge count=0 meta_json udp_svc udp_badge
   bin_path=$(obfs_server_bin)
   if obfs_server_installed; then
     install_state=$(ui_badge ok "已安装 (${bin_path})")
@@ -814,10 +1092,21 @@ show_obfs_status() {
   ui_card_open "插件概览"
   ui_card_kv "obfs-server" "$install_state" 14
   ui_card_kv "整体状态" "$(_ui_state_badge "$(obfs_state_summary)")" 14
+  if obfs_udp_has_entries; then
+    udp_svc=$(obfs_udp_service_name)
+    if ! obfs_udp_service_exists; then
+      udp_badge=$(ui_badge muted "未创建服务")
+    elif obfs_udp_service_is_active; then
+      udp_badge=$(ui_badge ok "运行中")
+    else
+      udp_badge=$(ui_badge err "已停止")
+    fi
+    ui_card_kv "UDP 转发" "${udp_svc}  ${udp_badge}" 14
+  fi
   ui_card_close
 
   meta_json=$(meta_json_or_empty)
-  while IFS=$'\t' read -r tag listen port local_port obfs_host; do
+  while IFS=$'\t' read -r tag listen port local_port obfs_host ss_network; do
     [[ -n $tag ]] || continue
     count=$((count + 1))
     svc=$(obfs_service_name "$tag")
@@ -830,7 +1119,12 @@ show_obfs_status() {
     fi
     ui_card_open "混淆实例 · ${tag}"
     ui_card_kv "服务单元" "${svc}  ${state_badge}" 12
-    ui_card_kv "监听转发" "${listen}:${port} → 127.0.0.1:${local_port}" 12
+    if [[ $ss_network == tcp,udp ]]; then
+      ui_card_kv "TCP 混淆" "${listen}:${port} → 127.0.0.1:${local_port}" 12
+      ui_card_kv "UDP 直通" "${listen}:${port} → 127.0.0.1:${local_port}" 12
+    else
+      ui_card_kv "监听转发" "${listen}:${port} → 127.0.0.1:${local_port}" 12
+    fi
     ui_card_kv "obfs-host" "$obfs_host" 12
     ui_card_close
   done < <(
@@ -841,7 +1135,8 @@ show_obfs_status() {
         [$tag, ($meta.inbounds[$tag].obfs.listen // "0.0.0.0"),
          (($meta.inbounds[$tag].obfs.port // .port)|tostring),
          (($meta.inbounds[$tag].obfs.localPort // .port)|tostring),
-         ($meta.inbounds[$tag].obfs.host // "-")] | @tsv
+         ($meta.inbounds[$tag].obfs.host // "-"),
+         (.settings.network // "tcp")] | @tsv
       ' "$CONFIG_FILE" 2>/dev/null || true
     fi
   )
@@ -879,6 +1174,29 @@ show_obfs_logs() {
         ;;
     esac
   done < <(obfs_configured_tags)
+  if [[ -z $filter_tag ]] && obfs_udp_service_exists; then
+    found=1
+    svc=$(obfs_udp_service_name)
+    heading "SS2022 UDP 转发日志 · ${svc}"
+    case $init_sys in
+      systemd)
+        journalctl -u "$svc" -n "$lines" --no-pager || rc=$?
+        ;;
+      openrc)
+        out_log="${LOG_DIR}/obfs-udp.log"
+        err_log="${LOG_DIR}/obfs-udp-error.log"
+        if [[ -f $out_log || -f $err_log ]]; then
+          tail -n "$lines" "$err_log" "$out_log" 2>/dev/null || rc=$?
+        else
+          info "尚未生成 ${svc} 日志。"
+        fi
+        ;;
+      *)
+        warn "无法识别服务管理器。"
+        rc=1
+        ;;
+    esac
+  fi
   if ((found == 0)); then
     if [[ -n $filter_tag ]]; then
       warn "未找到启用 HTTP 混淆的入站：${filter_tag}"
@@ -1174,7 +1492,9 @@ show_node_summary() {
         ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
         (if .protocol=="vless" then (.streamSettings.network // .streamSettings.method // "raw")
          elif .protocol=="shadowsocks" then
-           (if $meta.inbounds[$tag].obfs.enabled==true then "tcp+http" else (.settings.network // "tcp") end)
+           (if $meta.inbounds[$tag].obfs.enabled==true then
+              (if (.settings.network // "tcp")=="tcp,udp" then "tcp/udp+http" else "tcp+http" end)
+            else (.settings.network // "tcp") end)
          else "-" end),
         (if .protocol=="vless" then (.streamSettings.security // "none")
          elif .protocol=="shadowsocks" then (.settings.method // "AEAD")

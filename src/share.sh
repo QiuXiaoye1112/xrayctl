@@ -13,7 +13,7 @@ print_share_entry() {
 
 _share_print_params_card() {
   local tag=$1 protocol=$2 uri_host=$3 port=$4
-  local stream method security path="" sni="" sid="" pbk="" flow="" auth="" obfs_host=""
+  local stream method security path="" sni="" sid="" pbk="" flow="" auth="" obfs_host="" ss_network=""
   ui_card_open "连接参数 · ${tag}"
   case $protocol in
     vless)
@@ -54,10 +54,16 @@ _share_print_params_card() {
     shadowsocks)
       if inbound_obfs_enabled "$tag"; then
         obfs_host=$(inbound_obfs_field "$tag" host)
-        ui_card_kv "协议与传输" "SS2022 · TCP · HTTP 混淆" 12
+        ss_network=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.network // "tcp"' "$CONFIG_FILE")
+        if [[ $ss_network == tcp,udp ]]; then
+          ui_card_kv "协议与传输" "SS2022 · TCP/UDP · HTTP 混淆" 12
+        else
+          ui_card_kv "协议与传输" "SS2022 · TCP · HTTP 混淆" 12
+        fi
         ui_card_kv "加密方式" "$SS2022_METHOD" 12
         ui_card_kv "混淆域名" "$obfs_host" 12
         ui_card_kv "SIP003 插件" "obfs-local;obfs=http;obfs-host=${obfs_host}" 12
+        ui_card_kv "Clash/Mihomo" "plugin: obfs, mode: http, host: ${obfs_host}" 12
         ui_card_kv "连接地址" "${uri_host}:${port}" 12
       else
         ui_card_kv "协议与传输" "SS2022 · TCP/UDP" 12
@@ -137,7 +143,7 @@ print_links() {
     shadowsocks)
       if inbound_obfs_enabled "$tag"; then
         obfs_host=$(inbound_obfs_field "$tag" host)
-        plugin_query="?plugin=$(url_encode "obfs-local;obfs=http;obfs-host=${obfs_host}")"
+        plugin_query="/?plugin=$(url_encode "obfs-local;obfs=http;obfs-host=${obfs_host}")"
       fi
       server_key=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.password' "$CONFIG_FILE")
       while IFS= read -r -d '' label && IFS= read -r -d '' password; do

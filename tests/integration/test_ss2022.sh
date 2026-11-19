@@ -17,6 +17,7 @@ export XRAYCTL_LOG_DIR="$TEST_ROOT/logs"
 export XRAYCTL_SYSTEMD_UNIT_DIR="$TEST_ROOT/systemd"
 export XRAYCTL_OPENRC_INIT_DIR="$TEST_ROOT/openrc"
 export XRAYCTL_OBFS_SERVER_BIN="$TEST_ROOT/bin/obfs-server"
+export XRAYCTL_OBFS_UDP_CONFIG="$TEST_ROOT/obfs-udp.json"
 export XRAYCTL_XRAY_BIN=${XRAYCTL_REAL_XRAY_BIN:-$TEST_ROOT/missing-xray}
 export XRAYCTL_RUNTIME_OWNER XRAYCTL_RUNTIME_GROUP
 XRAYCTL_RUNTIME_OWNER=$(id -un)
@@ -105,7 +106,7 @@ jq '.inbounds = [{tag:"legacy-ss", protocol:"shadowsocks", settings:{method:"aes
 cp "$candidate" "$CONFIG_FILE"
 assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound subscription omitted SS2022"
 
-# --- SS2022 + simple-obfs (HTTP obfuscation, TCP-only) ---
+# --- SS2022 + simple-obfs (HTTP obfuscation, TCP+UDP) ---
 (
   XRAYCTL_PLATFORM=systemd
   SYSTEMCTL_LOG="$TEST_ROOT/systemctl.log"
@@ -154,17 +155,32 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
 
   local_port=$(jq -r '.inbounds[0].port' "$CONFIG_FILE")
   [[ $local_port != 39182 ]]
-  jq -e '.inbounds[0] | .listen=="127.0.0.1" and .settings.network=="tcp" and .settings.method=="2022-blake3-aes-256-gcm"' "$CONFIG_FILE" >/dev/null
+  jq -e '.inbounds[0] | .listen=="127.0.0.1" and .settings.network=="tcp,udp" and .settings.method=="2022-blake3-aes-256-gcm"' "$CONFIG_FILE" >/dev/null
   jq -e --argjson lp "$local_port" '.inbounds["ss2022-obfs"].obfs | .enabled==true and .type=="http" and .host=="obfs.example.com" and .listen=="0.0.0.0" and .port==39182 and .localPort==$lp and .service=="xrayctl-obfs-ss2022-obfs"' "$META_FILE" >/dev/null
   unit_file="$SYSTEMD_UNIT_DIR/xrayctl-obfs-ss2022-obfs.service"
   [[ -f $unit_file ]]
   grep -Fq "ExecStart=${OBFS_SERVER_BIN} -s 0.0.0.0 -p 39182 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
 
-  assert_eq "39182" "$(traffic_inventory_json | jq -r '.["ss2022-obfs"].port')" "traffic inventory must use external obfs port"
-  assert_eq "tcp" "$(traffic_protocols_for_inbound shadowsocks tcp)" "obfs SS2022 must count TCP only"
+  udp_unit_file="$SYSTEMD_UNIT_DIR/xrayctl-ss2022-udp.service"
+  [[ -f $OBFS_UDP_CONFIG && -f $udp_unit_file ]]
+  jq -e --argjson lp "$local_port" '
+    (.inbounds | length)==1 and
+    (.inbounds[0] | .tag=="obfs-udp-ss2022-obfs" and .protocol=="dokodemo-door" and .listen=="0.0.0.0" and .port==39182 and .settings.address=="127.0.0.1" and .settings.port==$lp and .settings.network=="udp") and
+    (.outbounds[0] | .protocol=="freedom" and .settings.finalRules==[{"ip":["127.0.0.1/32"],"action":"allow"}])
+  ' "$OBFS_UDP_CONFIG" >/dev/null
+  grep -Fq 'Environment=GOGC=20' "$udp_unit_file"
+  grep -Fq 'Environment=GOMEMLIMIT=32MiB' "$udp_unit_file"
+  grep -Fq "ExecStart=${XRAY_BIN} run -format json -config ${OBFS_UDP_CONFIG}" "$udp_unit_file"
 
+  assert_eq "39182" "$(traffic_inventory_json | jq -r '.["ss2022-obfs"].port')" "traffic inventory must use external obfs port"
+  assert_eq "tcp,udp" "$(traffic_inventory_json | jq -r '.["ss2022-obfs"].network')" "traffic inventory must reflect tcp,udp network"
+  assert_eq $'tcp\nudp' "$(traffic_protocols_for_inbound shadowsocks tcp,udp)" "obfs SS2022 must count TCP and UDP"
+  assert_eq "tcp" "$(traffic_protocols_for_inbound shadowsocks tcp)" "legacy tcp-only obfs SS2022 still counts TCP only"
+
+  grep -Fq 'SS2022 · TCP/UDP · HTTP 混淆' "$TEST_ROOT/obfs-add.out"
+  grep -Fq 'plugin: obfs, mode: http, host: obfs.example.com' "$TEST_ROOT/obfs-add.out"
   sub_uri=$(dispatch subscription ss2022-obfs | base64 --decode)
-  [[ $sub_uri == *"@edge.example.com:39182?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dobfs.example.com#ss2022-obfs-alice" ]]
+  [[ $sub_uri == *"@edge.example.com:39182/?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dobfs.example.com#ss2022-obfs-alice" ]]
 
   next_user=bob
   dispatch client add ss2022-obfs >/dev/null
@@ -176,37 +192,49 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   obfs_list=$(dispatch inbound list)
   grep -Fq '39182' <<<"$obfs_list"
   grep -Fq 'http' <<<"$obfs_list"
+  if grep -Fq 'obfs-udp' <<<"$obfs_list"; then fail "obfs-udp leaked into inbound list"; fi
 
   obfs_status=$(dispatch obfs status)
   grep -Fq 'xrayctl-obfs-ss2022-obfs' <<<"$obfs_status"
+  grep -Fq 'xrayctl-ss2022-udp' <<<"$obfs_status"
+  grep -Fq 'TCP 混淆' <<<"$obfs_status"
+  grep -Fq 'UDP 直通' <<<"$obfs_status"
   grep -Fq 'obfs.example.com' <<<"$obfs_status"
   full_status=$(show_status)
   grep -Fq 'HTTP 混淆' <<<"$full_status"
   grep -Fq 'xrayctl-obfs-ss2022-obfs' <<<"$full_status"
   obfs_logs=$(dispatch obfs logs 20)
   grep -Fq 'obfs-journal-line: -u xrayctl-obfs-ss2022-obfs -n 20 --no-pager' <<<"$obfs_logs"
+  grep -Fq 'obfs-journal-line: -u xrayctl-ss2022-udp -n 20 --no-pager' <<<"$obfs_logs"
   all_logs=$(dispatch logs 20)
   grep -Fq 'obfs-journal-line: -u xrayctl-obfs-ss2022-obfs -n 20 --no-pager' <<<"$all_logs"
+  grep -Fq 'obfs-journal-line: -u xrayctl-ss2022-udp -n 20 --no-pager' <<<"$all_logs"
 
   next_listen=192.0.2.10
   next_port=39183
   next_public_host=edge.example.com
   dispatch inbound modify ss2022-obfs >/dev/null
   grep -Fq "ExecStart=${OBFS_SERVER_BIN} -s 192.0.2.10 -p 39183 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
+  jq -e '.inbounds[0] | .listen=="192.0.2.10" and .port==39183' "$OBFS_UDP_CONFIG" >/dev/null
 
   dispatch inbound rename ss2022-obfs ss2022-obfs2 >/dev/null
   [[ ! -e $unit_file ]]
   unit_file="$SYSTEMD_UNIT_DIR/xrayctl-obfs-ss2022-obfs2.service"
   [[ -f $unit_file ]]
   assert_eq "xrayctl-obfs-ss2022-obfs2" "$(jq -r '.inbounds["ss2022-obfs2"].obfs.service' "$META_FILE")"
+  assert_eq "obfs-udp-ss2022-obfs2" "$(jq -r '.inbounds[0].tag' "$OBFS_UDP_CONFIG")"
 
   # OpenRC unit generation check.
   (
     XRAYCTL_PLATFORM=openrc
     obfs_service_setup ss2022-obfs2 0
     rc_file="$OPENRC_INIT_DIR/xrayctl-obfs-ss2022-obfs2"
-    [[ -x $rc_file ]]
+    rc_udp_file="$OPENRC_INIT_DIR/xrayctl-ss2022-udp"
+    [[ -x $rc_file && -x $rc_udp_file ]]
     grep -Fq 'command_args="-s 192.0.2.10 -p 39183 --obfs http -r 127.0.0.1:'"$local_port"'"' "$rc_file"
+    grep -Fq "command_args=\"run -format json -config ${OBFS_UDP_CONFIG}\"" "$rc_udp_file"
+    grep -Fq 'export GOGC=20' "$rc_udp_file"
+    grep -Fq 'export GOMEMLIMIT=32MiB' "$rc_udp_file"
     obfs_service_remove ss2022-obfs2
     [[ ! -e $rc_file ]]
   )
@@ -214,21 +242,21 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   # Refusing simple-obfs uninstall while an obfs inbound is active.
   assert_failure dispatch obfs uninstall --yes
 
-  # Disabling obfs via inbound transport reverts to direct TCP/UDP and deletes unit.
+  # Disabling obfs via inbound transport reverts to direct TCP/UDP and deletes units + obfs-udp config.
   confirm() { return 0; }
   next_obfs_choice=1
   dispatch inbound transport ss2022-obfs2 >/dev/null
   jq -e '.inbounds[0] | .listen=="192.0.2.10" and .port==39183 and .settings.network=="tcp,udp"' "$CONFIG_FILE" >/dev/null
   jq -e '.inbounds["ss2022-obfs2"].obfs == null' "$META_FILE" >/dev/null
-  [[ ! -e $unit_file ]]
+  [[ ! -e $unit_file && ! -e $udp_unit_file && ! -e $OBFS_UDP_CONFIG ]]
 
   # Re-enable obfs and test inbound delete cleanup.
   next_obfs_choice=2
   next_obfs_host=cdn.example.com
   dispatch inbound transport ss2022-obfs2 >/dev/null
-  [[ -f $unit_file ]]
+  [[ -f $unit_file && -f $udp_unit_file && -f $OBFS_UDP_CONFIG ]]
   dispatch inbound delete ss2022-obfs2 --yes >/dev/null
-  [[ ! -e $unit_file ]]
+  [[ ! -e $unit_file && ! -e $udp_unit_file && ! -e $OBFS_UDP_CONFIG ]]
   assert_eq 0 "$(jq '.inbounds|length' "$CONFIG_FILE")" "obfs inbound delete failed"
 
   # Owned simple-obfs binary uninstall after all obfs inbounds are removed.
@@ -258,7 +286,7 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   assert_eq "null" "$(jq -r '.managedResources.simpleObfsPackage' "$META_FILE")"
 )
 
-# Regression test: SIGHUP during Xray restart must not abort obfs service setup.
+# Regression test: SIGHUP during Xray restart must not abort obfs or UDP relay setup.
 (
   XRAYCTL_PLATFORM=systemd
   SYSTEMCTL_LOG="$TEST_ROOT/sighup-systemctl.log"
@@ -295,8 +323,10 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   dispatch inbound add >"$TEST_ROOT/hup-add.out"
 
   unit_file="$SYSTEMD_UNIT_DIR/xrayctl-obfs-ss2022-hup.service"
-  [[ -f $unit_file ]]
+  udp_unit_file="$SYSTEMD_UNIT_DIR/xrayctl-ss2022-udp.service"
+  [[ -f $unit_file && -f $udp_unit_file && -f $OBFS_UDP_CONFIG ]]
   grep -Fq 'restart xrayctl-obfs-ss2022-hup' "$SYSTEMCTL_LOG"
+  grep -Fq 'restart xrayctl-ss2022-udp' "$SYSTEMCTL_LOG"
 )
 
-pass "SS2022 menu order, validated config, independent keys, user lifecycle, HTTP obfs, and share links"
+pass "SS2022 menu order, validated config, independent keys, user lifecycle, HTTP obfs + UDP relay, and share links"

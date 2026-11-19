@@ -170,7 +170,7 @@ build_inbound() {
     suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
     xray_listen="127.0.0.1"
     xray_port=$local_port
-    ss_network="tcp"
+    ss_network="tcp,udp"
     obfs_meta_json=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port")
   else
     xray_listen=$listen

@@ -334,11 +334,14 @@ _scan_xrayctl_residuals() {
     /etc/systemd/system/xrayctl-certbot-renew.timer
     /etc/systemd/system/xrayctl-certbot-renew.service
     "${SYSTEMD_UNIT_DIR}/xrayctl-obfs-*.service"
+    "${SYSTEMD_UNIT_DIR}/xrayctl-ss2022-udp.service"
     /etc/systemd/system/xray.service
     /etc/systemd/system/xray@.service
     /etc/systemd/system/xray.service.d
     "$OPENRC_SERVICE"
     "${OPENRC_INIT_DIR}/xrayctl-obfs-*"
+    "${OPENRC_INIT_DIR}/xrayctl-ss2022-udp"
+    "$OBFS_UDP_CONFIG"
     "$CERT_RENEW_HOOK"
     "$BACKUP_DIR"
     "$TRAFFIC_FILE"
