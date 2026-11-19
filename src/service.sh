@@ -961,17 +961,14 @@ _build_simple_obfs_from_source() {
     pacman) dependencies=(git base-devel autoconf automake libtool pkgconf libev c-ares) ;;
     zypper) dependencies=(git gcc make autoconf automake libtool pkg-config libev-devel libcares-devel) ;;
   esac
-  info "正在准备 simple-obfs 构建依赖，请稍候。"
   if ! _obfs_run_install_step "$log_file" install_packages "${dependencies[@]}"; then
     rm -rf "$build_dir"
     die "安装 simple-obfs 构建依赖失败。"
   fi
-  info "正在下载 simple-obfs 源码，请稍候。"
   if ! _obfs_run_install_step "$log_file" run_bounded 300 git clone --recursive --depth 1 "$SIMPLE_OBFS_REPO_URL" "${build_dir}/simple-obfs"; then
     rm -rf "$build_dir"
     die "下载 simple-obfs 源码失败。"
   fi
-  info "正在编译 simple-obfs，请稍候。"
   if ! (
     cd "${build_dir}/simple-obfs" &&
     { sed -i 's/-Werror//g' configure.ac Makefile.am src/Makefile.am 2>/dev/null || true; } &&
