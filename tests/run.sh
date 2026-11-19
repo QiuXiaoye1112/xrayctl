@@ -38,6 +38,7 @@ tests=(
   "tests/integration/test_template_library_delete.sh"
   "tests/integration/test_coexistence.sh"
   "tests/integration/test_share.sh"
+  "tests/integration/test_ss2022.sh"
   "tests/integration/test_interactive_menus.sh"
   "tests/integration/test_menu_navigation.sh"
   "tests/integration/test_regressions.sh"

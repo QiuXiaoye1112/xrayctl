@@ -1,0 +1,23 @@
+{
+  "tag": "ss2022-test",
+  "listen": "127.0.0.1",
+  "port": 39082,
+  "protocol": "shadowsocks",
+  "settings": {
+    "method": "2022-blake3-aes-256-gcm",
+    "network": "tcp,udp",
+    "password": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "clients": [
+      {
+        "email": "alice",
+        "password": "0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u8=",
+        "level": 0
+      }
+    ]
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls", "quic"],
+    "routeOnly": true
+  }
+}

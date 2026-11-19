@@ -617,13 +617,15 @@ show_main_inbounds() {
   print_table_cell_clipped "协议" 6; printf '  '
   print_table_cell "端口" 6; printf '  '
   print_table_cell "用户" 4; printf '  默认出站%s\n' "$C_RESET"
-  jq -r '
+  jq -r --arg ss2022Method "$SS2022_METHOD" '
     (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
     .inbounds[] |
     .tag as $tag |
-    [$tag,.protocol,
+    [$tag,(if .protocol=="shadowsocks" then
+       (if .settings.method==$ss2022Method then "SS2022" else "SS" end)
+     else .protocol end),
      (.port|tostring),
-     (if .protocol=="vless" then (.settings.clients // [] | length)
+     (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
       else ((.settings.accounts // .settings.users // []) | length) end | tostring),
      ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port users outbound; do
@@ -642,18 +644,21 @@ show_main_inbounds() {
 show_node_summary() {
   local tag=$1 protocol port method security listen users outbound host out_disp
   IFS=$'\t' read -r protocol port method security listen users outbound < <(
-    jq -r --arg tag "$tag" '
+    jq -r --arg tag "$tag" --arg ss2022Method "$SS2022_METHOD" '
       (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
       .inbounds[]|select(.tag==$tag)|[
-        .protocol,
+        (if .protocol=="shadowsocks" and .settings.method==$ss2022Method then "SS2022" else .protocol end),
         (.port|tostring),
-        (if .protocol=="vless" then (.streamSettings.network // .streamSettings.method // "raw") else "-" end),
+        (if .protocol=="vless" then (.streamSettings.network // .streamSettings.method // "raw")
+         elif .protocol=="shadowsocks" then (.settings.network // "tcp")
+         else "-" end),
         (if .protocol=="vless" then (.streamSettings.security // "none")
+         elif .protocol=="shadowsocks" then (.settings.method // "AEAD")
          elif .protocol=="socks" then (.settings.auth // "noauth")
          elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
          else "noauth" end),
         (.listen // "0.0.0.0"),
-        (if .protocol=="vless" then (.settings.clients // [] | length)
+        (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
          else ((.settings.accounts // .settings.users // []) | length) end | tostring),
         ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)
       ]|@tsv' "$CONFIG_FILE"

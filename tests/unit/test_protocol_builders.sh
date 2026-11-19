@@ -48,8 +48,8 @@ run_fixture() {
 }
 
 run_fixture vless 1
-run_fixture socks 2
-run_fixture http 3
+run_fixture socks 3
+run_fixture http 4
 assert_failure protocol_build_socks ignored socks-node 0.0.0.0 1080 '' ''
 assert_failure protocol_build_http ignored http-node 0.0.0.0 8080 alice ''
 
@@ -59,7 +59,7 @@ assert_failure protocol_build_http ignored http-node 0.0.0.0 8080 alice ''
 # test_account_user_traffic.sh.
 CONFIG_FILE=$(mktemp "${TMPDIR:-/tmp}/xrayctl-existing-account.XXXXXX")
 jq -n '{inbounds:[{tag:"existing",protocol:"http",settings:{accounts:[{user:"taken",pass:"secret"}]}}]}' >"$CONFIG_FILE"
-TEST_PROTOCOL_CHOICE=2
+TEST_PROTOCOL_CHOICE=3
 TEST_ACCOUNT_NAMES=(taken available)
 prompted_inbound=''
 prompted_host=''
@@ -84,7 +84,7 @@ unset -f prompt_validated_value
 rm -f "$duplicate_log"
 rm -f "$CONFIG_FILE"
 
-assert_eq $'vless\nsocks\nhttp' "$(protocol_list)" "protocol registry changed"
+assert_eq $'vless\nshadowsocks\nsocks\nhttp' "$(protocol_list)" "protocol registry changed"
 assert_success protocol_is_supported vless
 assert_failure protocol_is_supported vmess
 assert_failure protocol_is_supported trojan

@@ -56,5 +56,5 @@ xrayctl - Xray Linux 管理脚本
   xrayctl bbr                        启用/关闭 BBR（交互式）
   xrayctl version
 
-支持协议: VLESS、SOCKS5、HTTP
+支持协议: VLESS、SS2022、SOCKS5、HTTP
 支持传输: RAW、XHTTP、WebSocket；支持 TLS 和 REALITY。
