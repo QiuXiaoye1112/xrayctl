@@ -16,9 +16,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y iproute2 iptables jq netcat-openbsd nftables openssl ripgrep shellcheck unzip
       - name: Download and verify current Xray release
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
           version=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+            -H "Authorization: Bearer $GH_TOKEN" \
             https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')
           case "$(uname -m)" in
             x86_64) asset=Xray-linux-64.zip ;;
