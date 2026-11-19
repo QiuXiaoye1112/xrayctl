@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="855d20fa2479"
+readonly XRAYCTL_BUILD_COMMIT="14d02212627f"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -39,6 +39,8 @@ RUNTIME_GROUP="${XRAYCTL_RUNTIME_GROUP:-xrayctl}"
 SYSTEMD_OVERRIDE_DIR="${XRAYCTL_SYSTEMD_OVERRIDE_DIR:-/etc/systemd/system/${SYSTEMD_UNIT}.d}"
 LOCK_FILE="${XRAYCTL_LOCK_FILE:-/run/lock/xrayctl.lock}"
 JQ_INSTALL_PATH="${XRAYCTL_JQ_INSTALL_PATH:-/usr/local/bin/jq}"
+OBFS_SERVER_BIN="${XRAYCTL_OBFS_SERVER_BIN:-/usr/local/bin/obfs-server}"
+SIMPLE_OBFS_REPO_URL="${XRAYCTL_SIMPLE_OBFS_REPO_URL:-https://github.com/shadowsocks/simple-obfs.git}"
 BBR_CONFIG="${XRAYCTL_BBR_CONFIG:-/etc/sysctl.d/99-xrayctl-bbr.conf}"
 SBCTL_BBR_CONFIG="${XRAYCTL_SBCTL_BBR_CONFIG:-/etc/sysctl.d/99-sbctl-bbr.conf}"
 CERT_STOPPED_SERVICE=0
@@ -1550,12 +1552,36 @@ temp_file() {
   printf '%s\n' "${path}.json"
 }
 
+meta_json_or_empty() {
+  local payload=""
+  if [[ -r $META_FILE ]]; then
+    payload=$(jq -c 'if type=="object" then . else {} end' "$META_FILE" 2>/dev/null || true)
+  fi
+  if [[ -n $payload ]]; then
+    printf '%s' "$payload"
+  else
+    printf '{}'
+  fi
+}
+
 _state_build_inbound_meta_set() {
-  local current=$1 candidate=$2 tag=$3 host=$4
-  jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-    '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now}) |
-     del(.inbounds[$tag].realityPublicKey)' \
-    "$current" >"$candidate"
+  local current=$1 candidate=$2 tag=$3 host=$4 obfs_json=${5-}
+  if [[ -n $obfs_json && $obfs_json != none ]]; then
+    jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --argjson obfs "$obfs_json" \
+      '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now,obfs:$obfs}) |
+       del(.inbounds[$tag].realityPublicKey)' \
+      "$current" >"$candidate"
+  elif [[ $obfs_json == none ]]; then
+    jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now}) |
+       del(.inbounds[$tag].realityPublicKey, .inbounds[$tag].obfs)' \
+      "$current" >"$candidate"
+  else
+    jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now}) |
+       del(.inbounds[$tag].realityPublicKey)' \
+      "$current" >"$candidate"
+  fi
 }
 
 _state_build_inbound_meta_delete() {
@@ -1572,7 +1598,12 @@ _state_build_inbound_meta_rename() {
   local current=$1 candidate=$2 old_tag=$3 new_tag=$4
   jq --arg old "$old_tag" --arg new "$new_tag" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '
     if .inbounds[$old] then
-      .inbounds[$new]=(.inbounds[$old] + {updatedAt:$now}) | del(.inbounds[$old])
+      .inbounds[$new]=(
+        (.inbounds[$old] + {updatedAt:$now}) |
+        if (.obfs | type)=="object" and (.obfs.enabled // false)==true then
+          .obfs.service = ("xrayctl-obfs-" + $new)
+        else . end
+      ) | del(.inbounds[$old])
     else . end |
     .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
     .domainTemplates.userBindings = [.domainTemplates.userBindings[]? |
@@ -1583,7 +1614,7 @@ _state_build_inbound_meta_rename() {
 }
 
 state_commit_inbound_set() {
-  state_commit "$1" _state_build_inbound_meta_set "$2" "$3"
+  state_commit "$1" _state_build_inbound_meta_set "$2" "$3" "${4-}"
 }
 
 state_commit_inbound_delete() {
@@ -1712,10 +1743,12 @@ restore_backup() {
     init_meta || true
     setup_runtime_access || true
     restart_service || true
+    obfs_services_reconcile || true
     traffic_runtime_ensure || true
     rm -rf "$temp"
     die "恢复失败，已回滚配置、元数据、证书、流量记录和运行时规则。"
   fi
+  obfs_services_reconcile || warn "备份已恢复，但部分 obfs-server 服务同步失败，请检查 simple-obfs 状态。"
   rm -rf "$temp"; info "备份已恢复。"
 
   # Warn if any Let's Encrypt certs lack Certbot lineage after restore
@@ -2984,8 +3017,10 @@ readonly SS2022_METHOD="2022-blake3-aes-256-gcm"
 readonly SS2022_INBOUND_JQ='
   def ss2022_inbound:
     def key: type=="string" and test("^[A-Za-z0-9+/]{43}=$");
+    (.listen // "") as $listen |
     .settings |
-    .method==$ss2022Method and .network=="tcp,udp" and
+    .method==$ss2022Method and
+    (.network=="tcp,udp" or (.network=="tcp" and $listen=="127.0.0.1")) and
     (.password | key) and
     (.clients | type=="array" and length>0 and
       all(.[]; .address==null and (.method // "")=="" and (.password | key))) and
@@ -3043,13 +3078,14 @@ protocol_generate_ss2022_key() {
 }
 
 protocol_build_shadowsocks() {
-  local __out=$1 tag=$2 listen=$3 port=$4 email=$5 server_key user_key result
+  local __out=$1 tag=$2 listen=$3 port=$4 email=$5 network=${6:-tcp,udp} server_key user_key result
   server_key=$(protocol_generate_ss2022_key) || return 1
   user_key=$(protocol_generate_ss2022_key) || return 1
   result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-    --arg method "$SS2022_METHOD" --arg serverKey "$server_key" --arg userKey "$user_key" --arg email "$email" \
+    --arg method "$SS2022_METHOD" --arg serverKey "$server_key" --arg userKey "$user_key" \
+    --arg email "$email" --arg network "$network" \
     '{tag:$tag,listen:$listen,port:$port,protocol:"shadowsocks",settings:{
-      method:$method,password:$serverKey,network:"tcp,udp",clients:[{email:$email,password:$userKey,level:0}]
+      method:$method,password:$serverKey,network:$network,clients:[{email:$email,password:$userKey,level:0}]
     },sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}') || return 1
   printf -v "$__out" '%s' "$result"
 }
@@ -3094,15 +3130,27 @@ protocol_build() {
   esac
 }
 
+_inbound_build_obfs_meta() {
+  local tag=$1 obfs_host=$2 listen=$3 port=$4 local_port=$5
+  jq -nc \
+    --arg host "$obfs_host" \
+    --arg listen "$listen" \
+    --argjson port "$port" \
+    --argjson localPort "$local_port" \
+    --arg service "xrayctl-obfs-${tag}" \
+    '{enabled:true,type:"http",host:$host,listen:$listen,port:$port,localPort:$localPort,service:$service}'
+}
+
 build_inbound() {
-  local __inbound=$1 __host=$2 __public_key=$3
+  local __inbound=$1 __host=$2 __public_key=$3 __obfs_meta=${4-}
   local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
+  local obfs_choice=1 obfs_host="" obfs_meta_json="" local_port="" xray_listen="" xray_port="" ss_network="tcp,udp"
   local total_steps=3 listen_step=2 user_step=3
   ui_wizard_step 1 "" "选择入站协议"
   choose choice "选择入站协议" "VLESS" "SS2022" "SOCKS5" "HTTP" || return 1
   case $choice in
     1) protocol=vless; total_steps=4; listen_step=3; user_step=4 ;;
-    2) protocol=shadowsocks ;;
+    2) protocol=shadowsocks; total_steps=4; listen_step=3; user_step=4 ;;
     3) protocol=socks ;;
     4) protocol=http ;;
   esac
@@ -3110,6 +3158,12 @@ build_inbound() {
   if protocol_supports_stream "$protocol"; then
     build_stream_settings "$protocol" stream generated_public_key || return 1
     suggested_host=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
+  elif [[ $protocol == shadowsocks ]]; then
+    ui_wizard_step 2 "$total_steps" "HTTP 混淆设置"
+    choose obfs_choice "HTTP 混淆 (simple-obfs)" "关闭" "开启" || return 1
+    if [[ $obfs_choice == 2 ]]; then
+      prompt_validated_value obfs_host "混淆域名 (obfs-host)" "" validate_domain "混淆域名格式无效，请重新输入。" || return 1
+    fi
   fi
 
   ui_wizard_step "$listen_step" "$total_steps" "监听参数与连接地址"
@@ -3124,6 +3178,18 @@ build_inbound() {
     prompt_public_host public_host "" "$suggested_host" || return 1
   fi
 
+  if [[ $protocol == shadowsocks && $obfs_choice == 2 ]]; then
+    suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
+    xray_listen="127.0.0.1"
+    xray_port=$local_port
+    ss_network="tcp"
+    obfs_meta_json=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port")
+  else
+    xray_listen=$listen
+    xray_port=$port
+    ss_network="tcp,udp"
+  fi
+
   ui_wizard_step "$user_step" "$total_steps" "创建初始访问用户"
   case $protocol in
     vless)
@@ -3132,7 +3198,7 @@ build_inbound() {
       ;;
     shadowsocks)
       prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol" || return 1
-      protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$email" || return 1
+      protocol_build inbound_json "$protocol" "$tag" "$xray_listen" "$xray_port" "$email" "$ss_network" || return 1
       ;;
     socks|http)
       while true; do
@@ -3148,6 +3214,7 @@ build_inbound() {
   printf -v "$__inbound" '%s' "$inbound_json"
   printf -v "$__host" '%s' "$public_host"
   printf -v "$__public_key" '%s' "$generated_public_key"
+  [[ -z $__obfs_meta ]] || printf -v "$__obfs_meta" '%s' "$obfs_meta_json"
 }
 
 # --- src/inbound.sh ---
@@ -3172,10 +3239,52 @@ inbound_require_supported_configuration() {
     || die "该入站使用已停止支持的协议或传输；仅允许查看或删除。"
 }
 
+inbound_obfs_enabled() {
+  [[ -r $META_FILE ]] && jq -e --arg tag "$1" '.inbounds[$tag].obfs.enabled==true' "$META_FILE" >/dev/null 2>&1
+}
+
+inbound_obfs_field() {
+  local tag=$1 field=$2
+  [[ -r $META_FILE ]] || return 0
+  jq -r --arg tag "$tag" --arg field "$field" '.inbounds[$tag].obfs[$field] // empty' "$META_FILE" 2>/dev/null || true
+}
+
+inbound_effective_port() {
+  local tag=$1 port=""
+  if inbound_obfs_enabled "$tag"; then
+    port=$(inbound_obfs_field "$tag" port)
+  fi
+  if [[ -n $port ]]; then
+    printf '%s\n' "$port"
+  else
+    jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.port // empty' "$CONFIG_FILE"
+  fi
+}
+
+inbound_effective_listen() {
+  local tag=$1 listen=""
+  if inbound_obfs_enabled "$tag"; then
+    listen=$(inbound_obfs_field "$tag" listen)
+  fi
+  if [[ -n $listen ]]; then
+    printf '%s\n' "$listen"
+  else
+    jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.listen // "0.0.0.0"' "$CONFIG_FILE"
+  fi
+}
+
 port_in_config() {
   local port=$1 except=${2-}
-  [[ -r $CONFIG_FILE ]] || return 1
-  jq -e --argjson port "$port" --arg except "$except" '.inbounds[] | select(.port==$port and .tag!=$except)' "$CONFIG_FILE" >/dev/null 2>&1
+  if [[ -r $CONFIG_FILE ]]; then
+    jq -e --argjson port "$port" --arg except "$except" '.inbounds[] | select(.port==$port and .tag!=$except)' "$CONFIG_FILE" >/dev/null 2>&1 && return 0
+  fi
+  if [[ -r $META_FILE ]]; then
+    jq -e --argjson port "$port" --arg except "$except" '
+      .inbounds // {} | to_entries[] |
+      select(.key!=$except and .value.obfs.enabled==true and (.value.obfs.port==$port or .value.obfs.localPort==$port))
+    ' "$META_FILE" >/dev/null 2>&1 && return 0
+  fi
+  return 1
 }
 
 port_in_use_os() {
@@ -3203,6 +3312,26 @@ suggest_available_port() {
   return 1
 }
 
+suggest_available_port_excluding() {
+  local __var=$1 excluded=${2-} picked="" i fallback
+  for ((i=0; i<32; i++)); do
+    suggest_available_port picked || break
+    if [[ -z $excluded || $picked != "$excluded" ]]; then
+      printf -v "$__var" '%s' "$picked"
+      return 0
+    fi
+  done
+  for ((i=0; i<128; i++)); do
+    fallback=$((10000 + i))
+    [[ $fallback == "$excluded" ]] && continue
+    port_in_config "$fallback" && continue
+    port_in_use_os "$fallback" && continue
+    printf -v "$__var" '%s' "$fallback"
+    return 0
+  done
+  return 1
+}
+
 prompt_tag() {
   local __var=$1 default=${2:-node-$(random_hex 2)} value
   while true; do
@@ -3219,7 +3348,7 @@ prompt_port() {
     prompt_value value "监听端口" "$default" || return 1
     validate_port "$value" || { warn "端口必须是 1-65535。"; continue; }
     port_in_config "$value" "$except" && { warn "该端口已被另一条 Xray 入站使用。"; continue; }
-    [[ -z $except ]] || current_port=$(jq -r --arg tag "$except" '.inbounds[]|select(.tag==$tag)|.port // empty' "$CONFIG_FILE")
+    [[ -z $except ]] || current_port=$(inbound_effective_port "$except" 2>/dev/null || true)
     if port_in_use_os "$value" && ! { [[ -n $except && $value == "$current_port" ]] && service_is_active; }; then
       warn "系统检测到端口 ${value} 已被占用，请换一个端口。"
       continue
@@ -3271,13 +3400,19 @@ prompt_public_host() {
 
 add_inbound() {
   ensure_runtime_dependencies inbound-add; require_xray_installed; ensure_config
-  local inbound="" host="" public_key="" tag tmp
-  build_inbound inbound host public_key || return 1
+  local inbound="" host="" public_key="" obfs_meta="" tag tmp
+  build_inbound inbound host public_key obfs_meta || return 1
   : "$public_key"
+  if [[ -n $obfs_meta ]]; then
+    ensure_simple_obfs_installed || return 1
+  fi
   tag=$(jq -r '.tag' <<<"$inbound")
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
-  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" "$obfs_meta" || return
+  if [[ -n $obfs_meta ]]; then
+    obfs_service_setup "$tag" || warn "入站已创建，但 obfs-server 服务创建或启动失败，请检查 simple-obfs 状态。"
+  fi
   traffic_after_config_change || warn "入站已创建，但流量规则暂未同步，采集任务会自动重试。"
   info "入站 ${tag} 已创建并部署生效。"
   print_links "$tag" "" || true
@@ -3285,9 +3420,10 @@ add_inbound() {
 
 list_inbounds() {
   ensure_config
-  local count tag protocol port method security listen users sec_disp
+  local count tag protocol port method security listen users sec_disp meta_json
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站。"; return; fi
+  meta_json=$(meta_json_or_empty)
   printf '  %s' "$C_DIM"
   print_table_cell_clipped "标签" 18; printf '  '
   print_table_cell_clipped "协议" 6; printf '  '
@@ -3295,13 +3431,17 @@ list_inbounds() {
   print_table_cell_clipped "传输" 7; printf '  '
   print_table_cell_clipped "安全" 8; printf '  '
   print_table_cell "用户" 4; printf '  监听%s\n' "$C_RESET"
-  jq -r --arg ss2022Method "$SS2022_METHOD" '.inbounds | to_entries[] |
-    [.value.tag,(if .value.protocol=="shadowsocks" then
+  jq -r --arg ss2022Method "$SS2022_METHOD" --argjson meta "$meta_json" '.inbounds | to_entries[] |
+    .value.tag as $tag |
+    [$tag,(if .value.protocol=="shadowsocks" then
        (if .value.settings.method==$ss2022Method then "SS2022" else "SS" end)
-     else .value.protocol end),(.value.port|tostring),
+     else .value.protocol end),
+     ((if .value.protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .value.port) else .value.port end)|tostring),
      (if .value.protocol=="vless" then
         (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end)
-      elif .value.protocol=="shadowsocks" then (.value.settings.network // "tcp") else "-" end),
+      elif .value.protocol=="shadowsocks" then
+        (if $meta.inbounds[$tag].obfs.enabled==true then "http" else (.value.settings.network // "tcp") end)
+      else "-" end),
      (if .value.protocol=="vless" then (.value.streamSettings.security // "none")
       elif .value.protocol=="socks" then (.value.settings.auth // "noauth")
       elif .value.protocol=="shadowsocks" then "AEAD"
@@ -3309,7 +3449,7 @@ list_inbounds() {
       else "noauth" end),
      (if (.value.protocol=="vless" or .value.protocol=="shadowsocks") then (.value.settings.clients // [] | length)
       else ((.value.settings.accounts // .settings.users // []) | length) end | tostring),
-     (.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
+     (if .value.protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.listen // "0.0.0.0") else (.value.listen // "0.0.0.0") end)] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port method security users listen; do
         case $security in
           reality) sec_disp="${C_CYAN}${security}${C_RESET}" ;;
@@ -3366,7 +3506,7 @@ prompt_renamed_inbound_tag() {
 
 rename_inbound() {
   ensure_runtime_dependencies inbound-rename; require_xray_installed; ensure_config
-  local old_tag=${1-} new_tag=${2-} tmp
+  local old_tag=${1-} new_tag=${2-} tmp was_obfs=0
   [[ -n $old_tag ]] || select_inbound old_tag || return
   inbound_exists "$old_tag" || die "找不到入站：$old_tag"
   inbound_require_supported_configuration "$old_tag"
@@ -3376,6 +3516,7 @@ rename_inbound() {
   if inbound_exists "$new_tag" || outbound_exists "$new_tag"; then
     die "名称已被入站或出站使用：$new_tag"
   fi
+  inbound_obfs_enabled "$old_tag" && was_obfs=1
   tmp=$(temp_file)
   jq --arg old "$old_tag" --arg new "$new_tag" '
     (.inbounds[]|select(.tag==$old)|.tag)=$new |
@@ -3388,25 +3529,49 @@ rename_inbound() {
       if (.ruleTag // "")==("xrayctl-outbound:"+$old) then .ruleTag=("xrayctl-outbound:"+$new) else . end
     ))' "$CONFIG_FILE" >"$tmp"
   XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_rename "$old_tag" "$new_tag" || return
+  if ((was_obfs == 1)); then
+    obfs_service_remove "$old_tag"
+    obfs_service_setup "$new_tag" || warn "入站已重命名，但新 obfs-server 服务更新失败，请检查 simple-obfs 状态。"
+  fi
   traffic_after_config_change "$old_tag" "$new_tag" || warn "入站已重命名，但流量记录暂未同步，采集任务会自动重试。"
   info "入站已重命名：${old_tag} → ${new_tag}。"
 }
 
 modify_inbound_basic() {
   ensure_runtime_dependencies inbound-modify; ensure_config
-  local tag=${1-} current listen port host tmp old_port
+  local tag=${1-} current listen port host tmp old_port old_listen local_port="" obfs_host="" obfs_meta=""
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
-  old_port=$(jq -r '.port' <<<"$current")
-  prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")" || return 1
-  prompt_port port "$old_port" "$tag" || return 1
-  prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
-  tmp=$(temp_file)
-  jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-    '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
-  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  if inbound_obfs_enabled "$tag"; then
+    old_listen=$(inbound_effective_listen "$tag")
+    old_port=$(inbound_effective_port "$tag")
+    local_port=$(inbound_obfs_field "$tag" localPort)
+    obfs_host=$(inbound_obfs_field "$tag" host)
+    prompt_value listen "监听地址" "${old_listen:-0.0.0.0}" || return 1
+    prompt_port port "$old_port" "$tag" || return 1
+    prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
+    if [[ -z $local_port || $local_port == "$port" ]] || ! validate_port "$local_port"; then
+      suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
+    fi
+    tmp=$(temp_file)
+    jq --arg tag "$tag" --argjson localPort "$local_port" \
+      '(.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp")' \
+      "$CONFIG_FILE" >"$tmp"
+    obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port")
+    state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" "$obfs_meta" || return
+    obfs_service_setup "$tag" || warn "入站已修改，但 obfs-server 服务更新失败，请检查 simple-obfs 状态。"
+  else
+    old_port=$(jq -r '.port' <<<"$current")
+    prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")" || return 1
+    prompt_port port "$old_port" "$tag" || return 1
+    prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
+    tmp=$(temp_file)
+    jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
+      '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
+    state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  fi
   traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
 }
@@ -3414,34 +3579,90 @@ modify_inbound_basic() {
 modify_inbound_transport() {
   ensure_runtime_dependencies inbound-transport; require_xray_installed; ensure_config
   local tag=${1-} protocol stream public_key="" tmp method security
-  [[ -n $tag ]] || select_inbound tag '^vless$' || return
+  local obfs_choice obfs_host ext_listen ext_port local_port obfs_meta="" was_obfs=0 had_active=0
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks)$' || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
-  [[ $protocol == vless ]] || die "${protocol} 已停止支持或没有可修改的流式传输。"
-  warn "修改传输后，所有客户端都要同步更新配置。"
-  confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
-  build_stream_settings "$protocol" stream public_key || return 1
-  : "$public_key"
-  method=$(jq -r '.network // .method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
-  tmp=$(temp_file)
-  jq --arg tag "$tag" --argjson stream "$stream" --arg method "$method" --arg security "$security" '
-    (.inbounds[]|select(.tag==$tag)|.streamSettings)=$stream |
-    if (.inbounds[]|select(.tag==$tag)|.protocol)=="vless" then
-      (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(
-        if $method=="raw" and $security!="none" then .flow="xtls-rprx-vision" else del(.flow) end
-      )
-    else . end' "$CONFIG_FILE" >"$tmp"
-  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" || return
-  traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
-  info "传输已更新，请重新导出客户端分享链接。"
+  case $protocol in
+    vless)
+      warn "修改传输后，所有客户端都要同步更新配置。"
+      confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
+      build_stream_settings "$protocol" stream public_key || return 1
+      : "$public_key"
+      method=$(jq -r '.network // .method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
+      tmp=$(temp_file)
+      jq --arg tag "$tag" --argjson stream "$stream" --arg method "$method" --arg security "$security" '
+        (.inbounds[]|select(.tag==$tag)|.streamSettings)=$stream |
+        if (.inbounds[]|select(.tag==$tag)|.protocol)=="vless" then
+          (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(
+            if $method=="raw" and $security!="none" then .flow="xtls-rprx-vision" else del(.flow) end
+          )
+        else . end' "$CONFIG_FILE" >"$tmp"
+      XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" || return
+      traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
+      info "传输已更新，请重新导出客户端分享链接。"
+      ;;
+    shadowsocks)
+      inbound_obfs_enabled "$tag" && was_obfs=1
+      ext_listen=$(inbound_effective_listen "$tag")
+      ext_port=$(inbound_effective_port "$tag")
+      choose obfs_choice "HTTP 混淆 (simple-obfs)" "关闭" "开启" || return 1
+      if [[ $obfs_choice == 2 ]]; then
+        prompt_validated_value obfs_host "混淆域名 (obfs-host)" "" validate_domain "混淆域名格式无效，请重新输入。" || return 1
+        ensure_simple_obfs_installed || return 1
+        local_port=$(inbound_obfs_field "$tag" localPort)
+        if [[ -z $local_port || $local_port == "$ext_port" ]] || ! validate_port "$local_port"; then
+          suggest_available_port_excluding local_port "$ext_port" || die "无法分配内部转发端口。"
+        fi
+        tmp=$(temp_file)
+        jq --arg tag "$tag" --argjson localPort "$local_port" '
+          (.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp")
+        ' "$CONFIG_FILE" >"$tmp"
+        obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$ext_listen" "$ext_port" "$local_port")
+        XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" "$obfs_meta" || return
+        obfs_service_setup "$tag" || warn "混淆参数已更新，但 obfs-server 服务启动失败，请检查 simple-obfs 状态。"
+        traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
+        info "HTTP 混淆已启用/更新，请重新导出客户端分享链接。"
+      else
+        if ((was_obfs == 0)); then
+          info "该入站当前未开启 HTTP 混淆，配置未变更。"
+          return 0
+        fi
+        confirm "关闭 ${tag} 的 HTTP 混淆并恢复直连 TCP/UDP？" N || return 0
+        obfs_service_is_active "$tag" && had_active=1
+        tmp=$(temp_file)
+        jq --arg tag "$tag" --arg listen "$ext_listen" --argjson port "$ext_port" '
+          (.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port | .settings.network="tcp,udp")
+        ' "$CONFIG_FILE" >"$tmp"
+        if ! validate_candidate "$tmp"; then
+          rm -f "$tmp"
+          return 1
+        fi
+        obfs_service_stop "$tag" || true
+        if ! XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" none; then
+          if ((had_active == 1)); then
+            obfs_service_setup "$tag" || true
+          fi
+          return 1
+        fi
+        obfs_service_remove "$tag"
+        traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
+        info "HTTP 混淆已关闭，请重新导出客户端分享链接。"
+      fi
+      ;;
+    *)
+      die "${protocol} 已停止支持或没有可修改的流式传输。"
+      ;;
+  esac
 }
 
 delete_inbound() {
   ensure_runtime_dependencies inbound-delete; ensure_config
-  local tag=${1-} assume_yes=${2:-0} tmp user_count rule_tag
+  local tag=${1-} assume_yes=${2:-0} tmp user_count rule_tag had_obfs=0
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
+  inbound_obfs_enabled "$tag" && had_obfs=1
   user_count=$(jq --arg tag "$tag" '
     [.inbounds[]|select(.tag==$tag)|((.settings.clients // .settings.accounts // .settings.users // [])|length)][0]' "$CONFIG_FILE")
   [[ $assume_yes == 1 ]] || confirm "删除入站 ${tag} 及其 ${user_count} 个用户？" N || return 0
@@ -3460,6 +3681,9 @@ delete_inbound() {
       )
     ]' "$CONFIG_FILE" >"$tmp"
   XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_delete "$tag" || return
+  if ((had_obfs == 1)) || obfs_service_exists "$tag" 2>/dev/null; then
+    obfs_service_remove "$tag"
+  fi
   traffic_after_config_change "$tag" || warn "入站已删除，但流量记录暂未同步，采集任务会自动重试。"
   info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
 }
@@ -3812,7 +4036,7 @@ print_share_entry() {
 
 _share_print_params_card() {
   local tag=$1 protocol=$2 uri_host=$3 port=$4
-  local stream method security path="" sni="" sid="" pbk="" flow="" auth=""
+  local stream method security path="" sni="" sid="" pbk="" flow="" auth="" obfs_host=""
   ui_card_open "连接参数 · ${tag}"
   case $protocol in
     vless)
@@ -3851,9 +4075,18 @@ _share_print_params_card() {
       esac
       ;;
     shadowsocks)
-      ui_card_kv "协议与传输" "SS2022 · TCP/UDP" 12
-      ui_card_kv "加密方式" "$SS2022_METHOD" 12
-      ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      if inbound_obfs_enabled "$tag"; then
+        obfs_host=$(inbound_obfs_field "$tag" host)
+        ui_card_kv "协议与传输" "SS2022 · TCP · HTTP 混淆" 12
+        ui_card_kv "加密方式" "$SS2022_METHOD" 12
+        ui_card_kv "混淆域名" "$obfs_host" 12
+        ui_card_kv "SIP003 插件" "obfs-local;obfs=http;obfs-host=${obfs_host}" 12
+        ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      else
+        ui_card_kv "协议与传输" "SS2022 · TCP/UDP" 12
+        ui_card_kv "加密方式" "$SS2022_METHOD" 12
+        ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      fi
       ;;
     socks)
       auth=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth // "noauth"' "$CONFIG_FILE")
@@ -3904,14 +4137,14 @@ link_query_for_stream() {
 
 print_links() {
   ensure_config; init_meta
-  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link server_key idx=0
+  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link server_key plugin_query="" obfs_host="" idx=0
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   host=$(public_host_for_tag "$tag"); uri_host=$host
   [[ $uri_host == *:* && $uri_host != \[*\] ]] && uri_host="[${uri_host}]"
-  port=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.port' "$CONFIG_FILE")
+  port=$(inbound_effective_port "$tag")
   heading "${tag} · 节点交付"
   _share_print_params_card "$tag" "$protocol" "$uri_host" "$port"
   case $protocol in
@@ -3925,11 +4158,15 @@ print_links() {
       done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", (.id // ""), "\u0000"' "$CONFIG_FILE")
       ;;
     shadowsocks)
+      if inbound_obfs_enabled "$tag"; then
+        obfs_host=$(inbound_obfs_field "$tag" host)
+        plugin_query="?plugin=$(url_encode "obfs-local;obfs=http;obfs-host=${obfs_host}")"
+      fi
       server_key=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.password' "$CONFIG_FILE")
       while IFS= read -r -d '' label && IFS= read -r -d '' password; do
         [[ -z $filter || $label == "$filter" ]] || continue
         idx=$((idx + 1))
-        link="ss://${SS2022_METHOD}:$(url_encode "${server_key}:${password}")@${uri_host}:${port}#$(url_encode "${tag}-${label}")"
+        link="ss://${SS2022_METHOD}:$(url_encode "${server_key}:${password}")@${uri_host}:${port}${plugin_query}#$(url_encode "${tag}-${label}")"
         print_share_entry "$label" "链接" "$link" "$idx"
       done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", .password, "\u0000"' "$CONFIG_FILE")
       ;;
@@ -5011,11 +5248,19 @@ traffic_set_backend() {
 
 traffic_inventory_json() {
   [[ -r $CONFIG_FILE ]] || { warn "无法读取 Xray 配置，流量规则保持不变。"; return 1; }
-  jq -e '
+  local meta_json
+  meta_json=$(meta_json_or_empty)
+  jq -e --argjson meta "$meta_json" '
     if type != "object" or ((.inbounds | type) != "null" and (.inbounds | type) != "array") then
       error("invalid inbound inventory")
     else
-      [.inbounds[]? | {key:.tag,value:{protocol:.protocol,port:.port,disabled:false}}] | from_entries
+      [.inbounds[]? | .tag as $tag |
+        {key:$tag,value:{
+          protocol:.protocol,
+          port:(if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end),
+          disabled:false
+        }}
+      ] | from_entries
     end
   ' "$CONFIG_FILE" 2>/dev/null || { warn "Xray 配置无法解析，流量规则保持不变。"; return 1; }
 }
@@ -5338,45 +5583,66 @@ traffic_rules_clear() {
 }
 
 traffic_protocols_for_inbound() {
-  case $1 in shadowsocks|socks) printf '%s\n' tcp udp;; *) printf '%s\n' tcp;; esac
+  local protocol=$1 network=${2-}
+  case $protocol in
+    shadowsocks)
+      if [[ $network == tcp ]]; then printf '%s\n' tcp
+      else printf '%s\n' tcp udp
+      fi
+      ;;
+    socks) printf '%s\n' tcp udp ;;
+    *) printf '%s\n' tcp ;;
+  esac
 }
 
 traffic_restore_nft_rules() {
-  local tag inbound_protocol port transport_protocol count_comment count=0
+  local tag inbound_protocol port inbound_network transport_protocol count_comment count=0 meta_json
   command_exists nft || return 1
   traffic_clear_nft_rules || return 1
+  meta_json=$(meta_json_or_empty)
   nft add table inet "$TRAFFIC_NFT_TABLE" || return 1
   nft 'add chain inet xrayctl_traffic input { type filter hook input priority -5; policy accept; }' || return 1
   nft 'add chain inet xrayctl_traffic output { type filter hook output priority -5; policy accept; }' || return 1
-  while IFS=$'\t' read -r tag inbound_protocol port; do
+  while IFS=$'\t' read -r tag inbound_protocol port inbound_network; do
     if [[ -z $tag ]] || ! validate_port "$port"; then continue; fi
     count_comment="\"xrayctl-traffic:count:${tag}\""
     while IFS= read -r transport_protocol; do
       nft add rule inet "$TRAFFIC_NFT_TABLE" input "$transport_protocol" dport "$port" counter comment "$count_comment" || return 1
       nft add rule inet "$TRAFFIC_NFT_TABLE" output "$transport_protocol" sport "$port" counter comment "$count_comment" || return 1
       count=$((count + 1))
-    done < <(traffic_protocols_for_inbound "$inbound_protocol")
-  done < <(jq -r '.inbounds[]? | [.tag,.protocol,(.port|tostring)] | @tsv' "$CONFIG_FILE" 2>/dev/null || true)
+    done < <(traffic_protocols_for_inbound "$inbound_protocol" "$inbound_network")
+  done < <(jq -r --argjson meta "$meta_json" '
+    .inbounds[]? | .tag as $tag |
+    [$tag, .protocol,
+     ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
+     (if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then "tcp" else (.settings.network // "-") end)] | @tsv
+  ' "$CONFIG_FILE" 2>/dev/null || true)
   ((count > 0)) || traffic_clear_nft_rules
 }
 
 traffic_restore_iptables_rules() {
-  local command tag inbound_protocol port transport_protocol count=0
+  local command tag inbound_protocol port inbound_network transport_protocol count=0 meta_json
   traffic_clear_iptables_rules || return 1
+  meta_json=$(meta_json_or_empty)
   for command in iptables ip6tables; do
     command_exists "$command" || continue
     "$command" -t filter -N "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -N "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -C INPUT -j "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I INPUT 1 -j "$TRAFFIC_IPTABLES_IN_CHAIN"
     "$command" -t filter -C OUTPUT -j "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I OUTPUT 1 -j "$TRAFFIC_IPTABLES_OUT_CHAIN"
-    while IFS=$'\t' read -r tag inbound_protocol port; do
+    while IFS=$'\t' read -r tag inbound_protocol port inbound_network; do
       if [[ -z $tag ]] || ! validate_port "$port"; then continue; fi
       while IFS= read -r transport_protocol; do
         "$command" -t filter -A "$TRAFFIC_IPTABLES_IN_CHAIN" -p "$transport_protocol" --dport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
         "$command" -t filter -A "$TRAFFIC_IPTABLES_OUT_CHAIN" -p "$transport_protocol" --sport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
         count=$((count + 1))
-      done < <(traffic_protocols_for_inbound "$inbound_protocol")
-    done < <(jq -r '.inbounds[]? | [.tag,.protocol,(.port|tostring)] | @tsv' "$CONFIG_FILE" 2>/dev/null || true)
+      done < <(traffic_protocols_for_inbound "$inbound_protocol" "$inbound_network")
+    done < <(jq -r --argjson meta "$meta_json" '
+      .inbounds[]? | .tag as $tag |
+      [$tag, .protocol,
+       ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
+       (if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then "tcp" else (.settings.network // "-") end)] | @tsv
+    ' "$CONFIG_FILE" 2>/dev/null || true)
   done
   ((count > 0)) || traffic_clear_iptables_rules
 }
@@ -7867,6 +8133,7 @@ install_or_update_xray() {
   validate_candidate "$CONFIG_FILE"
   platform_service_enable >/dev/null
   restart_service
+  obfs_services_sync_action restart || warn "部分 obfs-server 服务重启失败，请运行 xrayctl obfs status 查看。"
   traffic_runtime_ensure || true
   info "Xray 已安装/修复：$($XRAY_BIN version | sed -n '1p')"
 }
@@ -7932,8 +8199,518 @@ install_quick_command() {
   meta_resource_register "quickSymlink" "$QUICK_SYMLINK"
 }
 
+obfs_server_bin() {
+  if [[ -n ${XRAYCTL_OBFS_SERVER_BIN:-} ]]; then
+    printf '%s\n' "$XRAYCTL_OBFS_SERVER_BIN"
+  elif [[ $OBFS_SERVER_BIN != /usr/local/bin/obfs-server ]]; then
+    printf '%s\n' "$OBFS_SERVER_BIN"
+  elif [[ -x $OBFS_SERVER_BIN ]]; then
+    printf '%s\n' "$OBFS_SERVER_BIN"
+  elif command_exists obfs-server; then
+    command -v obfs-server
+  else
+    printf '%s\n' "$OBFS_SERVER_BIN"
+  fi
+}
+
+obfs_server_installed() {
+  [[ -x $(obfs_server_bin) ]]
+}
+
+obfs_service_name() { printf 'xrayctl-obfs-%s\n' "$1"; }
+obfs_systemd_unit_path() { printf '%s/xrayctl-obfs-%s.service\n' "$SYSTEMD_UNIT_DIR" "$1"; }
+obfs_openrc_service_path() { printf '%s/xrayctl-obfs-%s\n' "$OPENRC_INIT_DIR" "$1"; }
+
+obfs_configured_tags() {
+  [[ -r $CONFIG_FILE && -r $META_FILE ]] || return 0
+  local meta_json
+  meta_json=$(meta_json_or_empty)
+  jq -r --argjson meta "$meta_json" '
+    .inbounds[]? | .tag as $tag |
+    select(.protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true) |
+    $tag
+  ' "$CONFIG_FILE" 2>/dev/null || true
+}
+
+obfs_service_exists() {
+  local tag=$1 init_sys
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd) [[ -f $(obfs_systemd_unit_path "$tag") ]] ;;
+    openrc) [[ -x $(obfs_openrc_service_path "$tag") ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+obfs_service_is_active() {
+  local tag=$1 svc init_sys
+  svc=$(obfs_service_name "$tag")
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd) systemctl is-active --quiet "$svc" 2>/dev/null ;;
+    openrc) obfs_service_exists "$tag" && platform_openrc_service "$svc" status >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+obfs_service_setup() {
+  local tag=$1 apply_runtime=${2:-1} listen="" port="" local_port="" obfs_bin svc init_sys unit_path
+  [[ -r $META_FILE ]] || return 1
+  jq -e --arg tag "$tag" '.inbounds[$tag].obfs.enabled==true' "$META_FILE" >/dev/null 2>&1 || return 1
+  listen=$(jq -r --arg tag "$tag" '.inbounds[$tag].obfs.listen // "0.0.0.0"' "$META_FILE")
+  port=$(jq -r --arg tag "$tag" '.inbounds[$tag].obfs.port // empty' "$META_FILE")
+  local_port=$(jq -r --arg tag "$tag" '.inbounds[$tag].obfs.localPort // empty' "$META_FILE")
+  if ! validate_port "$port" || ! validate_port "$local_port"; then
+    error "入站 ${tag} 的混淆端口元数据无效。"
+    return 1
+  fi
+  obfs_bin=$(obfs_server_bin)
+  svc=$(obfs_service_name "$tag")
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd)
+      unit_path=$(obfs_systemd_unit_path "$tag")
+      install -d -m 755 "$SYSTEMD_UNIT_DIR" || return 1
+      cat >"$unit_path" <<EOF
+# managed by xrayctl
+[Unit]
+Description=xrayctl simple-obfs server (${tag})
+After=network.target ${SYSTEMD_UNIT}
+
+[Service]
+Type=simple
+ExecStart=${obfs_bin} -s ${listen} -p ${port} --obfs http -r 127.0.0.1:${local_port}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      chmod 644 "$unit_path"
+      platform_daemon_reload
+      if service_exists || service_is_active; then
+        systemctl enable "$svc" >/dev/null 2>&1 || true
+      fi
+      if ((apply_runtime == 1)) && service_is_active; then
+        systemctl restart "$svc" || return 1
+      fi
+      ;;
+    openrc)
+      unit_path=$(obfs_openrc_service_path "$tag")
+      install -d -m 755 "$OPENRC_INIT_DIR" "$LOG_DIR" || return 1
+      cat >"$unit_path" <<EOF
+#!/sbin/openrc-run
+# managed by xrayctl
+name="xrayctl obfs-server (${tag})"
+description="xrayctl simple-obfs server (${tag})"
+command="${obfs_bin}"
+command_args="-s ${listen} -p ${port} --obfs http -r 127.0.0.1:${local_port}"
+command_background=true
+pidfile="/run/${svc}.pid"
+output_log="${LOG_DIR}/obfs-${tag}.log"
+error_log="${LOG_DIR}/obfs-${tag}-error.log"
+
+$(printf 'depend() { need net; after %s; }' "$SERVICE_NAME")
+EOF
+      chmod 755 "$unit_path"
+      if service_exists || service_is_active; then
+        rc-update add "$svc" default >/dev/null 2>&1 || true
+      fi
+      if ((apply_runtime == 1)) && service_is_active; then
+        if obfs_service_is_active "$tag"; then
+          platform_openrc_service "$svc" restart || return 1
+        else
+          platform_openrc_service "$svc" zap >/dev/null 2>&1 || true
+          rm -f "/run/${svc}.pid"
+          platform_openrc_service "$svc" start || return 1
+        fi
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+obfs_service_stop() {
+  local tag=$1 svc init_sys
+  svc=$(obfs_service_name "$tag")
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd) systemctl stop "$svc" >/dev/null 2>&1 || true ;;
+    openrc)
+      if obfs_service_exists "$tag"; then
+        platform_openrc_service "$svc" stop >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
+}
+
+obfs_service_remove() {
+  local tag=$1 svc init_sys
+  svc=$(obfs_service_name "$tag")
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd)
+      systemctl disable --now "$svc" >/dev/null 2>&1 || true
+      rm -f "$(obfs_systemd_unit_path "$tag")"
+      platform_daemon_reload
+      ;;
+    openrc)
+      if obfs_service_exists "$tag"; then
+        platform_openrc_service "$svc" stop >/dev/null 2>&1 || true
+        rc-update del "$svc" default >/dev/null 2>&1 || true
+      fi
+      rm -f "$(obfs_openrc_service_path "$tag")"
+      ;;
+  esac
+  rm -f "/run/${svc}.pid" "${LOG_DIR}/obfs-${tag}.log" "${LOG_DIR}/obfs-${tag}-error.log" 2>/dev/null || true
+}
+
+obfs_remove_all_services() {
+  local init_sys unit svc tag
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd)
+      for unit in "${SYSTEMD_UNIT_DIR}"/xrayctl-obfs-*.service; do
+        [[ -e $unit ]] || continue
+        svc=$(basename "$unit" .service)
+        tag=${svc#xrayctl-obfs-}
+        obfs_service_remove "$tag"
+      done
+      ;;
+    openrc)
+      for unit in "${OPENRC_INIT_DIR}"/xrayctl-obfs-*; do
+        [[ -e $unit ]] || continue
+        svc=$(basename "$unit")
+        tag=${svc#xrayctl-obfs-}
+        obfs_service_remove "$tag"
+      done
+      ;;
+  esac
+}
+
+obfs_services_sync_action() {
+  local action=$1 tag svc init_sys rc=0
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  [[ -n $init_sys ]] || return 0
+  while IFS= read -r tag; do
+    [[ -n $tag ]] || continue
+    svc=$(obfs_service_name "$tag")
+    if ! obfs_service_exists "$tag"; then
+      [[ $action == stop || $action == disable ]] && continue
+      obfs_service_setup "$tag" 0 || { rc=1; continue; }
+    fi
+    case $action in
+      start)
+        case $init_sys in
+          systemd) systemctl start "$svc" || rc=1 ;;
+          openrc) platform_openrc_service "$svc" start || rc=1 ;;
+        esac
+        ;;
+      stop)
+        obfs_service_stop "$tag"
+        ;;
+      restart)
+        case $init_sys in
+          systemd) systemctl restart "$svc" || rc=1 ;;
+          openrc)
+            if obfs_service_is_active "$tag"; then
+              platform_openrc_service "$svc" restart || rc=1
+            else
+              platform_openrc_service "$svc" zap >/dev/null 2>&1 || true
+              rm -f "/run/${svc}.pid"
+              platform_openrc_service "$svc" start || rc=1
+            fi
+            ;;
+        esac
+        ;;
+      enable)
+        case $init_sys in
+          systemd) systemctl enable "$svc" >/dev/null 2>&1 || rc=1; systemctl start "$svc" || rc=1 ;;
+          openrc) rc-update add "$svc" default >/dev/null 2>&1 || rc=1; platform_openrc_service "$svc" start || rc=1 ;;
+        esac
+        ;;
+      disable)
+        obfs_service_stop "$tag"
+        case $init_sys in
+          systemd) systemctl disable "$svc" >/dev/null 2>&1 || true ;;
+          openrc) rc-update del "$svc" default >/dev/null 2>&1 || true ;;
+        esac
+        ;;
+    esac
+  done < <(obfs_configured_tags)
+  return "$rc"
+}
+
+obfs_services_reconcile() {
+  local init_sys unit svc tag active_tags
+  active_tags=$'\n'"$(obfs_configured_tags)"$'\n'
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd)
+      for unit in "${SYSTEMD_UNIT_DIR}"/xrayctl-obfs-*.service; do
+        [[ -e $unit ]] || continue
+        svc=$(basename "$unit" .service)
+        tag=${svc#xrayctl-obfs-}
+        [[ $active_tags == *$'\n'"$tag"$'\n'* ]] || obfs_service_remove "$tag"
+      done
+      ;;
+    openrc)
+      for unit in "${OPENRC_INIT_DIR}"/xrayctl-obfs-*; do
+        [[ -e $unit ]] || continue
+        svc=$(basename "$unit")
+        tag=${svc#xrayctl-obfs-}
+        [[ $active_tags == *$'\n'"$tag"$'\n'* ]] || obfs_service_remove "$tag"
+      done
+      ;;
+  esac
+  while IFS= read -r tag; do
+    [[ -n $tag ]] || continue
+    obfs_service_setup "$tag" 1 || return 1
+  done < <(obfs_configured_tags)
+}
+
+_obfs_sync_menu_action() {
+  local action=$1 tags
+  ensure_runtime_dependencies obfs-service
+  tags=$(obfs_configured_tags)
+  if [[ -z $tags ]]; then
+    info "当前没有启用 HTTP 混淆的入站。"
+    return 0
+  fi
+  obfs_services_sync_action "$action"
+  info "obfs-server 服务操作完成：${action}"
+}
+
+_build_simple_obfs_from_source() {
+  local manager build_dir target_bin install_dir
+  manager=$(pkg_manager) || die "未识别包管理器，无法安装构建 simple-obfs 所需依赖。"
+  case $manager in
+    apt) install_packages git build-essential autoconf automake libtool pkg-config libev-dev libc-ares-dev ;;
+    apk) install_packages git build-base autoconf automake libtool pkgconf libev-dev c-ares-dev linux-headers ;;
+    dnf|yum) install_packages git gcc make autoconf automake libtool pkgconfig libev-devel c-ares-devel ;;
+    pacman) install_packages git base-devel autoconf automake libtool pkgconf libev c-ares ;;
+    zypper) install_packages git gcc make autoconf automake libtool pkg-config libev-devel libcares-devel ;;
+  esac
+  build_dir=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-obfs-build.XXXXXX") || return 1
+  info "正在下载 simple-obfs 源码并编译。"
+  if ! run_bounded 300 git clone --recursive --depth 1 "$SIMPLE_OBFS_REPO_URL" "${build_dir}/simple-obfs"; then
+    rm -rf "$build_dir"
+    die "下载 simple-obfs 源码失败。"
+  fi
+  if ! (
+    cd "${build_dir}/simple-obfs" &&
+    { sed -i 's/-Werror//g' configure.ac Makefile.am src/Makefile.am 2>/dev/null || true; } &&
+    ./autogen.sh &&
+    ./configure --disable-documentation &&
+    make
+  ); then
+    rm -rf "$build_dir"
+    die "编译 simple-obfs 失败。"
+  fi
+  target_bin=$(find "${build_dir}/simple-obfs/src" -maxdepth 1 -type f -name 'obfs-server' | head -n1 || true)
+  if [[ -z $target_bin || ! -f $target_bin ]]; then
+    rm -rf "$build_dir"
+    die "编译完成但未找到 obfs-server 二进制。"
+  fi
+  install_dir=$(dirname "$OBFS_SERVER_BIN")
+  install -d -m 755 "$install_dir" || { rm -rf "$build_dir"; return 1; }
+  install -m 755 "$target_bin" "$OBFS_SERVER_BIN" || { rm -rf "$build_dir"; return 1; }
+  rm -rf "$build_dir"
+  meta_resource_register "simpleObfsBin" "$OBFS_SERVER_BIN"
+  info "simple-obfs 已从源码安装/更新：${OBFS_SERVER_BIN}"
+}
+
+install_or_update_simple_obfs() {
+  ensure_runtime_dependencies obfs-install
+  local manager="" preinstalled=0 managed_pkg=0
+  obfs_server_installed && preinstalled=1
+  manager=$(pkg_manager || true)
+  if [[ -r $META_FILE ]] && jq -e '.managedResources.simpleObfsPackage=="simple-obfs"' "$META_FILE" >/dev/null 2>&1; then
+    managed_pkg=1
+  fi
+  if [[ $manager == apt && ! -x $OBFS_SERVER_BIN ]]; then
+    DEBIAN_FRONTEND=noninteractive apt_get_guarded update -y >/dev/null 2>&1 || true
+    if DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y --no-install-recommends simple-obfs >/dev/null 2>&1 && obfs_server_installed; then
+      if ((preinstalled == 0 || managed_pkg == 1)); then
+        meta_resource_register "simpleObfsPackage" "simple-obfs"
+      fi
+      obfs_services_sync_action restart || true
+      info "simple-obfs 已安装/更新：$(obfs_server_bin)"
+      return 0
+    fi
+  elif [[ $manager == apk && ! -x $OBFS_SERVER_BIN ]]; then
+    if apk add --no-cache simple-obfs >/dev/null 2>&1 && obfs_server_installed; then
+      if ((preinstalled == 0 || managed_pkg == 1)); then
+        meta_resource_register "simpleObfsPackage" "simple-obfs"
+      fi
+      obfs_services_sync_action restart || true
+      info "simple-obfs 已安装/更新：$(obfs_server_bin)"
+      return 0
+    fi
+  fi
+  _build_simple_obfs_from_source || return 1
+  obfs_services_sync_action restart || true
+}
+
+ensure_simple_obfs_installed() {
+  obfs_server_installed && return 0
+  [[ ${XRAYCTL_TESTING:-0} != 1 ]] || return 0
+  install_or_update_simple_obfs
+}
+
+_obfs_uninstall_owned_binary_and_pkg() {
+  local meta_src=${1:-$META_FILE} owned_bin="" owned_pkg="" manager=""
+  if [[ -r $meta_src ]]; then
+    owned_bin=$(jq -r '.managedResources.simpleObfsBin // empty' "$meta_src" 2>/dev/null || true)
+    owned_pkg=$(jq -r '.managedResources.simpleObfsPackage // empty' "$meta_src" 2>/dev/null || true)
+  fi
+  if [[ -n $owned_bin && -e $owned_bin ]]; then
+    rm -f -- "$owned_bin"
+  fi
+  if [[ $owned_pkg == simple-obfs ]]; then
+    manager=$(pkg_manager || true)
+    case $manager in
+      apt) DEBIAN_FRONTEND=noninteractive apt_get_guarded remove -y simple-obfs >/dev/null 2>&1 || true ;;
+      apk) apk del simple-obfs >/dev/null 2>&1 || true ;;
+    esac
+  fi
+  if [[ -r $META_FILE ]] && jq -e 'type=="object"' "$META_FILE" >/dev/null 2>&1; then
+    meta_resource_remove_existing "simpleObfsBin"
+    meta_resource_remove_existing "simpleObfsPackage"
+  fi
+}
+
+uninstall_simple_obfs() {
+  local assume_yes=${1:-0} active_tags=""
+  if [[ $assume_yes == --yes ]]; then assume_yes=1; fi
+  ensure_runtime_dependencies obfs-uninstall
+  ensure_config
+  active_tags=$(obfs_configured_tags || true)
+  if [[ -n $active_tags ]]; then
+    error "仍有入站正在使用 HTTP 混淆，请先删除对应入站或关闭混淆后再卸载 simple-obfs。"
+    return 1
+  fi
+  [[ $assume_yes == 1 ]] || confirm "确定卸载 xrayctl 管理的 simple-obfs 吗？" N || return 0
+  obfs_remove_all_services || true
+  _obfs_uninstall_owned_binary_and_pkg
+  info "simple-obfs 已卸载。"
+}
+
+obfs_state_summary() {
+  local total=0 active=0 tag
+  while IFS= read -r tag; do
+    [[ -n $tag ]] || continue
+    total=$((total + 1))
+    if obfs_service_is_active "$tag"; then
+      active=$((active + 1))
+    fi
+  done < <(obfs_configured_tags)
+  if ((total > 0)); then
+    if ((active == total)); then
+      printf '运行中 (%d/%d)\n' "$active" "$total"
+    elif ((active > 0)); then
+      printf '部分运行 (%d/%d)\n' "$active" "$total"
+    else
+      printf '已停止 (0/%d)\n' "$total"
+    fi
+  elif obfs_server_installed; then
+    printf '已安装\n'
+  else
+    printf '未安装\n'
+  fi
+}
+
+show_obfs_status() {
+  local bin_path install_state svc tag listen port local_port obfs_host state_badge count=0 meta_json
+  bin_path=$(obfs_server_bin)
+  if obfs_server_installed; then
+    install_state=$(ui_badge ok "已安装 (${bin_path})")
+  else
+    install_state=$(ui_badge muted "未安装")
+  fi
+  heading "HTTP 混淆插件 (simple-obfs) 状态"
+  ui_card_open "插件概览"
+  ui_card_kv "obfs-server" "$install_state" 14
+  ui_card_kv "整体状态" "$(_ui_state_badge "$(obfs_state_summary)")" 14
+  ui_card_close
+
+  meta_json=$(meta_json_or_empty)
+  while IFS=$'\t' read -r tag listen port local_port obfs_host; do
+    [[ -n $tag ]] || continue
+    count=$((count + 1))
+    svc=$(obfs_service_name "$tag")
+    if ! obfs_service_exists "$tag"; then
+      state_badge=$(ui_badge muted "未创建服务")
+    elif obfs_service_is_active "$tag"; then
+      state_badge=$(ui_badge ok "运行中")
+    else
+      state_badge=$(ui_badge err "已停止")
+    fi
+    ui_card_open "混淆实例 · ${tag}"
+    ui_card_kv "服务单元" "${svc}  ${state_badge}" 12
+    ui_card_kv "监听转发" "${listen}:${port} → 127.0.0.1:${local_port}" 12
+    ui_card_kv "obfs-host" "$obfs_host" 12
+    ui_card_close
+  done < <(
+    if [[ -r $CONFIG_FILE ]]; then
+      jq -r --argjson meta "$meta_json" '
+        .inbounds[]? | .tag as $tag |
+        select(.protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true) |
+        [$tag, ($meta.inbounds[$tag].obfs.listen // "0.0.0.0"),
+         (($meta.inbounds[$tag].obfs.port // .port)|tostring),
+         (($meta.inbounds[$tag].obfs.localPort // .port)|tostring),
+         ($meta.inbounds[$tag].obfs.host // "-")] | @tsv
+      ' "$CONFIG_FILE" 2>/dev/null || true
+    fi
+  )
+  if ((count == 0)); then
+    info "当前没有启用 HTTP 混淆的 SS2022 入站。"
+  fi
+}
+
+show_obfs_logs() {
+  local lines=${1:-100} filter_tag=${2-} init_sys tag svc found=0 rc=0 out_log err_log
+  [[ $lines =~ ^[0-9]+$ ]] || die "日志行数必须是数字。"
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  while IFS= read -r tag; do
+    [[ -n $tag ]] || continue
+    [[ -z $filter_tag || $tag == "$filter_tag" ]] || continue
+    found=1
+    svc=$(obfs_service_name "$tag")
+    heading "obfs-server 日志 · ${svc}"
+    case $init_sys in
+      systemd)
+        journalctl -u "$svc" -n "$lines" --no-pager || rc=$?
+        ;;
+      openrc)
+        out_log="${LOG_DIR}/obfs-${tag}.log"
+        err_log="${LOG_DIR}/obfs-${tag}-error.log"
+        if [[ -f $out_log || -f $err_log ]]; then
+          tail -n "$lines" "$err_log" "$out_log" 2>/dev/null || rc=$?
+        else
+          info "尚未生成 ${svc} 日志。"
+        fi
+        ;;
+      *)
+        warn "无法识别服务管理器。"
+        rc=1
+        ;;
+    esac
+  done < <(obfs_configured_tags)
+  if ((found == 0)); then
+    if [[ -n $filter_tag ]]; then
+      warn "未找到启用 HTTP 混淆的入站：${filter_tag}"
+    else
+      info "当前没有启用 HTTP 混淆的入站，暂无 obfs-server 日志。"
+    fi
+  fi
+  return "$rc"
+}
+
 show_status() {
-  local traffic_state backend svc_state svc_badge bbr_state bbr_badge inbound_cnt="0" cert_cnt="0"
+  local traffic_state backend svc_state svc_badge bbr_state bbr_badge obfs_badge inbound_cnt="0" cert_cnt="0"
   heading "Xray 运行状态"
   svc_state=$(service_state_summary)
   case $svc_state in
@@ -7947,6 +8724,7 @@ show_status() {
     未启用) bbr_badge=$(ui_badge muted "未启用") ;;
     *)      bbr_badge=$(ui_badge warn "$bbr_state") ;;
   esac
+  obfs_badge=$(_ui_state_badge "$(obfs_state_summary)")
   [[ -r $CONFIG_FILE ]] && inbound_cnt=$(jq '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?')
   if declare -F certificate_count >/dev/null 2>&1; then
     cert_cnt=$(certificate_count 2>/dev/null || printf '0')
@@ -7957,6 +8735,7 @@ show_status() {
   ui_card_open "核心与服务概览"
   ui_card_kv "Xray 核心" "$(xray_version_summary)" 12
   ui_card_kv "服务状态" "${svc_badge}  (自启: $(startup_state_summary))" 12
+  ui_card_kv "HTTP 混淆" "$obfs_badge" 12
   ui_card_kv "TCP BBR" "$bbr_badge" 12
   ui_card_kv "入站 / 证书" "${inbound_cnt} 个入站 / ${cert_cnt} 张证书" 12
   ui_card_kv "流量统计" "${traffic_state} (${backend})" 12
@@ -7972,6 +8751,9 @@ show_status() {
     ui_section "服务单元详情"
     platform_service_status 2>/dev/null | sed -n '1,10p' | sed 's/^/  /' || true
   fi
+  if [[ -n $(obfs_configured_tags) ]]; then
+    show_obfs_status
+  fi
 }
 
 service_action() {
@@ -7982,20 +8764,25 @@ service_action() {
     traffic_user_collect_serialized || warn "服务操作前未能采集用户流量，未采集部分可能丢失。"
   fi
   case $action in
-    start) platform_service_start ;;
-    stop) platform_service_stop ;;
-    restart) platform_service_restart ;;
-    enable) platform_service_enable; platform_service_start ;;
-    disable) platform_service_stop || true; platform_service_disable ;;
+    start) platform_service_start; obfs_services_sync_action start ;;
+    stop) obfs_services_sync_action stop; platform_service_stop ;;
+    restart) platform_service_restart; obfs_services_sync_action restart ;;
+    enable) platform_service_enable; platform_service_start; obfs_services_sync_action enable ;;
+    disable) obfs_services_sync_action disable; platform_service_stop || true; platform_service_disable ;;
     *) die "未知服务操作：$action";;
   esac
   info "服务操作完成：$action"
 }
 
 show_logs() {
-  local lines=${1:-100}
+  local lines=${1:-100} rc=0
   [[ $lines =~ ^[0-9]+$ ]] || die "日志行数必须是数字。"
-  platform_service_logs "$lines"
+  platform_service_logs "$lines" || rc=$?
+  if [[ -n $(obfs_configured_tags) ]]; then
+    printf '\n'
+    show_obfs_logs "$lines" || rc=$?
+  fi
+  return "$rc"
 }
 
 _check_bbr_available() {
@@ -8137,10 +8924,10 @@ startup_state_summary() {
 _ui_state_badge() {
   local label=$1
   case $label in
-    运行中|已开启|已启用) ui_badge ok "$label" ;;
-    已停止)               ui_badge err "$label" ;;
-    未安装|已关闭|未启用) ui_badge muted "$label" ;;
-    *)                    ui_badge warn "$label" ;;
+    运行中|运行中\ *|已开启|已启用|已安装) ui_badge ok "$label" ;;
+    已停止|已停止\ *)                     ui_badge err "$label" ;;
+    未安装|已关闭|未启用)                 ui_badge muted "$label" ;;
+    *)                                    ui_badge warn "$label" ;;
   esac
 }
 
@@ -8159,26 +8946,27 @@ show_main_summary() {
 
 show_main_inbounds() {
   command_exists jq && [[ -r $CONFIG_FILE ]] || return 0
-  local count tag protocol port users outbound out_disp
+  local count tag protocol port users outbound out_disp meta_json
   count=$(jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null) || return 0
   ui_section "入站概览"
   if ((count == 0)); then
     printf '  %s○ 暂无入站节点，请选择 [1] 入站管理 创建首个节点%s\n' "$C_DIM" "$C_RESET"
     return 0
   fi
+  meta_json=$(meta_json_or_empty)
   printf '  %s' "$C_DIM"
   print_table_cell_clipped "标签" 16; printf '  '
   print_table_cell_clipped "协议" 6; printf '  '
   print_table_cell "端口" 6; printf '  '
   print_table_cell "用户" 4; printf '  默认出站%s\n' "$C_RESET"
-  jq -r --arg ss2022Method "$SS2022_METHOD" '
+  jq -r --arg ss2022Method "$SS2022_METHOD" --argjson meta "$meta_json" '
     (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
     .inbounds[] |
     .tag as $tag |
     [$tag,(if .protocol=="shadowsocks" then
        (if .settings.method==$ss2022Method then "SS2022" else "SS" end)
      else .protocol end),
-     (.port|tostring),
+     ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
      (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
       else ((.settings.accounts // .settings.users // []) | length) end | tostring),
      ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
@@ -8196,25 +8984,30 @@ show_main_inbounds() {
 }
 
 show_node_summary() {
-  local tag=$1 protocol port method security listen users outbound host out_disp
-  IFS=$'\t' read -r protocol port method security listen users outbound < <(
-    jq -r --arg tag "$tag" --arg ss2022Method "$SS2022_METHOD" '
+  local tag=$1 protocol port method security listen users outbound host out_disp meta_json obfs_enabled obfs_host obfs_local_port obfs_svc_label
+  meta_json=$(meta_json_or_empty)
+  IFS=$'\t' read -r protocol port method security listen users outbound obfs_enabled obfs_host obfs_local_port < <(
+    jq -r --arg tag "$tag" --arg ss2022Method "$SS2022_METHOD" --argjson meta "$meta_json" '
       (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
       .inbounds[]|select(.tag==$tag)|[
         (if .protocol=="shadowsocks" and .settings.method==$ss2022Method then "SS2022" else .protocol end),
-        (.port|tostring),
+        ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
         (if .protocol=="vless" then (.streamSettings.network // .streamSettings.method // "raw")
-         elif .protocol=="shadowsocks" then (.settings.network // "tcp")
+         elif .protocol=="shadowsocks" then
+           (if $meta.inbounds[$tag].obfs.enabled==true then "tcp+http" else (.settings.network // "tcp") end)
          else "-" end),
         (if .protocol=="vless" then (.streamSettings.security // "none")
          elif .protocol=="shadowsocks" then (.settings.method // "AEAD")
          elif .protocol=="socks" then (.settings.auth // "noauth")
          elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
          else "noauth" end),
-        (.listen // "0.0.0.0"),
+        (if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.listen // "0.0.0.0") else (.listen // "0.0.0.0") end),
         (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
          else ((.settings.accounts // .settings.users // []) | length) end | tostring),
-        ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)
+        ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native),
+        ($meta.inbounds[$tag].obfs.enabled // false | tostring),
+        ($meta.inbounds[$tag].obfs.host // ""),
+        (($meta.inbounds[$tag].obfs.localPort // "")|tostring)
       ]|@tsv' "$CONFIG_FILE"
   )
   host=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
@@ -8227,6 +9020,12 @@ show_node_summary() {
   ui_card_kv "协议 / 安全" "${protocol^^} · ${method} · ${security}" 12
   ui_card_kv "监听端口" "${listen}:${port}" 12
   [[ -z $host ]] || ui_card_kv "连接地址" "$host" 12
+  if [[ $obfs_enabled == true ]]; then
+    if obfs_service_is_active "$tag"; then obfs_svc_label=$(ui_badge ok "运行中");
+    elif obfs_service_exists "$tag"; then obfs_svc_label=$(ui_badge err "已停止");
+    else obfs_svc_label=$(ui_badge muted "未创建"); fi
+    ui_card_kv "HTTP 混淆" "${obfs_host}  (${obfs_svc_label}, 内部 127.0.0.1:${obfs_local_port})" 12
+  fi
   ui_card_kv "用户 / 出站" "${users} 个用户  ·  默认出站 ${out_disp}" 12
   ui_card_close
 }
@@ -8546,6 +9345,11 @@ _uninstall_remove_owned_jq() {
   fi
 }
 
+_uninstall_remove_obfs() {
+  obfs_remove_all_services || return 1
+  _obfs_uninstall_owned_binary_and_pkg "${SNAPSHOT_META:-$META_FILE}"
+}
+
 _scan_xrayctl_residuals() {
   local __count_var=${1:-} count=0
   local paths=(
@@ -8561,10 +9365,12 @@ _scan_xrayctl_residuals() {
     "$CERTBOT_LOGS_DIR"
     /etc/systemd/system/xrayctl-certbot-renew.timer
     /etc/systemd/system/xrayctl-certbot-renew.service
+    "${SYSTEMD_UNIT_DIR}/xrayctl-obfs-*.service"
     /etc/systemd/system/xray.service
     /etc/systemd/system/xray@.service
     /etc/systemd/system/xray.service.d
     "$OPENRC_SERVICE"
+    "${OPENRC_INIT_DIR}/xrayctl-obfs-*"
     "$CERT_RENEW_HOOK"
     "$BACKUP_DIR"
     "$TRAFFIC_FILE"
@@ -8623,6 +9429,7 @@ uninstall_xray() {
   heading "卸载清理"
   ui_card_open "⚠ 即将永久删除以下 xrayctl 受管数据（不保留备份）"
   ui_card_line "• Xray 核心程序、所有入站配置及用户凭据"
+  ui_card_line "• 托管 simple-obfs 混淆服务与程序"
   ui_card_line "• 托管 TLS 证书副本、Let's Encrypt 证书与续期任务"
   ui_card_line "• Cloudflare 凭据、独立 Certbot 环境与 BBR 持久化配置"
   ui_card_line "• 运行日志、元数据及全部 xrayctl 手动备份"
@@ -8651,6 +9458,7 @@ uninstall_xray() {
   cleanup_step "删除 Certbot 环境"      _uninstall_remove_certbot          || ((step_failures+=1))
   cleanup_step "卸载 Xray 核心"         _uninstall_xray_core               || ((step_failures+=1))
   cleanup_step "清理 systemd 覆盖"      _uninstall_remove_systemd_overrides || ((step_failures+=1))
+  cleanup_step "清理 simple-obfs 服务"  _uninstall_remove_obfs              || ((step_failures+=1))
   cleanup_step "删除运行用户组"         _uninstall_remove_runtime_group    || ((step_failures+=1))
   cleanup_step "删除快捷命令"           _uninstall_remove_quick_command    || ((step_failures+=1))
   cleanup_step "撤销 BBR 设置"          _uninstall_remove_bbr              || ((step_failures+=1))
@@ -9144,6 +9952,9 @@ modify_inbound_menu() {
     if [[ $protocol == vless ]]; then
       ui_menu_group "传输与安全"
       ui_menu_item 3 "修改传输/安全"
+    elif [[ $protocol == shadowsocks ]]; then
+      ui_menu_group "混淆插件"
+      ui_menu_item 3 "修改 HTTP 混淆"
     fi
     ui_menu_footer "返回入站"
     read -r -p "  请选择: " choice || { cancel_selection; return 0; }
@@ -9162,7 +9973,7 @@ modify_inbound_menu() {
         ;;
       2) run_menu_action modify_inbound_basic "$current_tag"; pause;;
       3)
-        if [[ $protocol == vless ]]; then run_menu_action modify_inbound_transport "$current_tag"
+        if [[ $protocol == vless || $protocol == shadowsocks ]]; then run_menu_action modify_inbound_transport "$current_tag"
         else warn "无效选项。"; fi
         pause
         ;;
@@ -9372,8 +10183,32 @@ toggle_service_startup() {
   fi
 }
 
+obfs_menu() {
+  local choice
+  local XRAYCTL_UI_CRUMB="首页 › 服务管理 › HTTP 混淆"
+  while true; do
+    clear_screen
+    ui_page "HTTP 混淆 (simple-obfs)"
+    show_obfs_status
+    ui_menu_group "插件与服务操作"
+    ui_menu_item 1 "安装/更新 simple-obfs"
+    ui_menu_item 2 "重启混淆服务"
+    ui_menu_item 3 "查看混淆日志"
+    ui_menu_item 4 "卸载 simple-obfs"
+    ui_menu_footer "返回"
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
+    case $choice in
+      1) run_menu_action install_or_update_simple_obfs; pause;;
+      2) run_menu_action _obfs_sync_menu_action restart; pause;;
+      3) run_menu_action show_obfs_logs 100; pause;;
+      4) run_menu_action uninstall_simple_obfs; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
+    esac
+  done
+}
+
 service_menu() {
-  local choice svc_badge boot_badge bbr_badge
+  local choice svc_badge boot_badge bbr_badge obfs_badge
   local XRAYCTL_UI_CRUMB="首页 › 服务管理"
   while true; do
     clear_screen
@@ -9381,10 +10216,12 @@ service_menu() {
     svc_badge=$(_ui_state_badge "$(service_state_summary)")
     boot_badge=$(_ui_state_badge "$(startup_state_summary)")
     bbr_badge=$(_ui_state_badge "$(bbr_state_summary)")
+    obfs_badge=$(_ui_state_badge "$(obfs_state_summary)")
     ui_card_open "运行环境"
     ui_card_kv "服务状态" "$svc_badge" 12
     ui_card_kv "开机自启" "$boot_badge" 12
     ui_card_kv "Xray 核心" "$(xray_version_summary)" 12
+    ui_card_kv "HTTP 混淆" "$obfs_badge" 12
     ui_card_kv "TCP BBR" "$bbr_badge" 12
     ui_card_close
     ui_menu_group "服务控制"
@@ -9395,6 +10232,7 @@ service_menu() {
     ui_menu_item 4 "查看日志"
     ui_menu_item 5 "安装 Xray"
     ui_menu_item 6 "BBR启用/关闭"
+    ui_menu_item 7 "HTTP 混淆 (simple-obfs)"
     ui_menu_footer "返回"
     read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
@@ -9402,6 +10240,7 @@ service_menu() {
       3) run_menu_action toggle_service_startup; pause;; 4) run_menu_action show_logs 100; pause;;
       5) run_menu_action install_or_update_xray; pause;;
       6) run_menu_action manage_bbr; pause;;
+      7) obfs_menu;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -9642,6 +10481,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl cert renew <标识>          续期单个证书
   xrayctl cert cloudflare            管理 Cloudflare DNS 凭据
   xrayctl bbr                        启用/关闭 BBR（交互式）
+  xrayctl obfs [status|logs|install|uninstall] 管理 simple-obfs 混淆插件
   xrayctl version
 
 支持协议: VLESS、SS2022、SOCKS5、HTTP
@@ -9787,6 +10627,16 @@ dispatch() {
         *) die "未知 cert 子命令：${1}";; esac;;
 
     bbr) manage_bbr;;
+    obfs)
+      case ${1:-status} in
+        status) show_obfs_status;;
+        logs) show_obfs_logs "${2:-100}" "${3-}";;
+        install|update) install_or_update_simple_obfs;;
+        uninstall|remove) uninstall_simple_obfs "$([[ ${2-} == --yes ]] && printf 1 || printf 0)";;
+        restart|start|stop) ensure_runtime_dependencies obfs-service; obfs_services_sync_action "$1"; info "obfs-server 服务操作完成：${1}";;
+        *) die "未知 obfs 子命令：${1}";;
+      esac
+      ;;
     internal-script-update) update_script_resources;;
     internal-traffic-collect) internal_traffic_collect;;
     internal-traffic-ensure) traffic_runtime_ensure;;
