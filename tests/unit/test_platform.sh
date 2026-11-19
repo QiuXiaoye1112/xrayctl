@@ -25,7 +25,7 @@ systemctl() {
   case ${1-} in
     list-unit-files) printf '%s enabled\n' "$SYSTEMD_UNIT" ;;
     is-active|is-enabled) return 0 ;;
-    show) printf '%s\n' "${MOCK_SYSTEMD_STATE:-active}" ;;
+    show) printf 'LoadState=%s\nActiveState=%s\n' "${MOCK_SYSTEMD_LOAD_STATE:-loaded}" "${MOCK_SYSTEMD_STATE:-active}" ;;
   esac
 }
 journalctl() { PLATFORM_CALL="journalctl ${1-} ${2-} ${3-}"; }
@@ -42,6 +42,7 @@ XRAYCTL_PLATFORM=systemd
 assert_eq systemd "$(platform_init_system)" "systemd override was not selected"
 assert_success platform_service_exists
 MOCK_SYSTEMD_STATE=inactive assert_success platform_service_is_stopped
+MOCK_SYSTEMD_LOAD_STATE=not-found MOCK_SYSTEMD_STATE=inactive assert_failure platform_service_is_stopped
 MOCK_SYSTEMD_STATE=failed assert_failure platform_service_is_stopped
 MOCK_SYSTEMD_STATE=active assert_failure platform_service_is_stopped
 platform_service_start

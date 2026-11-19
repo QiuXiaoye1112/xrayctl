@@ -95,6 +95,9 @@ traffic_timer_install() { :; }
 # behavior is covered separately; keep the test portable to non-Linux hosts.
 traffic_runtime_ensure() { :; }
 service_is_active() { [[ -n $server_pid ]] && kill -0 "$server_pid" 2>/dev/null; }
+# The test core runs as a child process. Killing it here represents an
+# unexpected loss of the API regardless of the runner's xray.service state.
+platform_service_is_stopped() { return 1; }
 traffic_user_core_epoch() { service_is_active || return 1; printf 'test:%s' "$server_pid"; }
 restart_service() { kill "$server_pid"; wait "$server_pid" || true; server_pid=''; start_test_server; }
 if [[ ${XRAYCTL_TEST_FIREWALL:-0} == 1 ]]; then
@@ -145,7 +148,7 @@ jq -e --arg id "$id_a" '.inbounds.a.users[$id].limit.usedBytes>0' "$TRAFFIC_FILE
 jq -e --arg id "$id_a" '[.routing.rules[] | select(.ruleTag==("xrayctl-user-limit:"+$id))] | length==1' "$CONFIG_FILE" >/dev/null
 before_user=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$TRAFFIC_FILE")
 kill "$server_pid"; wait "$server_pid" || true; server_pid=''
-if traffic_collect; then printf 'not ok - stopped Xray reported successful collection\n' >&2; exit 1; fi
+if traffic_collect; then printf 'not ok - unexpected Xray exit reported successful collection\n' >&2; exit 1; fi
 after_user=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$TRAFFIC_FILE")
 [[ $before_user == "$after_user" ]]
 jq -e --arg id "$id_a" '[.routing.rules[] | select(.ruleTag==("xrayctl-user-limit:"+$id))] | length==1' "$CONFIG_FILE" >/dev/null

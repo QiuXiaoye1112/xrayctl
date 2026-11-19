@@ -62,8 +62,9 @@ platform_service_is_stopped() {
   local state status=0
   case $(platform_init_system) in
     systemd)
-      state=$(systemctl show "$SERVICE_NAME" -p ActiveState --value 2>/dev/null) || return 1
-      [[ $state == inactive ]]
+      state=$(systemctl show "$SERVICE_NAME" -p LoadState -p ActiveState 2>/dev/null) || return 1
+      state=$'\n'"$state"$'\n'
+      [[ $state == *$'\nLoadState=loaded\n'* && $state == *$'\nActiveState=inactive\n'* ]]
       ;;
     openrc)
       platform_service_exists || return 1
