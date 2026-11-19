@@ -131,6 +131,16 @@ done
 
 pass 'rename preserves nested menu context across protocols, repeated renames, cancellation and failures'
 
+# Opening the main menu must not reinitialize or restart the collector.
+(
+  traffic_runtime_ensure() { printf 'runtime\n' >>"$EVENTS"; }
+  main_menu() { printf 'menu\n' >>"$EVENTS"; }
+  : >"$EVENTS"
+  XRAYCTL_TESTING=1 dispatch
+  assert_eq menu "$(cat "$EVENTS")" 'opening the main menu initialized traffic collection'
+)
+pass 'opening the menu does not reinitialize traffic collection'
+
 # Initial quota setup must not leave the management lock in an idle menu.
 (
   LOCK_FILE="$TEST_ROOT/quota-menu.lock"
