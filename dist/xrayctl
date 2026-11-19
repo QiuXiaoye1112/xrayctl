@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="12416208e24d"
+readonly XRAYCTL_BUILD_COMMIT="023d7b404def"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -1231,10 +1231,11 @@ xray_installed() { [[ -x $XRAY_BIN ]]; }
 require_xray_installed() { xray_installed || die "Xray 尚未安装，请先自行安装 Xray"; }
 
 validate_supported_capabilities() {
-  jq -e '
+  jq -e --arg ss2022Method "$SS2022_METHOD" "$SS2022_INBOUND_JQ"'
     all(.inbounds[];
       if .protocol=="vless" then
         ((.streamSettings.network // .streamSettings.method // "raw") as $method | ["raw","xhttp","websocket"] | index($method)) != null
+      elif .protocol=="shadowsocks" then ss2022_inbound
       else .protocol=="socks" or .protocol=="http"
       end
     )' "$1" >/dev/null 2>&1
@@ -2960,12 +2961,29 @@ manage_inbound_certificate_menu() {
 }
 
 # --- src/protocols.sh ---
+readonly SS2022_METHOD="2022-blake3-aes-256-gcm"
+# Xray switches to single-user mode when the client list is empty.
+# shellcheck disable=SC2016
+readonly SS2022_INBOUND_JQ='
+  def ss2022_inbound:
+    def key: type=="string" and test("^[A-Za-z0-9+/]{43}=$");
+    .settings |
+    .method==$ss2022Method and .network=="tcp,udp" and
+    (.password | key) and
+    (.clients | type=="array" and length>0 and
+      all(.[]; .address==null and (.method // "")=="" and (.password | key))) and
+    ([.password, .clients[].password] | length == (unique | length));
+'
+
 protocol_list() {
-  printf '%s\n' vless socks http
+  printf '%s\n' vless shadowsocks socks http
 }
 
 protocol_is_supported() {
-  [[ $1 == vless || $1 == socks || $1 == http ]]
+  case $1 in
+    vless|shadowsocks|socks|http) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 protocol_supports_stream() {
@@ -2979,6 +2997,7 @@ protocol_supports_reality() {
 protocol_client_credential_field() {
   case $1 in
     vless) printf '%s\n' id ;;
+    shadowsocks) printf '%s\n' password ;;
     socks|http) printf '%s\n' pass ;;
     *) return 1 ;;
   esac
@@ -2999,6 +3018,22 @@ protocol_build_vless() {
   result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
     --argjson user "$user" --argjson stream "$stream" \
     '{tag:$tag,listen:$listen,port:$port,protocol:"vless",settings:{clients:[$user],decryption:"none"},streamSettings:$stream,sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}')
+  printf -v "$__out" '%s' "$result"
+}
+
+protocol_generate_ss2022_key() {
+  openssl rand -base64 32
+}
+
+protocol_build_shadowsocks() {
+  local __out=$1 tag=$2 listen=$3 port=$4 email=$5 server_key user_key result
+  server_key=$(protocol_generate_ss2022_key) || return 1
+  user_key=$(protocol_generate_ss2022_key) || return 1
+  result=$(jq -n --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
+    --arg method "$SS2022_METHOD" --arg serverKey "$server_key" --arg userKey "$user_key" --arg email "$email" \
+    '{tag:$tag,listen:$listen,port:$port,protocol:"shadowsocks",settings:{
+      method:$method,password:$serverKey,network:"tcp,udp",clients:[{email:$email,password:$userKey,level:0}]
+    },sniffing:{enabled:true,destOverride:["http","tls","quic"],routeOnly:true}}') || return 1
   printf -v "$__out" '%s' "$result"
 }
 
@@ -3035,6 +3070,7 @@ protocol_build() {
   shift 2
   case $protocol in
     vless) protocol_build_vless "$__out" "$@" ;;
+    shadowsocks) protocol_build_shadowsocks "$__out" "$@" ;;
     socks) protocol_build_socks "$__out" "$@" ;;
     http) protocol_build_http "$__out" "$@" ;;
     *) error "不支持的协议：${protocol}"; return 1 ;;
@@ -3046,11 +3082,12 @@ build_inbound() {
   local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
   local total_steps=3 listen_step=2 user_step=3
   ui_wizard_step 1 "" "选择入站协议"
-  choose choice "选择入站协议" "VLESS" "SOCKS5" "HTTP" || return 1
+  choose choice "选择入站协议" "VLESS" "SS2022" "SOCKS5" "HTTP" || return 1
   case $choice in
     1) protocol=vless; total_steps=4; listen_step=3; user_step=4 ;;
-    2) protocol=socks ;;
-    3) protocol=http ;;
+    2) protocol=shadowsocks ;;
+    3) protocol=socks ;;
+    4) protocol=http ;;
   esac
 
   if protocol_supports_stream "$protocol"; then
@@ -3075,6 +3112,10 @@ build_inbound() {
     vless)
       prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol" || return 1
       protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$email" "$stream"
+      ;;
+    shadowsocks)
+      prompt_client_label email "$tag" "首个用户名称/邮箱" "user-$(random_hex 2)" "" "$protocol" || return 1
+      protocol_build inbound_json "$protocol" "$tag" "$listen" "$port" "$email" || return 1
       ;;
     socks|http)
       while true; do
@@ -3102,6 +3143,10 @@ inbound_configuration_is_supported() {
   if protocol_supports_stream "$protocol"; then
     method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.network // .streamSettings.method // "raw"' "$CONFIG_FILE")
     case $method in raw|xhttp|websocket) ;; *) return 1;; esac
+  elif [[ $protocol == shadowsocks ]]; then
+    jq -e --arg tag "$tag" --arg ss2022Method "$SS2022_METHOD" "$SS2022_INBOUND_JQ"'
+      .inbounds[] | select(.tag==$tag) | ss2022_inbound
+    ' "$CONFIG_FILE" >/dev/null
   fi
 }
 
@@ -3230,19 +3275,22 @@ list_inbounds() {
   print_table_cell_clipped "标签" 18; printf '  '
   print_table_cell_clipped "协议" 6; printf '  '
   print_table_cell "端口" 6; printf '  '
-  print_table_cell_clipped "传输" 6; printf '  '
+  print_table_cell_clipped "传输" 7; printf '  '
   print_table_cell_clipped "安全" 8; printf '  '
   print_table_cell "用户" 4; printf '  监听%s\n' "$C_RESET"
-  jq -r '.inbounds | to_entries[] |
-    [.value.tag,.value.protocol,(.value.port|tostring),
+  jq -r --arg ss2022Method "$SS2022_METHOD" '.inbounds | to_entries[] |
+    [.value.tag,(if .value.protocol=="shadowsocks" then
+       (if .value.settings.method==$ss2022Method then "SS2022" else "SS" end)
+     else .value.protocol end),(.value.port|tostring),
      (if .value.protocol=="vless" then
         (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end)
-      else "-" end),
+      elif .value.protocol=="shadowsocks" then (.value.settings.network // "tcp") else "-" end),
      (if .value.protocol=="vless" then (.value.streamSettings.security // "none")
       elif .value.protocol=="socks" then (.value.settings.auth // "noauth")
+      elif .value.protocol=="shadowsocks" then "AEAD"
       elif (((.value.settings.accounts // .value.settings.users // [])|length)>0) then "password"
       else "noauth" end),
-     (if .value.protocol=="vless" then (.value.settings.clients // [] | length)
+     (if (.value.protocol=="vless" or .value.protocol=="shadowsocks") then (.value.settings.clients // [] | length)
       else ((.value.settings.accounts // .settings.users // []) | length) end | tostring),
      (.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port method security users listen; do
@@ -3255,7 +3303,7 @@ list_inbounds() {
         printf '  '; print_table_cell_clipped "$tag" 18; printf '%s%s  ' "$C_DIM" "$C_RESET"
         print_table_cell_clipped "$protocol" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
         print_table_cell "$port" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
-        print_table_cell_clipped "$method" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$method" 7; printf '%s%s  ' "$C_DIM" "$C_RESET"
         print_table_cell "$sec_disp" 8; printf '%s%s  ' "$C_DIM" "$C_RESET"
         print_table_cell "$users" 4; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$listen"
       done
@@ -3408,8 +3456,8 @@ http_inbound_has_auth() {
 
 list_clients() {
   ensure_config
-  local tag=${1-} protocol count number label credential
-  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  local tag=${1-} protocol count number label credential credential_field credential_name
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
   heading "${tag} 的用户"
@@ -3421,10 +3469,16 @@ list_clients() {
   if ((count == 0)); then info "还没有用户。"; return; fi
   printf '  %s' "$C_DIM"
   print_table_cell "序号" 5; printf '  '
-  print_table_cell "用户" 16; printf '  凭据 (%s)%s\n' "$([[ $protocol == vless ]] && printf 'UUID' || printf '密码')" "$C_RESET"
   case $protocol in
-    vless)
-      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.xrayctlLabel // .value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
+    vless) credential_name=UUID ;;
+    shadowsocks) credential_name=密钥 ;;
+    *) credential_name=密码 ;;
+  esac
+  print_table_cell "用户" 16; printf '  凭据 (%s)%s\n' "$credential_name" "$C_RESET"
+  case $protocol in
+    vless|shadowsocks)
+      credential_field=$(protocol_client_credential_field "$protocol")
+      jq -r --arg tag "$tag" --arg field "$credential_field" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.xrayctlLabel // .value.email // "-"),.value[$field]]|@tsv' "$CONFIG_FILE" \
         | while IFS=$'\t' read -r number label credential; do
         printf '  '; print_table_cell "$number" 5; printf '%s%s  ' "$C_DIM" "$C_RESET"
         print_table_cell_clipped "$label" 16; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$credential"
@@ -3503,7 +3557,7 @@ prompt_client_label() {
 add_client() {
   ensure_runtime_dependencies client-add; require_xray_installed; ensure_config
   local tag=${1-} protocol label id password user tmp flow method security
-  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
   prompt_client_label label "$tag" "用户名称/邮箱" "user-$(random_hex 2)" || return 1
@@ -3514,6 +3568,10 @@ add_client() {
       security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
       [[ $method == raw && $security != none ]] && flow=xtls-rprx-vision || flow=""
       user=$(jq -n --arg id "$id" --arg email "$label" --arg flow "$flow" '{id:$id,email:$email,level:0}+(if $flow!="" then {flow:$flow} else {} end)')
+      ;;
+    shadowsocks)
+      password=$(protocol_generate_ss2022_key) || { error "无法生成 SS2022 用户密钥。"; return 1; }
+      user=$(jq -n --arg email "$label" --arg password "$password" '{email:$email,password:$password,level:0}')
       ;;
     socks|http) prompt_secret password "密码" "$(random_password)" || return 1; user=$(jq -n --arg user "$label" --arg pass "$password" '{user:$user,pass:$pass}') ;;
     *) die "${protocol} 不支持多用户。";;
@@ -3536,10 +3594,17 @@ add_client() {
 delete_client() {
   ensure_runtime_dependencies client-delete; ensure_config
   local tag=${1-} label=${2-} assume_yes=${3:-0} protocol tmp count managed_id=""
-  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
   [[ -n $label ]] || select_client label "$tag" || return
+  if [[ $protocol == shadowsocks ]] && jq -e --arg tag "$tag" --arg label "$label" '
+    .inbounds[] | select(.tag==$tag) | .settings.clients |
+    all(.[]; (.xrayctlLabel // .email)==$label)
+  ' "$CONFIG_FILE" >/dev/null; then
+    error "SS2022 入站至少需要一个用户。要停用全部访问，请删除该入站。"
+    return 1
+  fi
   [[ $assume_yes == 1 ]] || confirm "从 ${tag} 删除用户 ${label}？" N || return 0
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
@@ -3590,7 +3655,7 @@ rotate_client_credential() {
     fi
   fi
   ensure_runtime_dependencies client-rotate; ensure_config
-  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks|socks|http)$' || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   [[ -n $label ]] || select_client label "$tag" || return
   client_label_exists "$tag" "$label" || die "找不到入站 ${tag} 的用户 ${label}。"
@@ -3608,6 +3673,11 @@ rotate_client_credential() {
         prompt_validated_value value "新 UUID" "$generated" validate_uuid "UUID 格式无效，请重新输入。" || { rm -f "$tmp"; return 1; }
       fi
       jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
+    shadowsocks)
+      value=$(protocol_generate_ss2022_key) || { rm -f "$tmp"; error "无法生成 SS2022 用户密钥。"; return 1; }
+      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '
+        (.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)|.password)=$value
+      ' "$CONFIG_FILE" >"$tmp" ;;
     socks|http)
       generated=$(random_password) || { rm -f "$tmp"; error "无法生成新密码，未修改凭据。"; return 1; }
       [[ -n $generated ]] || { rm -f "$tmp"; error "无法生成新密码，未修改凭据。"; return 1; }
@@ -3631,7 +3701,7 @@ rotate_client_credential() {
 rename_client() {
   ensure_runtime_dependencies client-rename; require_xray_installed; ensure_config
   local tag=${1-} old_label=${2-} new_label=${3-} protocol count tmp old_identity new_identity
-  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks|socks|http)$' || return
   [[ -n $old_label ]] || select_client old_label "$tag" || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
@@ -3763,6 +3833,11 @@ _share_print_params_card() {
           ;;
       esac
       ;;
+    shadowsocks)
+      ui_card_kv "协议与传输" "SS2022 · TCP/UDP" 12
+      ui_card_kv "加密方式" "$SS2022_METHOD" 12
+      ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      ;;
     socks)
       auth=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth // "noauth"' "$CONFIG_FILE")
       ui_card_kv "协议类型" "SOCKS5 ($([[ $auth == password ]] && printf '账号密码认证' || printf '无认证'))" 12
@@ -3812,7 +3887,7 @@ link_query_for_stream() {
 
 print_links() {
   ensure_config; init_meta
-  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link idx=0
+  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link server_key idx=0
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
@@ -3831,6 +3906,15 @@ print_links() {
         link="vless://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")"
         print_share_entry "$label" "链接" "$link" "$idx"
       done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", (.id // ""), "\u0000"' "$CONFIG_FILE")
+      ;;
+    shadowsocks)
+      server_key=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.password' "$CONFIG_FILE")
+      while IFS= read -r -d '' label && IFS= read -r -d '' password; do
+        [[ -z $filter || $label == "$filter" ]] || continue
+        idx=$((idx + 1))
+        link="ss://${SS2022_METHOD}:$(url_encode "${server_key}:${password}")@${uri_host}:${port}#$(url_encode "${tag}-${label}")"
+        print_share_entry "$label" "链接" "$link" "$idx"
+      done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", .password, "\u0000"' "$CONFIG_FILE")
       ;;
     socks)
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
@@ -3867,14 +3951,14 @@ print_subscription() {
   ensure_config; init_meta
   local tag=${1-} links="" current_tag current_links
   if [[ -n $tag ]]; then
-    links=$(print_links "$tag" "" | awk '/^链接: (vless|socks5|http):\/\// {sub(/^链接: /, ""); print}')
+    links=$(print_links "$tag" "" | awk '/^链接: (vless|ss|socks5|http):\/\// {sub(/^链接: /, ""); print}')
   else
     while IFS= read -r current_tag; do
-      current_links=$(print_links "$current_tag" "" | awk '/^链接: (vless|socks5|http):\/\// {sub(/^链接: /, ""); print}')
+      current_links=$(print_links "$current_tag" "" | awk '/^链接: (vless|ss|socks5|http):\/\// {sub(/^链接: /, ""); print}')
       [[ -n $current_links ]] || continue
       [[ -z $links ]] || links+=$'\n'
       links+=$current_links
-    done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|socks|http)$"))|.tag' "$CONFIG_FILE")
+    done < <(share_inbound_tags)
   fi
   [[ -n $links ]] || die "没有可生成订阅的代理分享链接。"
   printf '%s' "$links" | base64_nowrap
@@ -3887,8 +3971,16 @@ print_all_share_links() {
   while IFS= read -r tag; do
     found=1
     print_links "$tag" ""
-  done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|socks|http)$"))|.tag' "$CONFIG_FILE")
+  done < <(share_inbound_tags)
   ((found == 1)) || { warn "没有可生成分享链接的入站。"; return 0; }
+}
+
+share_inbound_tags() {
+  jq -r --arg ss2022Method "$SS2022_METHOD" "$SS2022_INBOUND_JQ"'
+    .inbounds[] |
+    select(if .protocol=="shadowsocks" then ss2022_inbound else (.protocol|test("^(vless|socks|http)$")) end) |
+    .tag
+  ' "$CONFIG_FILE"
 }
 
 
@@ -3912,31 +4004,40 @@ TRAFFIC_SYSTEMD_SERVICE="${SYSTEMD_UNIT_DIR}/xrayctl-traffic-collect.service"
 TRAFFIC_SYSTEMD_TIMER="${SYSTEMD_UNIT_DIR}/xrayctl-traffic-collect.timer"
 TRAFFIC_OPENRC_SERVICE="${OPENRC_INIT_DIR}/xrayctl-traffic-collect"
 
+# shellcheck disable=SC2016
+readonly TRAFFIC_EMAIL_CLIENTS_JQ='
+  def email_client_inbound:
+    .protocol=="vless" or
+    (.protocol=="shadowsocks" and .settings.method==$ss2022Method and (.settings.clients|type)=="array");
+'
+
 traffic_user_managed_config() {
   [[ -r $CONFIG_FILE ]] && jq -e '.xrayctlUserStats.enabled==true' "$CONFIG_FILE" >/dev/null 2>&1
 }
 
 traffic_user_has_clients() {
   local file=${1:-$CONFIG_FILE}
-  [[ -r $file ]] && jq -e '[.inbounds[]? | select(
-    (.protocol=="vless" and ((.settings.clients // [])|length)>0) or
+  [[ -r $file ]] && jq -e --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
+  [.inbounds[]? | select(
+    (email_client_inbound and ((.settings.clients // [])|length)>0) or
     (.protocol=="socks" and .settings.auth=="password" and ((.settings.accounts // .settings.users // [])|length)>0) or
     (.protocol=="http" and ((.settings.accounts // .settings.users // [])|length)>0)
   )] | length>0' "$file" >/dev/null 2>&1
 }
 
 # Xray StatsService uses the email field for every authenticated inbound user.
-# VLESS has a private xrayctl-generated email; HTTP/SOCKS expose their actual
+# VLESS and SS2022 use private xrayctl-generated emails; HTTP/SOCKS use the actual
 # account username as that email. The same name on two accounts is ambiguous
 # because the core aggregates both counters globally.
 traffic_user_inventory_json() {
   local file=${1:-$CONFIG_FILE}
-  jq -c '
+  jq -c \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     [ .inbounds[]? as $inbound |
-      if $inbound.protocol=="vless" then
+      if ($inbound | email_client_inbound) then
         $inbound.settings.clients[]? |
         select(.xrayctlLabel != null and (.email|type)=="string") |
-        {tag:$inbound.tag,id:.email,label:.xrayctlLabel,protocol:"vless"}
+        {tag:$inbound.tag,id:.email,label:.xrayctlLabel,protocol:$inbound.protocol}
       elif $inbound.protocol=="socks" and $inbound.settings.auth=="password" then
         ($inbound.settings.accounts // $inbound.settings.users // [])[]? |
         select((.user|type)=="string" and (.user|length)>0 and (.pass|type)=="string" and (.pass|length)>0) |
@@ -3960,12 +4061,13 @@ traffic_user_inventory_json() {
 # the normal configuration transaction.
 traffic_user_prepare_identities() {
   local input=$1 output=$2 working next index client_index label original identity mappings='[]'
-  if ! jq -e '
+  if ! jq -e \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     def valid_label: . == null or (type=="string" and length<=128 and (test("[\\r\\n\\t]")|not) and (contains(">>>")|not));
-    [.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? |
+    [.inbounds[]? | select(email_client_inbound) | .settings.clients[]? |
       select((.email|valid_label|not) or (.xrayctlLabel|valid_label|not))] | length==0
   ' "$input" >/dev/null; then
-    warn "VLESS 用户名称含有无法安全处理的字符，请先修正配置。"
+    warn "VLESS/SS2022 用户名称含有无法安全处理的字符，请先修正配置。"
     return 1
   fi
   working=$(temp_file) || return 1
@@ -3973,7 +4075,11 @@ traffic_user_prepare_identities() {
   while IFS=$'\t' read -r index client_index; do
     [[ $index =~ ^[0-9]+$ && $client_index =~ ^[0-9]+$ ]] || continue
     original=$(jq -r --argjson i "$index" --argjson j "$client_index" '.inbounds[$i].settings.clients[$j].email // ""' "$working") || { rm -f "$working"; return 1; }
-    if [[ -n $original ]] && jq -e --arg email "$original" '[.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? | select(.xrayctlLabel != null and .email==$email)] | length>0' "$working" >/dev/null; then
+    if [[ -n $original ]] && jq -e --arg email "$original" \
+      --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
+      any(.inbounds[]? | select(email_client_inbound) | .settings.clients[]?;
+        .xrayctlLabel != null and .email==$email)
+    ' "$working" >/dev/null; then
       rm -f "$working"
       warn "用户名称与已有内部统计标识冲突，拒绝改变用户路由。"
       return 1
@@ -3991,7 +4097,11 @@ traffic_user_prepare_identities() {
       '.inbounds[$i].settings.clients[$j] |= (.xrayctlLabel=$user_label | .email=$identity)' "$working" >"$next" || { rm -f "$next" "$working"; return 1; }
     mv -f "$next" "$working" || { rm -f "$next" "$working"; return 1; }
     mappings=$(jq -nc --argjson maps "$mappings" --arg old "$original" --arg new "$identity" '$maps + [{old:$old,new:$new}]') || { rm -f "$working"; return 1; }
-  done < <(jq -r '.inbounds | to_entries[] | select(.value.protocol=="vless") | .key as $i | (.value.settings.clients // [] | to_entries[]) | select(.value.xrayctlLabel == null) | [$i,.key] | @tsv' "$input")
+  done < <(jq -r --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
+    .inbounds | to_entries[] | select(.value | email_client_inbound) | .key as $i |
+    (.value.settings.clients // [] | to_entries[]) |
+    select(.value.xrayctlLabel == null) | [$i,.key] | @tsv
+  ' "$input")
   # A regexp user rule can match the generated email even when it did not
   # match the original label. Refuse such a migration instead of silently
   # changing routing. Rules that matched an old name gain its new exact ID.
@@ -4026,13 +4136,14 @@ traffic_user_prepare_identities() {
   rm -f "$working"
   # Reject ambiguous pre-existing managed identifiers and labels, rather than
   # ever assigning one core counter to two users.
-  jq -e '
+  jq -e \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     [.. | objects | .email? | select(type=="string") | ascii_downcase] as $all |
-    ([.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? |
+    ([.inbounds[]? | select(email_client_inbound) | .settings.clients[]? |
       ((.xrayctlLabel|type)=="string" and (.xrayctlLabel|length)>0 and
        (.email|type)=="string" and (.email|test("^xrayctl-user-[0-9a-f]{32}$")) and
        (.email | ascii_downcase | . as $id | [$all[] | select(.==$id)] | length == 1))] | all) and
-    ([.inbounds[]? | select(.protocol=="vless") | [.settings.clients[]? | (.xrayctlLabel // .email)] | length == (unique|length)] | all)
+    ([.inbounds[]? | select(email_client_inbound) | [.settings.clients[]? | (.xrayctlLabel // .email)] | length == (unique|length)] | all)
   ' "$output" >/dev/null
 }
 
@@ -4069,13 +4180,14 @@ traffic_user_prepare_config() {
     warn "HTTP/SOCKS 用户名包含 StatsService 无法安全解析的字符；请先重命名账号。"
     return 1
   fi
-  jq --arg address "$address" --arg apiTag "$api_tag" '
+  jq --arg address "$address" --arg apiTag "$api_tag" \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     .stats=(.stats // {}) |
     .api=(.api // {}) | .api.tag=$apiTag | .api.listen=$address |
     .api.services=((.api.services // []) + ["StatsService"] | unique) |
     .xrayctlUserStats={enabled:true} |
     .policy=(.policy // {}) | .policy.levels=(.policy.levels // {}) |
-    reduce ([0] + [.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? | (.level // 0)] | unique[]) as $level
+    reduce ([0] + [.inbounds[]? | select(email_client_inbound) | .settings.clients[]? | (.level // 0)] | unique[]) as $level
       (. ; .policy.levels[($level|tostring)]=((.policy.levels[($level|tostring)] // {}) + {statsUserUplink:true,statsUserDownlink:true}))
   ' "$identities" >"$output" || { rm -f "$identities"; return 1; }
   rm -f "$identities"
@@ -4149,7 +4261,9 @@ traffic_user_update_samples() {
   now=$(traffic_now)
   period_start=$(traffic_period_start "$now") || return 1
   inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
-  active_tags=$(jq -c '[.inbounds[]? | select(.protocol=="vless" or .protocol=="socks" or .protocol=="http") | .tag]' "$CONFIG_FILE") || return 1
+  active_tags=$(jq -c --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
+    [.inbounds[]? | select(email_client_inbound or .protocol=="socks" or .protocol=="http") | .tag]
+  ' "$CONFIG_FILE") || return 1
   if jq -e --arg now "$now" '
     .userLastCollectedAt as $last |
     any(.inbounds[]?.users[]?; .limit.enabled==true and
@@ -4221,10 +4335,11 @@ traffic_user_collect_locked() {
   address=$(jq -r 'if .xrayctlUserStats.enabled==true then (.api.listen // "") else "" end' "$CONFIG_FILE") || return 1
   [[ -n $address ]] || return 0
   inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
-  if ! jq -e --slurpfile traffic "$TRAFFIC_FILE" --argjson inventory "$inventory" '
+  if ! jq -e --slurpfile traffic "$TRAFFIC_FILE" --argjson inventory "$inventory" \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     $traffic[0] as $state |
     [.. | objects | .email? | select(type=="string") | ascii_downcase] as $all |
-    [.inbounds[]? | select(.protocol=="vless") | .tag as $tag | .settings.clients[]? | . as $client |
+    [.inbounds[]? | select(email_client_inbound) | .tag as $tag | .settings.clients[]? | . as $client |
       ((.xrayctlLabel|type)=="string" and (.xrayctlLabel|length)>0 and (.email|type)=="string" and (.email|test("^xrayctl-user-[0-9a-f]{32}$")) and
         (.email | ascii_downcase | . as $id | [$all[] | select(.==$id)] | length==1) and
         ($state.inbounds[$tag].users[($client.email // "" | tostring)] != null or
@@ -4294,9 +4409,10 @@ traffic_user_rename_client_record_locked() {
 # label identifies exactly one record. Never guess when the match is unclear.
 traffic_user_recover_identities() {
   local input=$1 output=$2
-  jq --slurpfile state "$TRAFFIC_FILE" '
+  jq --slurpfile state "$TRAFFIC_FILE" \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     $state[0] as $s |
-    .inbounds |= map(if .protocol=="vless" then
+    .inbounds |= map(if email_client_inbound then
       .tag as $tag | .settings.clients |= map(. as $client |
         if .xrayctlLabel == null or $s.inbounds[$tag].users[($client.email // "")] != null then .
         else
@@ -4432,10 +4548,10 @@ traffic_user_ensure_configured() {
 
 traffic_user_select() {
   local __tag=$1 __label=$2 picked_tag=${3-} picked_label=${4-} protocol inventory
-  [[ -n $picked_tag ]] || select_inbound picked_tag '^(vless|socks|http)$' || return 1
+  [[ -n $picked_tag ]] || select_inbound picked_tag '^(vless|shadowsocks|socks|http)$' || return 1
   protocol=$(jq -r --arg tag "$picked_tag" '.inbounds[]? | select(.tag==$tag) | .protocol' "$CONFIG_FILE") || return 1
   case $protocol in
-    vless) ;;
+    vless|shadowsocks) ;;
     socks)
       jq -e --arg tag "$picked_tag" '.inbounds[]? | select(.tag==$tag and .protocol=="socks" and .settings.auth=="password" and ((.settings.accounts // .settings.users // [])|length)>0)' "$CONFIG_FILE" >/dev/null || { warn "该 SOCKS5 入站没有已启用的用户名密码账号。"; return 1; }
       ;;
@@ -4456,9 +4572,10 @@ traffic_user_select() {
 }
 
 traffic_user_id() {
-  jq -r --arg tag "$1" --arg user_label "$2" '
+  jq -r --arg tag "$1" --arg user_label "$2" \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     .inbounds[]? | select(.tag==$tag) |
-    if .protocol=="vless" then
+    if email_client_inbound then
       .settings.clients[]? | select((.xrayctlLabel // .email)==$user_label) | .email
     elif .protocol=="socks" and .settings.auth=="password" then
       (.settings.accounts // .settings.users // [])[]? | select(.user==$user_label) | .user
@@ -4621,9 +4738,10 @@ traffic_users_show() {
     print_table_cell_right "$used" 10; printf ' / '
     print_table_cell "$quota" 10; printf '%s%s  ' "$C_DIM" "$C_RESET"
     print_table_cell "$status_disp" 8; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$bar"
-  done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --argjson inventory "$inventory" --arg periodStart "$period_start" --arg filter "$filter" '
+  done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --argjson inventory "$inventory" --arg periodStart "$period_start" --arg filter "$filter" \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     $state[0] as $s | .inbounds[]? | select($filter=="" or .tag==$filter) | .tag as $tag | .protocol as $protocol |
-    if $protocol=="vless" then
+    if email_client_inbound then
       if ((.settings.clients // [])|length)==0 then [$tag,$protocol,"-","-",0,0,0,"-","-",false,false] | @tsv
       else .settings.clients[] | .email as $id | ($s.inbounds[$tag].users[$id] // {}) as $u |
         [$tag,$protocol,$id,(.xrayctlLabel // .email // ""),($u.cycles[$periodStart] // 0),
@@ -5197,7 +5315,7 @@ traffic_rules_clear() {
 }
 
 traffic_protocols_for_inbound() {
-  case $1 in socks) printf '%s\n' tcp udp;; *) printf '%s\n' tcp;; esac
+  case $1 in shadowsocks|socks) printf '%s\n' tcp udp;; *) printf '%s\n' tcp;; esac
 }
 
 traffic_restore_nft_rules() {
@@ -6114,13 +6232,13 @@ list_inbound_outbound_status() {
   printf '入站\t默认出站\t公共域名规则\t用户数\n'
   jq -r '
     (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native | (.outbounds // []) as $outbounds |
-    .inbounds[]? | select(.protocol=="vless" or .protocol=="socks" or .protocol=="http") |
+    .inbounds[]? | select(.protocol=="vless" or .protocol=="shadowsocks" or .protocol=="socks" or .protocol=="http") |
     .tag as $tag | .protocol as $protocol |
     [$tag,
      (([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native) as $route |
        ([$outbounds[]? | select(.tag==$route) | .sendThrough][0] // $route)),
      ([$rules[]? | select(((.ruleTag // "")|startswith("xrayctl-domain:")) and .inboundTag==[$tag])] | length | tostring),
-     (if $protocol=="vless" then (.settings.clients // [] | length)
+     (if ($protocol=="vless" or $protocol=="shadowsocks") then (.settings.clients // [] | length)
       elif $protocol=="socks" and .settings.auth=="password" then ((.settings.accounts // .settings.users // []) | length)
       elif $protocol=="http" then ((.settings.accounts // .settings.users // []) | length)
       else 0 end | tostring)] | @tsv
@@ -6253,7 +6371,7 @@ select_outbound() {
 assign_outbound() {
   ensure_config
   local inbound=${1-} outbound=${2-} selected_local_ip="" rule_tag tmp
-  [[ -n $inbound ]] || select_inbound inbound '^(vless|socks|http)$' || return
+  [[ -n $inbound ]] || select_inbound inbound '^(vless|shadowsocks|socks|http)$' || return
   inbound_exists "$inbound" || die "找不到入站：$inbound"
   inbound_require_supported_configuration "$inbound"
   [[ -n $outbound ]] || select_outbound outbound 1 1 selected_local_ip || return
@@ -6279,7 +6397,7 @@ assign_outbound() {
 remove_inbound_default_outbound() {
   ensure_runtime_dependencies outbound-inbound-unset; ensure_config
   local inbound=${1-} rule_tag tmp
-  [[ -n $inbound ]] || select_inbound inbound '^(vless|socks|http)$' || return 1
+  [[ -n $inbound ]] || select_inbound inbound '^(vless|shadowsocks|socks|http)$' || return 1
   inbound_exists "$inbound" || die "找不到入站：$inbound"
   rule_tag="xrayctl-outbound:${inbound}"
   tmp=$(temp_file) || return 1
@@ -6295,10 +6413,10 @@ _outbound_user_identity() {
   local __var=$1 inbound=$2 label=$3 protocol resolved_identity identity_count
   protocol=$(jq -r --arg inbound "$inbound" '.inbounds[]? | select(.tag==$inbound) | .protocol' "$CONFIG_FILE") || return 1
   case $protocol in
-    vless)
+    vless|shadowsocks)
       resolved_identity=$(jq -r --arg inbound "$inbound" --arg user_label "$label" \
         '.inbounds[]? | select(.tag==$inbound) | .settings.clients[]? | select((.xrayctlLabel // .email)==$user_label) | .email // empty' "$CONFIG_FILE") || return 1
-      [[ -n $resolved_identity ]] || { warn "该 VLESS 用户没有 Xray email 身份，无法安全添加用户路由。"; return 1; }
+      [[ -n $resolved_identity ]] || { warn "该用户没有 Xray email 身份，无法安全添加用户路由。"; return 1; }
       ;;
     socks)
       jq -e --arg inbound "$inbound" '.inbounds[]? | select(.tag==$inbound and .protocol=="socks" and .settings.auth=="password")' "$CONFIG_FILE" >/dev/null || { warn "无认证 SOCKS5 入站不支持用户路由。"; return 1; }
@@ -6312,7 +6430,7 @@ _outbound_user_identity() {
   [[ -n $resolved_identity ]] || { warn "找不到入站 ${inbound} 的用户 ${label}。"; return 1; }
   identity_count=$(jq -r --arg inbound "$inbound" --arg identity "$resolved_identity" '
     [.inbounds[]? | select(.tag==$inbound) |
-      if .protocol=="vless" then [.settings.clients[]? | select(.email==$identity)]
+      if (.protocol=="vless" or .protocol=="shadowsocks") then [.settings.clients[]? | select(.email==$identity)]
       else [(.settings.accounts // .settings.users // [])[]? | select(.user==$identity)] end] | flatten | length
   ' "$CONFIG_FILE") || return 1
   [[ $identity_count == 1 ]] || { warn "该入站中的用户身份不唯一，拒绝创建可能同时匹配多个用户的规则。"; return 1; }
@@ -6544,7 +6662,7 @@ outbound_user_list() {
       ' "$CONFIG_FILE")"
   done < <(jq -r --arg inbound "$inbound" '
     .inbounds[]? | select(.tag==$inbound) |
-    if .protocol=="vless" then .settings.clients[]? | (.xrayctlLabel // .email // empty)
+    if (.protocol=="vless" or .protocol=="shadowsocks") then .settings.clients[]? | (.xrayctlLabel // .email // empty)
     elif .protocol=="socks" and .settings.auth=="password" then (.settings.accounts // .settings.users // [])[]? | .user
     elif .protocol=="http" then (.settings.accounts // .settings.users // [])[]? | .user else empty end
   ' "$CONFIG_FILE")
@@ -7133,7 +7251,7 @@ add_domain_rule() {
     normalized_domains=$(_normalize_domain_list "$domain") || die "域名格式无效。"
     outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
   else
-    select_inbound inbound '^(vless|socks|http)$' || return
+    select_inbound inbound '^(vless|shadowsocks|socks|http)$' || return
   fi
   if ((cli == 0)); then
     choose choice "匹配方式" "域名及所有子域名" "仅精确域名" || return
@@ -8030,13 +8148,15 @@ show_main_inbounds() {
   print_table_cell_clipped "协议" 6; printf '  '
   print_table_cell "端口" 6; printf '  '
   print_table_cell "用户" 4; printf '  默认出站%s\n' "$C_RESET"
-  jq -r '
+  jq -r --arg ss2022Method "$SS2022_METHOD" '
     (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
     .inbounds[] |
     .tag as $tag |
-    [$tag,.protocol,
+    [$tag,(if .protocol=="shadowsocks" then
+       (if .settings.method==$ss2022Method then "SS2022" else "SS" end)
+     else .protocol end),
      (.port|tostring),
-     (if .protocol=="vless" then (.settings.clients // [] | length)
+     (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
       else ((.settings.accounts // .settings.users // []) | length) end | tostring),
      ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port users outbound; do
@@ -8055,18 +8175,21 @@ show_main_inbounds() {
 show_node_summary() {
   local tag=$1 protocol port method security listen users outbound host out_disp
   IFS=$'\t' read -r protocol port method security listen users outbound < <(
-    jq -r --arg tag "$tag" '
+    jq -r --arg tag "$tag" --arg ss2022Method "$SS2022_METHOD" '
       (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
       .inbounds[]|select(.tag==$tag)|[
-        .protocol,
+        (if .protocol=="shadowsocks" and .settings.method==$ss2022Method then "SS2022" else .protocol end),
         (.port|tostring),
-        (if .protocol=="vless" then (.streamSettings.network // .streamSettings.method // "raw") else "-" end),
+        (if .protocol=="vless" then (.streamSettings.network // .streamSettings.method // "raw")
+         elif .protocol=="shadowsocks" then (.settings.network // "tcp")
+         else "-" end),
         (if .protocol=="vless" then (.streamSettings.security // "none")
+         elif .protocol=="shadowsocks" then (.settings.method // "AEAD")
          elif .protocol=="socks" then (.settings.auth // "noauth")
          elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
          else "noauth" end),
         (.listen // "0.0.0.0"),
-        (if .protocol=="vless" then (.settings.clients // [] | length)
+        (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
          else ((.settings.accounts // .settings.users // []) | length) end | tostring),
         ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)
       ]|@tsv' "$CONFIG_FILE"
@@ -8551,13 +8674,13 @@ outbound_menu() {
 }
 
 _outbound_inbound_tags() {
-  jq -r '.inbounds[] | select(.protocol|test("^(vless|socks|http)$")) | .tag' "$CONFIG_FILE"
+  jq -r '.inbounds[] | select(.protocol|test("^(vless|shadowsocks|socks|http)$")) | .tag' "$CONFIG_FILE"
 }
 
 _outbound_user_labels() {
   jq -r --arg inbound "$1" '
     .inbounds[]? | select(.tag==$inbound) |
-    if .protocol=="vless" then .settings.clients[]? | (.xrayctlLabel // .email // empty)
+    if (.protocol=="vless" or .protocol=="shadowsocks") then .settings.clients[]? | (.xrayctlLabel // .email // empty)
     elif .protocol=="socks" and .settings.auth=="password" then (.settings.accounts // .settings.users // [])[]? | .user
     elif .protocol=="http" then (.settings.accounts // .settings.users // [])[]? | .user
     else empty end
@@ -9035,9 +9158,13 @@ manage_inbound_menu() {
     ui_page "入站 · ${tag}"
     show_node_summary "$tag"
     case $protocol in
-      vless)
+      vless|shadowsocks)
+        if [[ $protocol == shadowsocks ]] && ! inbound_configuration_is_supported "$tag"; then
+          warn "不支持的 Shadowsocks 入站配置。"
+          return
+        fi
         security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
-        if [[ $security == tls ]]; then
+        if [[ $protocol == vless && $security == tls ]]; then
           ui_menu_group "交付与用户"
           ui_menu_item 1 "分享信息"
           ui_menu_item 2 "用户管理"
@@ -9319,9 +9446,9 @@ traffic_user_menu() {
   local tag label choice current_bytes used quota enabled status id period_start record start end day clock index selected inventory conflict
   local -a user_labels=()
   ensure_config
-  select_inbound tag '^(vless|socks|http)$' || return 0
+  select_inbound tag '^(vless|shadowsocks|socks|http)$' || return 0
   if ! jq -e --arg tag "$tag" '.inbounds[]? | select(.tag==$tag and (
-    (.protocol=="vless" and ((.settings.clients // [])|length)>0) or
+    ((.protocol=="vless" or .protocol=="shadowsocks") and ((.settings.clients // [])|length)>0) or
     (.protocol=="socks" and .settings.auth=="password" and ((.settings.accounts // .settings.users // [])|length)>0) or
     (.protocol=="http" and ((.settings.accounts // .settings.users // [])|length)>0)
   ))' "$CONFIG_FILE" >/dev/null; then
@@ -9494,7 +9621,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl bbr                        启用/关闭 BBR（交互式）
   xrayctl version
 
-支持协议: VLESS、SOCKS5、HTTP
+支持协议: VLESS、SS2022、SOCKS5、HTTP
 支持传输: RAW、XHTTP、WebSocket；支持 TLS 和 REALITY。
 EOF
 }
