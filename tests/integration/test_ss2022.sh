@@ -110,6 +110,7 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   XRAYCTL_PLATFORM=systemd
   SYSTEMCTL_LOG="$TEST_ROOT/systemctl.log"
   systemctl() {
+    local IFS=' '
     printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
     case ${1-} in
       is-active|is-enabled) return 0 ;;
@@ -255,6 +256,47 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   dispatch obfs uninstall --yes >/dev/null
   [[ ! -e $XRAYCTL_OBFS_SERVER_BIN ]]
   assert_eq "null" "$(jq -r '.managedResources.simpleObfsPackage' "$META_FILE")"
+)
+
+# Regression test: SIGHUP during Xray restart must not abort obfs service setup.
+(
+  XRAYCTL_PLATFORM=systemd
+  SYSTEMCTL_LOG="$TEST_ROOT/sighup-systemctl.log"
+  : >"$SYSTEMCTL_LOG"
+  systemctl() {
+    local IFS=' '
+    printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+    case ${1-} in
+      is-active|is-enabled) return 0 ;;
+      list-unit-files) printf 'xray.service enabled\n' ;;
+    esac
+    return 0
+  }
+  service_is_active() { return 0; }
+  service_exists() { return 0; }
+  restart_service() { kill -HUP "$BASHPID"; }
+  printf '#!/bin/sh\nexit 0\n' >"$XRAYCTL_OBFS_SERVER_BIN"
+  chmod 755 "$XRAYCTL_OBFS_SERVER_BIN"
+  jq -n '{inbounds:[],outbounds:[{protocol:"freedom",tag:"direct"}],routing:{rules:[]}}' >"$CONFIG_FILE"
+  printf '%s\n' '{"schema":4,"inbounds":{},"certificates":{},"managedResources":{},"migrations":{"legacyCertScanV1":true,"legacyCertbotSymlinkV1":true}}' >"$META_FILE"
+
+  next_obfs_choice=2
+  prompt_value() {
+    case ${2-} in
+      "混淆域名 (obfs-host)") printf -v "$1" '%s' "hup.example.com" ;;
+      "监听地址") printf -v "$1" '%s' "0.0.0.0" ;;
+      *) printf -v "$1" '%s' "${3-}" ;;
+    esac
+  }
+  next_tag=ss2022-hup
+  next_port=39192
+  next_public_host=edge.example.com
+  next_user=alice
+  dispatch inbound add >"$TEST_ROOT/hup-add.out"
+
+  unit_file="$SYSTEMD_UNIT_DIR/xrayctl-obfs-ss2022-hup.service"
+  [[ -f $unit_file ]]
+  grep -Fq 'restart xrayctl-obfs-ss2022-hup' "$SYSTEMCTL_LOG"
 )
 
 pass "SS2022 menu order, validated config, independent keys, user lifecycle, HTTP obfs, and share links"

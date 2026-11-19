@@ -380,8 +380,9 @@ _state_cleanup_transaction_files() {
 }
 
 state_commit() {
+  trap '' HUP PIPE
   local candidate=$1 meta_mutator=${2-} old_active=0 traffic_locked=0
-  local config_snapshot meta_snapshot meta_candidate=""
+  local config_snapshot meta_snapshot meta_candidate="" obfs_ext_port="" obfs_port_bound_before=0
   if [[ -n $meta_mutator ]]; then shift 2; else shift; fi
   if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} == 1 ]]; then
     [[ -r $CONFIG_FILE && -r $META_FILE ]] || { error "用户额度配置事务缺少现有配置或 metadata。"; return 1; }
@@ -449,6 +450,18 @@ state_commit() {
   fi
   ui_step_done ok
 
+  if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
+    obfs_ext_port=$(jq -r '.port // empty' <<<"${3-}" 2>/dev/null || true)
+    if [[ -n $obfs_ext_port ]] && jq -e --argjson port "$obfs_ext_port" '[.inbounds[]? | select(.port==$port)] | length>0' "$config_snapshot" >/dev/null 2>&1; then
+      obfs_port_bound_before=1
+    fi
+    if ((obfs_port_bound_before == 0)); then
+      obfs_service_setup "$1" 1 || true
+    else
+      obfs_service_setup "$1" 0 || true
+    fi
+  fi
+
   if ((old_active)); then
     ui_step 3 3 "重启 Xray 服务使变更生效"
     if ! restart_service; then
@@ -456,11 +469,21 @@ state_commit() {
       error "重启失败，正在回滚配置和 metadata。"
       _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
       restart_service || true
+      if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
+        if jq -e --arg tag "$1" '.inbounds[$tag].obfs.enabled==true' "$meta_snapshot" >/dev/null 2>&1; then
+          obfs_service_setup "$1" 1 || true
+        else
+          obfs_service_remove "$1" 2>/dev/null || true
+        fi
+      fi
       ((traffic_locked == 0)) || traffic_lock_release
       _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
       return 1
     fi
     ui_step_done ok
+    if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
+      obfs_service_setup "$1" 1 || true
+    fi
   else
     ui_step 3 3 "检查服务状态"
     ui_step_done ok "服务未运行，无需重启"
@@ -486,6 +509,7 @@ state_commit() {
 apply_candidate() { state_commit "$1"; }
 
 state_apply_candidate_file() {
+  trap '' HUP PIPE
   local candidate=$1 operation=$2 rc normalized="" address
   shift 2
   if traffic_user_managed_config; then

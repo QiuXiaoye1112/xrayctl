@@ -73,11 +73,13 @@ fi
 
 _ui_put() {
   local style=$1 text=$2 fd=${3:-1}
-  if [[ -t $fd && -z ${NO_COLOR:-} ]]; then
-    printf '%s%s%s' "$style" "$text" "$_ANSI_RESET" >&"$fd"
-  else
-    printf '%s' "$text" >&"$fd"
-  fi
+  local out=$text
+  [[ -t $fd && -z ${NO_COLOR:-} ]] && out="${style}${text}${_ANSI_RESET}"
+  case $fd in
+    2) printf '%s' "$out" >&2 2>/dev/null || true ;;
+    1) printf '%s' "$out" 2>/dev/null || true ;;
+    *) printf '%s' "$out" >&"$fd" || true ;;
+  esac
 }
 
 ui_width() {
@@ -226,9 +228,9 @@ ui_progress_enabled() {
 ui_step() {
   local step=$1 total=$2 label=$3
   ui_progress_enabled || return 0
-  printf '  ' >&2
+  printf '  ' >&2 2>/dev/null || true
   _ui_put "$_ANSI_CYAN" "[${step}/${total}]" 2
-  printf ' %s ... ' "$label" >&2
+  printf ' %s ... ' "$label" >&2 2>/dev/null || true
 }
 
 ui_step_done() {
@@ -240,10 +242,10 @@ ui_step_done() {
     fail) _ui_put "$_ANSI_RED" '✗' 2 ;;
   esac
   if [[ -n $detail ]]; then
-    printf ' ' >&2
+    printf ' ' >&2 2>/dev/null || true
     _ui_put "$_ANSI_DIM" "$detail" 2
   fi
-  printf '\n' >&2
+  printf '\n' >&2 2>/dev/null || true
 }
 
 print_notice() {
@@ -262,7 +264,7 @@ print_notice() {
     done <<<"$detail"
   done
   # Emit one block on one stream so details cannot overtake their warning.
-  printf '%s' "$rendered"
+  printf '%s' "$rendered" 2>/dev/null || true
 }
 
 info()    { print_notice "信息" "$C_GREEN" "${1-}" "${@:2}"; }
