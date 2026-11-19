@@ -273,10 +273,11 @@ xray_installed() { [[ -x $XRAY_BIN ]]; }
 require_xray_installed() { xray_installed || die "Xray 尚未安装，请先自行安装 Xray"; }
 
 validate_supported_capabilities() {
-  jq -e '
+  jq -e --arg ss2022Method "$SS2022_METHOD" "$SS2022_INBOUND_JQ"'
     all(.inbounds[];
       if .protocol=="vless" then
         ((.streamSettings.network // .streamSettings.method // "raw") as $method | ["raw","xhttp","websocket"] | index($method)) != null
+      elif .protocol=="shadowsocks" then ss2022_inbound
       else .protocol=="socks" or .protocol=="http"
       end
     )' "$1" >/dev/null 2>&1

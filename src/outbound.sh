@@ -320,13 +320,13 @@ list_inbound_outbound_status() {
   printf '入站\t默认出站\t公共域名规则\t用户数\n'
   jq -r '
     (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native | (.outbounds // []) as $outbounds |
-    .inbounds[]? | select(.protocol=="vless" or .protocol=="socks" or .protocol=="http") |
+    .inbounds[]? | select(.protocol=="vless" or .protocol=="shadowsocks" or .protocol=="socks" or .protocol=="http") |
     .tag as $tag | .protocol as $protocol |
     [$tag,
      (([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native) as $route |
        ([$outbounds[]? | select(.tag==$route) | .sendThrough][0] // $route)),
      ([$rules[]? | select(((.ruleTag // "")|startswith("xrayctl-domain:")) and .inboundTag==[$tag])] | length | tostring),
-     (if $protocol=="vless" then (.settings.clients // [] | length)
+     (if ($protocol=="vless" or $protocol=="shadowsocks") then (.settings.clients // [] | length)
       elif $protocol=="socks" and .settings.auth=="password" then ((.settings.accounts // .settings.users // []) | length)
       elif $protocol=="http" then ((.settings.accounts // .settings.users // []) | length)
       else 0 end | tostring)] | @tsv
@@ -459,7 +459,7 @@ select_outbound() {
 assign_outbound() {
   ensure_config
   local inbound=${1-} outbound=${2-} selected_local_ip="" rule_tag tmp
-  [[ -n $inbound ]] || select_inbound inbound '^(vless|socks|http)$' || return
+  [[ -n $inbound ]] || select_inbound inbound '^(vless|shadowsocks|socks|http)$' || return
   inbound_exists "$inbound" || die "找不到入站：$inbound"
   inbound_require_supported_configuration "$inbound"
   [[ -n $outbound ]] || select_outbound outbound 1 1 selected_local_ip || return
@@ -485,7 +485,7 @@ assign_outbound() {
 remove_inbound_default_outbound() {
   ensure_runtime_dependencies outbound-inbound-unset; ensure_config
   local inbound=${1-} rule_tag tmp
-  [[ -n $inbound ]] || select_inbound inbound '^(vless|socks|http)$' || return 1
+  [[ -n $inbound ]] || select_inbound inbound '^(vless|shadowsocks|socks|http)$' || return 1
   inbound_exists "$inbound" || die "找不到入站：$inbound"
   rule_tag="xrayctl-outbound:${inbound}"
   tmp=$(temp_file) || return 1
@@ -501,10 +501,10 @@ _outbound_user_identity() {
   local __var=$1 inbound=$2 label=$3 protocol resolved_identity identity_count
   protocol=$(jq -r --arg inbound "$inbound" '.inbounds[]? | select(.tag==$inbound) | .protocol' "$CONFIG_FILE") || return 1
   case $protocol in
-    vless)
+    vless|shadowsocks)
       resolved_identity=$(jq -r --arg inbound "$inbound" --arg user_label "$label" \
         '.inbounds[]? | select(.tag==$inbound) | .settings.clients[]? | select((.xrayctlLabel // .email)==$user_label) | .email // empty' "$CONFIG_FILE") || return 1
-      [[ -n $resolved_identity ]] || { warn "该 VLESS 用户没有 Xray email 身份，无法安全添加用户路由。"; return 1; }
+      [[ -n $resolved_identity ]] || { warn "该用户没有 Xray email 身份，无法安全添加用户路由。"; return 1; }
       ;;
     socks)
       jq -e --arg inbound "$inbound" '.inbounds[]? | select(.tag==$inbound and .protocol=="socks" and .settings.auth=="password")' "$CONFIG_FILE" >/dev/null || { warn "无认证 SOCKS5 入站不支持用户路由。"; return 1; }
@@ -518,7 +518,7 @@ _outbound_user_identity() {
   [[ -n $resolved_identity ]] || { warn "找不到入站 ${inbound} 的用户 ${label}。"; return 1; }
   identity_count=$(jq -r --arg inbound "$inbound" --arg identity "$resolved_identity" '
     [.inbounds[]? | select(.tag==$inbound) |
-      if .protocol=="vless" then [.settings.clients[]? | select(.email==$identity)]
+      if (.protocol=="vless" or .protocol=="shadowsocks") then [.settings.clients[]? | select(.email==$identity)]
       else [(.settings.accounts // .settings.users // [])[]? | select(.user==$identity)] end] | flatten | length
   ' "$CONFIG_FILE") || return 1
   [[ $identity_count == 1 ]] || { warn "该入站中的用户身份不唯一，拒绝创建可能同时匹配多个用户的规则。"; return 1; }
@@ -750,7 +750,7 @@ outbound_user_list() {
       ' "$CONFIG_FILE")"
   done < <(jq -r --arg inbound "$inbound" '
     .inbounds[]? | select(.tag==$inbound) |
-    if .protocol=="vless" then .settings.clients[]? | (.xrayctlLabel // .email // empty)
+    if (.protocol=="vless" or .protocol=="shadowsocks") then .settings.clients[]? | (.xrayctlLabel // .email // empty)
     elif .protocol=="socks" and .settings.auth=="password" then (.settings.accounts // .settings.users // [])[]? | .user
     elif .protocol=="http" then (.settings.accounts // .settings.users // [])[]? | .user else empty end
   ' "$CONFIG_FILE")
@@ -1339,7 +1339,7 @@ add_domain_rule() {
     normalized_domains=$(_normalize_domain_list "$domain") || die "域名格式无效。"
     outbound_exists "$outbound" || [[ $outbound == direct ]] || die "找不到出站：$outbound"
   else
-    select_inbound inbound '^(vless|socks|http)$' || return
+    select_inbound inbound '^(vless|shadowsocks|socks|http)$' || return
   fi
   if ((cli == 0)); then
     choose choice "匹配方式" "域名及所有子域名" "仅精确域名" || return

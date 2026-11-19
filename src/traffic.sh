@@ -13,31 +13,40 @@ TRAFFIC_SYSTEMD_SERVICE="${SYSTEMD_UNIT_DIR}/xrayctl-traffic-collect.service"
 TRAFFIC_SYSTEMD_TIMER="${SYSTEMD_UNIT_DIR}/xrayctl-traffic-collect.timer"
 TRAFFIC_OPENRC_SERVICE="${OPENRC_INIT_DIR}/xrayctl-traffic-collect"
 
+# shellcheck disable=SC2016
+readonly TRAFFIC_EMAIL_CLIENTS_JQ='
+  def email_client_inbound:
+    .protocol=="vless" or
+    (.protocol=="shadowsocks" and .settings.method==$ss2022Method and (.settings.clients|type)=="array");
+'
+
 traffic_user_managed_config() {
   [[ -r $CONFIG_FILE ]] && jq -e '.xrayctlUserStats.enabled==true' "$CONFIG_FILE" >/dev/null 2>&1
 }
 
 traffic_user_has_clients() {
   local file=${1:-$CONFIG_FILE}
-  [[ -r $file ]] && jq -e '[.inbounds[]? | select(
-    (.protocol=="vless" and ((.settings.clients // [])|length)>0) or
+  [[ -r $file ]] && jq -e --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
+  [.inbounds[]? | select(
+    (email_client_inbound and ((.settings.clients // [])|length)>0) or
     (.protocol=="socks" and .settings.auth=="password" and ((.settings.accounts // .settings.users // [])|length)>0) or
     (.protocol=="http" and ((.settings.accounts // .settings.users // [])|length)>0)
   )] | length>0' "$file" >/dev/null 2>&1
 }
 
 # Xray StatsService uses the email field for every authenticated inbound user.
-# VLESS has a private xrayctl-generated email; HTTP/SOCKS expose their actual
+# VLESS and SS2022 use private xrayctl-generated emails; HTTP/SOCKS use the actual
 # account username as that email. The same name on two accounts is ambiguous
 # because the core aggregates both counters globally.
 traffic_user_inventory_json() {
   local file=${1:-$CONFIG_FILE}
-  jq -c '
+  jq -c \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     [ .inbounds[]? as $inbound |
-      if $inbound.protocol=="vless" then
+      if ($inbound | email_client_inbound) then
         $inbound.settings.clients[]? |
         select(.xrayctlLabel != null and (.email|type)=="string") |
-        {tag:$inbound.tag,id:.email,label:.xrayctlLabel,protocol:"vless"}
+        {tag:$inbound.tag,id:.email,label:.xrayctlLabel,protocol:$inbound.protocol}
       elif $inbound.protocol=="socks" and $inbound.settings.auth=="password" then
         ($inbound.settings.accounts // $inbound.settings.users // [])[]? |
         select((.user|type)=="string" and (.user|length)>0 and (.pass|type)=="string" and (.pass|length)>0) |
@@ -61,12 +70,13 @@ traffic_user_inventory_json() {
 # the normal configuration transaction.
 traffic_user_prepare_identities() {
   local input=$1 output=$2 working next index client_index label original identity mappings='[]'
-  if ! jq -e '
+  if ! jq -e \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     def valid_label: . == null or (type=="string" and length<=128 and (test("[\\r\\n\\t]")|not) and (contains(">>>")|not));
-    [.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? |
+    [.inbounds[]? | select(email_client_inbound) | .settings.clients[]? |
       select((.email|valid_label|not) or (.xrayctlLabel|valid_label|not))] | length==0
   ' "$input" >/dev/null; then
-    warn "VLESS 用户名称含有无法安全处理的字符，请先修正配置。"
+    warn "VLESS/SS2022 用户名称含有无法安全处理的字符，请先修正配置。"
     return 1
   fi
   working=$(temp_file) || return 1
@@ -74,7 +84,11 @@ traffic_user_prepare_identities() {
   while IFS=$'\t' read -r index client_index; do
     [[ $index =~ ^[0-9]+$ && $client_index =~ ^[0-9]+$ ]] || continue
     original=$(jq -r --argjson i "$index" --argjson j "$client_index" '.inbounds[$i].settings.clients[$j].email // ""' "$working") || { rm -f "$working"; return 1; }
-    if [[ -n $original ]] && jq -e --arg email "$original" '[.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? | select(.xrayctlLabel != null and .email==$email)] | length>0' "$working" >/dev/null; then
+    if [[ -n $original ]] && jq -e --arg email "$original" \
+      --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
+      any(.inbounds[]? | select(email_client_inbound) | .settings.clients[]?;
+        .xrayctlLabel != null and .email==$email)
+    ' "$working" >/dev/null; then
       rm -f "$working"
       warn "用户名称与已有内部统计标识冲突，拒绝改变用户路由。"
       return 1
@@ -92,7 +106,11 @@ traffic_user_prepare_identities() {
       '.inbounds[$i].settings.clients[$j] |= (.xrayctlLabel=$user_label | .email=$identity)' "$working" >"$next" || { rm -f "$next" "$working"; return 1; }
     mv -f "$next" "$working" || { rm -f "$next" "$working"; return 1; }
     mappings=$(jq -nc --argjson maps "$mappings" --arg old "$original" --arg new "$identity" '$maps + [{old:$old,new:$new}]') || { rm -f "$working"; return 1; }
-  done < <(jq -r '.inbounds | to_entries[] | select(.value.protocol=="vless") | .key as $i | (.value.settings.clients // [] | to_entries[]) | select(.value.xrayctlLabel == null) | [$i,.key] | @tsv' "$input")
+  done < <(jq -r --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
+    .inbounds | to_entries[] | select(.value | email_client_inbound) | .key as $i |
+    (.value.settings.clients // [] | to_entries[]) |
+    select(.value.xrayctlLabel == null) | [$i,.key] | @tsv
+  ' "$input")
   # A regexp user rule can match the generated email even when it did not
   # match the original label. Refuse such a migration instead of silently
   # changing routing. Rules that matched an old name gain its new exact ID.
@@ -127,13 +145,14 @@ traffic_user_prepare_identities() {
   rm -f "$working"
   # Reject ambiguous pre-existing managed identifiers and labels, rather than
   # ever assigning one core counter to two users.
-  jq -e '
+  jq -e \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     [.. | objects | .email? | select(type=="string") | ascii_downcase] as $all |
-    ([.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? |
+    ([.inbounds[]? | select(email_client_inbound) | .settings.clients[]? |
       ((.xrayctlLabel|type)=="string" and (.xrayctlLabel|length)>0 and
        (.email|type)=="string" and (.email|test("^xrayctl-user-[0-9a-f]{32}$")) and
        (.email | ascii_downcase | . as $id | [$all[] | select(.==$id)] | length == 1))] | all) and
-    ([.inbounds[]? | select(.protocol=="vless") | [.settings.clients[]? | (.xrayctlLabel // .email)] | length == (unique|length)] | all)
+    ([.inbounds[]? | select(email_client_inbound) | [.settings.clients[]? | (.xrayctlLabel // .email)] | length == (unique|length)] | all)
   ' "$output" >/dev/null
 }
 
@@ -170,13 +189,14 @@ traffic_user_prepare_config() {
     warn "HTTP/SOCKS 用户名包含 StatsService 无法安全解析的字符；请先重命名账号。"
     return 1
   fi
-  jq --arg address "$address" --arg apiTag "$api_tag" '
+  jq --arg address "$address" --arg apiTag "$api_tag" \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     .stats=(.stats // {}) |
     .api=(.api // {}) | .api.tag=$apiTag | .api.listen=$address |
     .api.services=((.api.services // []) + ["StatsService"] | unique) |
     .xrayctlUserStats={enabled:true} |
     .policy=(.policy // {}) | .policy.levels=(.policy.levels // {}) |
-    reduce ([0] + [.inbounds[]? | select(.protocol=="vless") | .settings.clients[]? | (.level // 0)] | unique[]) as $level
+    reduce ([0] + [.inbounds[]? | select(email_client_inbound) | .settings.clients[]? | (.level // 0)] | unique[]) as $level
       (. ; .policy.levels[($level|tostring)]=((.policy.levels[($level|tostring)] // {}) + {statsUserUplink:true,statsUserDownlink:true}))
   ' "$identities" >"$output" || { rm -f "$identities"; return 1; }
   rm -f "$identities"
@@ -250,7 +270,9 @@ traffic_user_update_samples() {
   now=$(traffic_now)
   period_start=$(traffic_period_start "$now") || return 1
   inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
-  active_tags=$(jq -c '[.inbounds[]? | select(.protocol=="vless" or .protocol=="socks" or .protocol=="http") | .tag]' "$CONFIG_FILE") || return 1
+  active_tags=$(jq -c --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
+    [.inbounds[]? | select(email_client_inbound or .protocol=="socks" or .protocol=="http") | .tag]
+  ' "$CONFIG_FILE") || return 1
   if jq -e --arg now "$now" '
     .userLastCollectedAt as $last |
     any(.inbounds[]?.users[]?; .limit.enabled==true and
@@ -322,10 +344,11 @@ traffic_user_collect_locked() {
   address=$(jq -r 'if .xrayctlUserStats.enabled==true then (.api.listen // "") else "" end' "$CONFIG_FILE") || return 1
   [[ -n $address ]] || return 0
   inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || return 1
-  if ! jq -e --slurpfile traffic "$TRAFFIC_FILE" --argjson inventory "$inventory" '
+  if ! jq -e --slurpfile traffic "$TRAFFIC_FILE" --argjson inventory "$inventory" \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     $traffic[0] as $state |
     [.. | objects | .email? | select(type=="string") | ascii_downcase] as $all |
-    [.inbounds[]? | select(.protocol=="vless") | .tag as $tag | .settings.clients[]? | . as $client |
+    [.inbounds[]? | select(email_client_inbound) | .tag as $tag | .settings.clients[]? | . as $client |
       ((.xrayctlLabel|type)=="string" and (.xrayctlLabel|length)>0 and (.email|type)=="string" and (.email|test("^xrayctl-user-[0-9a-f]{32}$")) and
         (.email | ascii_downcase | . as $id | [$all[] | select(.==$id)] | length==1) and
         ($state.inbounds[$tag].users[($client.email // "" | tostring)] != null or
@@ -336,7 +359,13 @@ traffic_user_collect_locked() {
     warn "用户配置包含未登记或无效的统计标识，本次用户采集已跳过。"
     return 1
   fi
-  before=$(traffic_user_core_epoch) || { warn "无法确定 Xray 进程身份，用户流量采集已跳过。"; return 1; }
+  if ! before=$(traffic_user_core_epoch); then
+    # A deliberately stopped service has no process or user counters to sample.
+    # Keep the previous user totals and let inbound collection finish normally.
+    platform_service_is_stopped && return 0
+    warn "无法确定 Xray 进程身份，用户流量采集已跳过。"
+    return 1
+  fi
   samples=$(traffic_user_read_samples "$address") || { warn "Xray 用户统计 API 不可用，本次保留已有用户流量及限制。"; return 1; }
   after=$(traffic_user_core_epoch) || { warn "无法确认 Xray 进程身份，用户流量采集已跳过。"; return 1; }
   [[ $before == "$after" ]] || { warn "采集期间 Xray 已重启，本次用户流量采集已跳过。"; return 1; }
@@ -395,9 +424,10 @@ traffic_user_rename_client_record_locked() {
 # label identifies exactly one record. Never guess when the match is unclear.
 traffic_user_recover_identities() {
   local input=$1 output=$2
-  jq --slurpfile state "$TRAFFIC_FILE" '
+  jq --slurpfile state "$TRAFFIC_FILE" \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     $state[0] as $s |
-    .inbounds |= map(if .protocol=="vless" then
+    .inbounds |= map(if email_client_inbound then
       .tag as $tag | .settings.clients |= map(. as $client |
         if .xrayctlLabel == null or $s.inbounds[$tag].users[($client.email // "")] != null then .
         else
@@ -533,10 +563,10 @@ traffic_user_ensure_configured() {
 
 traffic_user_select() {
   local __tag=$1 __label=$2 picked_tag=${3-} picked_label=${4-} protocol inventory
-  [[ -n $picked_tag ]] || select_inbound picked_tag '^(vless|socks|http)$' || return 1
+  [[ -n $picked_tag ]] || select_inbound picked_tag '^(vless|shadowsocks|socks|http)$' || return 1
   protocol=$(jq -r --arg tag "$picked_tag" '.inbounds[]? | select(.tag==$tag) | .protocol' "$CONFIG_FILE") || return 1
   case $protocol in
-    vless) ;;
+    vless|shadowsocks) ;;
     socks)
       jq -e --arg tag "$picked_tag" '.inbounds[]? | select(.tag==$tag and .protocol=="socks" and .settings.auth=="password" and ((.settings.accounts // .settings.users // [])|length)>0)' "$CONFIG_FILE" >/dev/null || { warn "该 SOCKS5 入站没有已启用的用户名密码账号。"; return 1; }
       ;;
@@ -557,9 +587,10 @@ traffic_user_select() {
 }
 
 traffic_user_id() {
-  jq -r --arg tag "$1" --arg user_label "$2" '
+  jq -r --arg tag "$1" --arg user_label "$2" \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     .inbounds[]? | select(.tag==$tag) |
-    if .protocol=="vless" then
+    if email_client_inbound then
       .settings.clients[]? | select((.xrayctlLabel // .email)==$user_label) | .email
     elif .protocol=="socks" and .settings.auth=="password" then
       (.settings.accounts // .settings.users // [])[]? | select(.user==$user_label) | .user
@@ -722,9 +753,10 @@ traffic_users_show() {
     print_table_cell_right "$used" 10; printf ' / '
     print_table_cell "$quota" 10; printf '%s%s  ' "$C_DIM" "$C_RESET"
     print_table_cell "$status_disp" 8; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$bar"
-  done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --argjson inventory "$inventory" --arg periodStart "$period_start" --arg filter "$filter" '
+  done < <(jq -r --slurpfile state "$TRAFFIC_FILE" --argjson inventory "$inventory" --arg periodStart "$period_start" --arg filter "$filter" \
+    --arg ss2022Method "$SS2022_METHOD" "$TRAFFIC_EMAIL_CLIENTS_JQ"'
     $state[0] as $s | .inbounds[]? | select($filter=="" or .tag==$filter) | .tag as $tag | .protocol as $protocol |
-    if $protocol=="vless" then
+    if email_client_inbound then
       if ((.settings.clients // [])|length)==0 then [$tag,$protocol,"-","-",0,0,0,"-","-",false,false] | @tsv
       else .settings.clients[] | .email as $id | ($s.inbounds[$tag].users[$id] // {}) as $u |
         [$tag,$protocol,$id,(.xrayctlLabel // .email // ""),($u.cycles[$periodStart] // 0),
@@ -1298,7 +1330,7 @@ traffic_rules_clear() {
 }
 
 traffic_protocols_for_inbound() {
-  case $1 in socks) printf '%s\n' tcp udp;; *) printf '%s\n' tcp;; esac
+  case $1 in shadowsocks|socks) printf '%s\n' tcp udp;; *) printf '%s\n' tcp;; esac
 }
 
 traffic_restore_nft_rules() {

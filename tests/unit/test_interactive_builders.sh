@@ -55,12 +55,12 @@ prompt_public_host() { printf -v "$1" '%s' 203.0.113.10; }
 prompt_client_label() { printf -v "$1" '%s' user; }
 prompt_optional_value() { printf -v "$1" '%s' user; }
 prompt_secret() { printf -v "$1" '%s' password; }
-for protocol_choice in 1 2 3; do
+for protocol_choice in 1 2 3 4; do
   set_choices "$protocol_choice"
   inbound="" host="" public_key=""
   build_inbound inbound host public_key
   assert_eq "0.0.0.0" "$(jq -r .listen <<<"$inbound")" "default listener must accept external connections for every protocol"
-  expected=(unused vless socks http)
+  expected=(unused vless shadowsocks socks http)
   assert_eq "${expected[$protocol_choice]}" "$(jq -r .protocol <<<"$inbound")" "protocol menu choice routed incorrectly"
 done
 

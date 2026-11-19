@@ -53,7 +53,7 @@ else
   done
 fi
 
-for protocol in vless socks http; do
+for protocol in vless shadowsocks socks http; do
   rg -q "^protocol_build_${protocol}\\(\\)" "${REPO_ROOT}/src/protocols.sh" \
     || fail "missing protocol builder: ${protocol}"
 done

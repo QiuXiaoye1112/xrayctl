@@ -51,6 +51,11 @@ _share_print_params_card() {
           ;;
       esac
       ;;
+    shadowsocks)
+      ui_card_kv "协议与传输" "SS2022 · TCP/UDP" 12
+      ui_card_kv "加密方式" "$SS2022_METHOD" 12
+      ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      ;;
     socks)
       auth=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth // "noauth"' "$CONFIG_FILE")
       ui_card_kv "协议类型" "SOCKS5 ($([[ $auth == password ]] && printf '账号密码认证' || printf '无认证'))" 12
@@ -100,7 +105,7 @@ link_query_for_stream() {
 
 print_links() {
   ensure_config; init_meta
-  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link idx=0
+  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link server_key idx=0
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
@@ -119,6 +124,15 @@ print_links() {
         link="vless://${id}@${uri_host}:${port}?${query}#$(url_encode "${tag}-${label}")"
         print_share_entry "$label" "链接" "$link" "$idx"
       done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", (.id // ""), "\u0000"' "$CONFIG_FILE")
+      ;;
+    shadowsocks)
+      server_key=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.password' "$CONFIG_FILE")
+      while IFS= read -r -d '' label && IFS= read -r -d '' password; do
+        [[ -z $filter || $label == "$filter" ]] || continue
+        idx=$((idx + 1))
+        link="ss://${SS2022_METHOD}:$(url_encode "${server_key}:${password}")@${uri_host}:${port}#$(url_encode "${tag}-${label}")"
+        print_share_entry "$label" "链接" "$link" "$idx"
+      done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", .password, "\u0000"' "$CONFIG_FILE")
       ;;
     socks)
       if [[ $(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth' "$CONFIG_FILE") == password ]]; then
@@ -155,14 +169,14 @@ print_subscription() {
   ensure_config; init_meta
   local tag=${1-} links="" current_tag current_links
   if [[ -n $tag ]]; then
-    links=$(print_links "$tag" "" | awk '/^链接: (vless|socks5|http):\/\// {sub(/^链接: /, ""); print}')
+    links=$(print_links "$tag" "" | awk '/^链接: (vless|ss|socks5|http):\/\// {sub(/^链接: /, ""); print}')
   else
     while IFS= read -r current_tag; do
-      current_links=$(print_links "$current_tag" "" | awk '/^链接: (vless|socks5|http):\/\// {sub(/^链接: /, ""); print}')
+      current_links=$(print_links "$current_tag" "" | awk '/^链接: (vless|ss|socks5|http):\/\// {sub(/^链接: /, ""); print}')
       [[ -n $current_links ]] || continue
       [[ -z $links ]] || links+=$'\n'
       links+=$current_links
-    done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|socks|http)$"))|.tag' "$CONFIG_FILE")
+    done < <(share_inbound_tags)
   fi
   [[ -n $links ]] || die "没有可生成订阅的代理分享链接。"
   printf '%s' "$links" | base64_nowrap
@@ -175,8 +189,16 @@ print_all_share_links() {
   while IFS= read -r tag; do
     found=1
     print_links "$tag" ""
-  done < <(jq -r '.inbounds[]|select(.protocol|test("^(vless|socks|http)$"))|.tag' "$CONFIG_FILE")
+  done < <(share_inbound_tags)
   ((found == 1)) || { warn "没有可生成分享链接的入站。"; return 0; }
+}
+
+share_inbound_tags() {
+  jq -r --arg ss2022Method "$SS2022_METHOD" "$SS2022_INBOUND_JQ"'
+    .inbounds[] |
+    select(if .protocol=="shadowsocks" then ss2022_inbound else (.protocol|test("^(vless|socks|http)$")) end) |
+    .tag
+  ' "$CONFIG_FILE"
 }
 
 

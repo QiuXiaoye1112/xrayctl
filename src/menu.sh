@@ -24,13 +24,13 @@ outbound_menu() {
 }
 
 _outbound_inbound_tags() {
-  jq -r '.inbounds[] | select(.protocol|test("^(vless|socks|http)$")) | .tag' "$CONFIG_FILE"
+  jq -r '.inbounds[] | select(.protocol|test("^(vless|shadowsocks|socks|http)$")) | .tag' "$CONFIG_FILE"
 }
 
 _outbound_user_labels() {
   jq -r --arg inbound "$1" '
     .inbounds[]? | select(.tag==$inbound) |
-    if .protocol=="vless" then .settings.clients[]? | (.xrayctlLabel // .email // empty)
+    if (.protocol=="vless" or .protocol=="shadowsocks") then .settings.clients[]? | (.xrayctlLabel // .email // empty)
     elif .protocol=="socks" and .settings.auth=="password" then (.settings.accounts // .settings.users // [])[]? | .user
     elif .protocol=="http" then (.settings.accounts // .settings.users // [])[]? | .user
     else empty end
@@ -508,9 +508,13 @@ manage_inbound_menu() {
     ui_page "入站 · ${tag}"
     show_node_summary "$tag"
     case $protocol in
-      vless)
+      vless|shadowsocks)
+        if [[ $protocol == shadowsocks ]] && ! inbound_configuration_is_supported "$tag"; then
+          warn "不支持的 Shadowsocks 入站配置。"
+          return
+        fi
         security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
-        if [[ $security == tls ]]; then
+        if [[ $protocol == vless && $security == tls ]]; then
           ui_menu_group "交付与用户"
           ui_menu_item 1 "分享信息"
           ui_menu_item 2 "用户管理"
@@ -792,9 +796,9 @@ traffic_user_menu() {
   local tag label choice current_bytes used quota enabled status id period_start record start end day clock index selected inventory conflict
   local -a user_labels=()
   ensure_config
-  select_inbound tag '^(vless|socks|http)$' || return 0
+  select_inbound tag '^(vless|shadowsocks|socks|http)$' || return 0
   if ! jq -e --arg tag "$tag" '.inbounds[]? | select(.tag==$tag and (
-    (.protocol=="vless" and ((.settings.clients // [])|length)>0) or
+    ((.protocol=="vless" or .protocol=="shadowsocks") and ((.settings.clients // [])|length)>0) or
     (.protocol=="socks" and .settings.auth=="password" and ((.settings.accounts // .settings.users // [])|length)>0) or
     (.protocol=="http" and ((.settings.accounts // .settings.users // [])|length)>0)
   ))' "$CONFIG_FILE" >/dev/null; then
@@ -967,7 +971,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl bbr                        启用/关闭 BBR（交互式）
   xrayctl version
 
-支持协议: VLESS、SOCKS5、HTTP
+支持协议: VLESS、SS2022、SOCKS5、HTTP
 支持传输: RAW、XHTTP、WebSocket；支持 TLS 和 REALITY。
 EOF
 }

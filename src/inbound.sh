@@ -8,6 +8,10 @@ inbound_configuration_is_supported() {
   if protocol_supports_stream "$protocol"; then
     method=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.network // .streamSettings.method // "raw"' "$CONFIG_FILE")
     case $method in raw|xhttp|websocket) ;; *) return 1;; esac
+  elif [[ $protocol == shadowsocks ]]; then
+    jq -e --arg tag "$tag" --arg ss2022Method "$SS2022_METHOD" "$SS2022_INBOUND_JQ"'
+      .inbounds[] | select(.tag==$tag) | ss2022_inbound
+    ' "$CONFIG_FILE" >/dev/null
   fi
 }
 
@@ -136,19 +140,22 @@ list_inbounds() {
   print_table_cell_clipped "标签" 18; printf '  '
   print_table_cell_clipped "协议" 6; printf '  '
   print_table_cell "端口" 6; printf '  '
-  print_table_cell_clipped "传输" 6; printf '  '
+  print_table_cell_clipped "传输" 7; printf '  '
   print_table_cell_clipped "安全" 8; printf '  '
   print_table_cell "用户" 4; printf '  监听%s\n' "$C_RESET"
-  jq -r '.inbounds | to_entries[] |
-    [.value.tag,.value.protocol,(.value.port|tostring),
+  jq -r --arg ss2022Method "$SS2022_METHOD" '.inbounds | to_entries[] |
+    [.value.tag,(if .value.protocol=="shadowsocks" then
+       (if .value.settings.method==$ss2022Method then "SS2022" else "SS" end)
+     else .value.protocol end),(.value.port|tostring),
      (if .value.protocol=="vless" then
         (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end)
-      else "-" end),
+      elif .value.protocol=="shadowsocks" then (.value.settings.network // "tcp") else "-" end),
      (if .value.protocol=="vless" then (.value.streamSettings.security // "none")
       elif .value.protocol=="socks" then (.value.settings.auth // "noauth")
+      elif .value.protocol=="shadowsocks" then "AEAD"
       elif (((.value.settings.accounts // .value.settings.users // [])|length)>0) then "password"
       else "noauth" end),
-     (if .value.protocol=="vless" then (.value.settings.clients // [] | length)
+     (if (.value.protocol=="vless" or .value.protocol=="shadowsocks") then (.value.settings.clients // [] | length)
       else ((.value.settings.accounts // .settings.users // []) | length) end | tostring),
      (.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port method security users listen; do
@@ -161,7 +168,7 @@ list_inbounds() {
         printf '  '; print_table_cell_clipped "$tag" 18; printf '%s%s  ' "$C_DIM" "$C_RESET"
         print_table_cell_clipped "$protocol" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
         print_table_cell "$port" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
-        print_table_cell_clipped "$method" 6; printf '%s%s  ' "$C_DIM" "$C_RESET"
+        print_table_cell_clipped "$method" 7; printf '%s%s  ' "$C_DIM" "$C_RESET"
         print_table_cell "$sec_disp" 8; printf '%s%s  ' "$C_DIM" "$C_RESET"
         print_table_cell "$users" 4; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$listen"
       done
@@ -314,8 +321,8 @@ http_inbound_has_auth() {
 
 list_clients() {
   ensure_config
-  local tag=${1-} protocol count number label credential
-  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  local tag=${1-} protocol count number label credential credential_field credential_name
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
   heading "${tag} 的用户"
@@ -327,10 +334,16 @@ list_clients() {
   if ((count == 0)); then info "还没有用户。"; return; fi
   printf '  %s' "$C_DIM"
   print_table_cell "序号" 5; printf '  '
-  print_table_cell "用户" 16; printf '  凭据 (%s)%s\n' "$([[ $protocol == vless ]] && printf 'UUID' || printf '密码')" "$C_RESET"
   case $protocol in
-    vless)
-      jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.xrayctlLabel // .value.email // "-"),.value.id]|@tsv' "$CONFIG_FILE" \
+    vless) credential_name=UUID ;;
+    shadowsocks) credential_name=密钥 ;;
+    *) credential_name=密码 ;;
+  esac
+  print_table_cell "用户" 16; printf '  凭据 (%s)%s\n' "$credential_name" "$C_RESET"
+  case $protocol in
+    vless|shadowsocks)
+      credential_field=$(protocol_client_credential_field "$protocol")
+      jq -r --arg tag "$tag" --arg field "$credential_field" '.inbounds[]|select(.tag==$tag)|.settings.clients|to_entries[]|[.key+1,(.value.xrayctlLabel // .value.email // "-"),.value[$field]]|@tsv' "$CONFIG_FILE" \
         | while IFS=$'\t' read -r number label credential; do
         printf '  '; print_table_cell "$number" 5; printf '%s%s  ' "$C_DIM" "$C_RESET"
         print_table_cell_clipped "$label" 16; printf '%s%s  %s\n' "$C_DIM" "$C_RESET" "$credential"
@@ -409,7 +422,7 @@ prompt_client_label() {
 add_client() {
   ensure_runtime_dependencies client-add; require_xray_installed; ensure_config
   local tag=${1-} protocol label id password user tmp flow method security
-  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
   prompt_client_label label "$tag" "用户名称/邮箱" "user-$(random_hex 2)" || return 1
@@ -420,6 +433,10 @@ add_client() {
       security=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings.security // "none"' "$CONFIG_FILE")
       [[ $method == raw && $security != none ]] && flow=xtls-rprx-vision || flow=""
       user=$(jq -n --arg id "$id" --arg email "$label" --arg flow "$flow" '{id:$id,email:$email,level:0}+(if $flow!="" then {flow:$flow} else {} end)')
+      ;;
+    shadowsocks)
+      password=$(protocol_generate_ss2022_key) || { error "无法生成 SS2022 用户密钥。"; return 1; }
+      user=$(jq -n --arg email "$label" --arg password "$password" '{email:$email,password:$password,level:0}')
       ;;
     socks|http) prompt_secret password "密码" "$(random_password)" || return 1; user=$(jq -n --arg user "$label" --arg pass "$password" '{user:$user,pass:$pass}') ;;
     *) die "${protocol} 不支持多用户。";;
@@ -442,10 +459,17 @@ add_client() {
 delete_client() {
   ensure_runtime_dependencies client-delete; ensure_config
   local tag=${1-} label=${2-} assume_yes=${3:-0} protocol tmp count managed_id=""
-  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks|socks|http)$' || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
   [[ -n $label ]] || select_client label "$tag" || return
+  if [[ $protocol == shadowsocks ]] && jq -e --arg tag "$tag" --arg label "$label" '
+    .inbounds[] | select(.tag==$tag) | .settings.clients |
+    all(.[]; (.xrayctlLabel // .email)==$label)
+  ' "$CONFIG_FILE" >/dev/null; then
+    error "SS2022 入站至少需要一个用户。要停用全部访问，请删除该入站。"
+    return 1
+  fi
   [[ $assume_yes == 1 ]] || confirm "从 ${tag} 删除用户 ${label}？" N || return 0
   tmp=$(temp_file)
   if [[ $protocol == socks || $protocol == http ]]; then
@@ -496,7 +520,7 @@ rotate_client_credential() {
     fi
   fi
   ensure_runtime_dependencies client-rotate; ensure_config
-  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks|socks|http)$' || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   [[ -n $label ]] || select_client label "$tag" || return
   client_label_exists "$tag" "$label" || die "找不到入站 ${tag} 的用户 ${label}。"
@@ -514,6 +538,11 @@ rotate_client_credential() {
         prompt_validated_value value "新 UUID" "$generated" validate_uuid "UUID 格式无效，请重新输入。" || { rm -f "$tmp"; return 1; }
       fi
       jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '(.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)|.id)=$value' "$CONFIG_FILE" >"$tmp" ;;
+    shadowsocks)
+      value=$(protocol_generate_ss2022_key) || { rm -f "$tmp"; error "无法生成 SS2022 用户密钥。"; return 1; }
+      jq --arg tag "$tag" --arg client_label "$label" --arg value "$value" '
+        (.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)|.password)=$value
+      ' "$CONFIG_FILE" >"$tmp" ;;
     socks|http)
       generated=$(random_password) || { rm -f "$tmp"; error "无法生成新密码，未修改凭据。"; return 1; }
       [[ -n $generated ]] || { rm -f "$tmp"; error "无法生成新密码，未修改凭据。"; return 1; }
@@ -537,7 +566,7 @@ rotate_client_credential() {
 rename_client() {
   ensure_runtime_dependencies client-rename; require_xray_installed; ensure_config
   local tag=${1-} old_label=${2-} new_label=${3-} protocol count tmp old_identity new_identity
-  [[ -n $tag ]] || select_inbound tag '^(vless|socks|http)$' || return
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks|socks|http)$' || return
   [[ -n $old_label ]] || select_client old_label "$tag" || return
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   inbound_require_supported_configuration "$tag"
