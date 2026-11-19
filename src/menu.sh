@@ -979,10 +979,7 @@ EOF
 dispatch() {
   local command=${1:-menu}; shift || true
   case $command in
-    menu)
-      if [[ ${XRAYCTL_TESTING:-0} == 1 || $(id -u) -eq 0 ]]; then traffic_runtime_ensure || true; fi
-      main_menu
-      ;;
+    menu) main_menu;;
     help|-h|--help) show_help;;
     version|-v|--version)
       printf 'xrayctl %s' "$XRAYCTL_VERSION"

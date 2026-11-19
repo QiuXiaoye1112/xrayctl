@@ -79,6 +79,22 @@ assert_eq "$before_restart_config" "$(jq -S . "$CONFIG_FILE")" "restart failure 
 assert_eq "$before_restart_meta" "$(jq -S . "$META_FILE")" "restart failure did not roll back metadata"
 service_is_active() { return 1; }
 
+# A running service must be sampled under the traffic lock before restart.
+(
+  TRAFFIC_FILE="$TEST_ROOT/traffic.json"
+  printf '%s\n' '{}' >"$TRAFFIC_FILE"
+  jq '.xrayctlUserStats.enabled=true' "$CONFIG_FILE" >"$candidate"
+  cp "$candidate" "$CONFIG_FILE"
+  jq '.log.loglevel="warning"' "$CONFIG_FILE" >"$candidate"
+  service_is_active() { return 0; }
+  traffic_lock_acquire() { TRAFFIC_LOCK_HELD=1; printf 'lock\n' >>"$TEST_ROOT/order"; }
+  traffic_lock_release() { TRAFFIC_LOCK_HELD=0; printf 'unlock\n' >>"$TEST_ROOT/order"; }
+  traffic_user_collect_locked() { printf 'collect\n' >>"$TEST_ROOT/order"; }
+  restart_service() { printf 'restart\n' >>"$TEST_ROOT/order"; }
+  apply_candidate "$candidate" >/dev/null
+  assert_eq $'lock\ncollect\nrestart\nunlock' "$(cat "$TEST_ROOT/order")" 'configuration restart did not sample user traffic first'
+)
+
 before_invalid=$(jq -S . "$CONFIG_FILE")
 printf '%s\n' '{"inbounds":"invalid","outbounds":[]}' >"$candidate"
 assert_failure apply_candidate "$candidate"
