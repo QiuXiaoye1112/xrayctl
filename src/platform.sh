@@ -58,6 +58,22 @@ platform_service_is_active() {
   esac
 }
 
+platform_service_is_stopped() {
+  local state status=0
+  case $(platform_init_system) in
+    systemd)
+      state=$(systemctl show "$SERVICE_NAME" -p ActiveState --value 2>/dev/null) || return 1
+      [[ $state == inactive ]]
+      ;;
+    openrc)
+      platform_service_exists || return 1
+      platform_openrc_service "$SERVICE_NAME" status >/dev/null 2>&1 || status=$?
+      [[ $status == 3 ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 platform_service_is_enabled() {
   case $(platform_init_system) in
     systemd) systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null ;;

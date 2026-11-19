@@ -359,7 +359,13 @@ traffic_user_collect_locked() {
     warn "用户配置包含未登记或无效的统计标识，本次用户采集已跳过。"
     return 1
   fi
-  before=$(traffic_user_core_epoch) || { warn "无法确定 Xray 进程身份，用户流量采集已跳过。"; return 1; }
+  if ! before=$(traffic_user_core_epoch); then
+    # A deliberately stopped service has no process or user counters to sample.
+    # Keep the previous user totals and let inbound collection finish normally.
+    platform_service_is_stopped && return 0
+    warn "无法确定 Xray 进程身份，用户流量采集已跳过。"
+    return 1
+  fi
   samples=$(traffic_user_read_samples "$address") || { warn "Xray 用户统计 API 不可用，本次保留已有用户流量及限制。"; return 1; }
   after=$(traffic_user_core_epoch) || { warn "无法确认 Xray 进程身份，用户流量采集已跳过。"; return 1; }
   [[ $before == "$after" ]] || { warn "采集期间 Xray 已重启，本次用户流量采集已跳过。"; return 1; }
