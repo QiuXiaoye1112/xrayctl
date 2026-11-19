@@ -72,7 +72,7 @@ set_choices 2 2
 inbound="" host="" public_key="" obfs_meta=""
 build_inbound inbound host public_key obfs_meta
 assert_eq "127.0.0.1" "$(jq -r .listen <<<"$inbound")" "obfs SS2022 inbound must bind localhost"
-assert_eq "tcp" "$(jq -r .settings.network <<<"$inbound")" "obfs SS2022 inbound must be TCP-only"
+assert_eq "tcp,udp" "$(jq -r .settings.network <<<"$inbound")" "obfs SS2022 inbound must support TCP and UDP"
 assert_eq "www.microsoft.com" "$(jq -r .host <<<"$obfs_meta")" "obfs metadata must preserve obfs-host"
 
 pass "all protocol, security, and transport interactive builder choices are covered"
