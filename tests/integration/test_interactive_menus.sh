@@ -201,7 +201,8 @@ done
 cloudflare_credentials_menu() { record cloudflare_credentials_menu; }
 exercise_menu_route certificate_menu 5 cloudflare_credentials_menu
 
-for spec in '1 toggle_service_running' '2 service_action restart' '3 toggle_service_startup' '4 show_logs 100' '6 manage_bbr'; do
+obfs_menu() { record obfs_menu; }
+for spec in '1 toggle_service_running' '2 service_action restart' '3 toggle_service_startup' '4 show_logs 100' '6 manage_bbr' '7 obfs_menu'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route service_menu "$choice" "$action"
 done
 traffic_limit_menu() { record traffic_limit_menu; }
@@ -244,6 +245,9 @@ if ! rg -q '4\) 设置月度统计起点' "$TEST_ROOT/traffic-menu.txt"; then fa
 prompt_renamed_inbound_tag() { printf -v "$1" '%s' "$2"; }
 for spec in '1 rename_inbound node node' '2 modify_inbound_basic node' '3 modify_inbound_transport node'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route modify_inbound_menu "$choice" "$action" node vless
+done
+for spec in '1 rename_inbound node node' '2 modify_inbound_basic node' '3 modify_inbound_transport node'; do
+  choice=${spec%% *}; action=${spec#* }; exercise_menu_route modify_inbound_menu "$choice" "$action" node shadowsocks
 done
 for spec in '1 rename_inbound node node' '2 modify_inbound_basic node'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route modify_inbound_menu "$choice" "$action" node socks

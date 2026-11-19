@@ -313,6 +313,11 @@ _uninstall_remove_owned_jq() {
   fi
 }
 
+_uninstall_remove_obfs() {
+  obfs_remove_all_services || return 1
+  _obfs_uninstall_owned_binary_and_pkg "${SNAPSHOT_META:-$META_FILE}"
+}
+
 _scan_xrayctl_residuals() {
   local __count_var=${1:-} count=0
   local paths=(
@@ -328,10 +333,12 @@ _scan_xrayctl_residuals() {
     "$CERTBOT_LOGS_DIR"
     /etc/systemd/system/xrayctl-certbot-renew.timer
     /etc/systemd/system/xrayctl-certbot-renew.service
+    "${SYSTEMD_UNIT_DIR}/xrayctl-obfs-*.service"
     /etc/systemd/system/xray.service
     /etc/systemd/system/xray@.service
     /etc/systemd/system/xray.service.d
     "$OPENRC_SERVICE"
+    "${OPENRC_INIT_DIR}/xrayctl-obfs-*"
     "$CERT_RENEW_HOOK"
     "$BACKUP_DIR"
     "$TRAFFIC_FILE"
@@ -390,6 +397,7 @@ uninstall_xray() {
   heading "卸载清理"
   ui_card_open "⚠ 即将永久删除以下 xrayctl 受管数据（不保留备份）"
   ui_card_line "• Xray 核心程序、所有入站配置及用户凭据"
+  ui_card_line "• 托管 simple-obfs 混淆服务与程序"
   ui_card_line "• 托管 TLS 证书副本、Let's Encrypt 证书与续期任务"
   ui_card_line "• Cloudflare 凭据、独立 Certbot 环境与 BBR 持久化配置"
   ui_card_line "• 运行日志、元数据及全部 xrayctl 手动备份"
@@ -418,6 +426,7 @@ uninstall_xray() {
   cleanup_step "删除 Certbot 环境"      _uninstall_remove_certbot          || ((step_failures+=1))
   cleanup_step "卸载 Xray 核心"         _uninstall_xray_core               || ((step_failures+=1))
   cleanup_step "清理 systemd 覆盖"      _uninstall_remove_systemd_overrides || ((step_failures+=1))
+  cleanup_step "清理 simple-obfs 服务"  _uninstall_remove_obfs              || ((step_failures+=1))
   cleanup_step "删除运行用户组"         _uninstall_remove_runtime_group    || ((step_failures+=1))
   cleanup_step "删除快捷命令"           _uninstall_remove_quick_command    || ((step_failures+=1))
   cleanup_step "撤销 BBR 设置"          _uninstall_remove_bbr              || ((step_failures+=1))

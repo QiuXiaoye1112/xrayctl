@@ -13,7 +13,7 @@ print_share_entry() {
 
 _share_print_params_card() {
   local tag=$1 protocol=$2 uri_host=$3 port=$4
-  local stream method security path="" sni="" sid="" pbk="" flow="" auth=""
+  local stream method security path="" sni="" sid="" pbk="" flow="" auth="" obfs_host=""
   ui_card_open "连接参数 · ${tag}"
   case $protocol in
     vless)
@@ -52,9 +52,18 @@ _share_print_params_card() {
       esac
       ;;
     shadowsocks)
-      ui_card_kv "协议与传输" "SS2022 · TCP/UDP" 12
-      ui_card_kv "加密方式" "$SS2022_METHOD" 12
-      ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      if inbound_obfs_enabled "$tag"; then
+        obfs_host=$(inbound_obfs_field "$tag" host)
+        ui_card_kv "协议与传输" "SS2022 · TCP · HTTP 混淆" 12
+        ui_card_kv "加密方式" "$SS2022_METHOD" 12
+        ui_card_kv "混淆域名" "$obfs_host" 12
+        ui_card_kv "SIP003 插件" "obfs-local;obfs=http;obfs-host=${obfs_host}" 12
+        ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      else
+        ui_card_kv "协议与传输" "SS2022 · TCP/UDP" 12
+        ui_card_kv "加密方式" "$SS2022_METHOD" 12
+        ui_card_kv "连接地址" "${uri_host}:${port}" 12
+      fi
       ;;
     socks)
       auth=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.auth // "noauth"' "$CONFIG_FILE")
@@ -105,14 +114,14 @@ link_query_for_stream() {
 
 print_links() {
   ensure_config; init_meta
-  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link server_key idx=0
+  local tag=${1-} filter=${2-} protocol host uri_host port query label id password link server_key plugin_query="" obfs_host="" idx=0
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
   host=$(public_host_for_tag "$tag"); uri_host=$host
   [[ $uri_host == *:* && $uri_host != \[*\] ]] && uri_host="[${uri_host}]"
-  port=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.port' "$CONFIG_FILE")
+  port=$(inbound_effective_port "$tag")
   heading "${tag} · 节点交付"
   _share_print_params_card "$tag" "$protocol" "$uri_host" "$port"
   case $protocol in
@@ -126,11 +135,15 @@ print_links() {
       done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", (.id // ""), "\u0000"' "$CONFIG_FILE")
       ;;
     shadowsocks)
+      if inbound_obfs_enabled "$tag"; then
+        obfs_host=$(inbound_obfs_field "$tag" host)
+        plugin_query="?plugin=$(url_encode "obfs-local;obfs=http;obfs-host=${obfs_host}")"
+      fi
       server_key=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.password' "$CONFIG_FILE")
       while IFS= read -r -d '' label && IFS= read -r -d '' password; do
         [[ -z $filter || $label == "$filter" ]] || continue
         idx=$((idx + 1))
-        link="ss://${SS2022_METHOD}:$(url_encode "${server_key}:${password}")@${uri_host}:${port}#$(url_encode "${tag}-${label}")"
+        link="ss://${SS2022_METHOD}:$(url_encode "${server_key}:${password}")@${uri_host}:${port}${plugin_query}#$(url_encode "${tag}-${label}")"
         print_share_entry "$label" "链接" "$link" "$idx"
       done < <(jq -j --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.settings.clients[]|(.xrayctlLabel // .email // ""), "\u0000", .password, "\u0000"' "$CONFIG_FILE")
       ;;

@@ -20,10 +20,52 @@ inbound_require_supported_configuration() {
     || die "该入站使用已停止支持的协议或传输；仅允许查看或删除。"
 }
 
+inbound_obfs_enabled() {
+  [[ -r $META_FILE ]] && jq -e --arg tag "$1" '.inbounds[$tag].obfs.enabled==true' "$META_FILE" >/dev/null 2>&1
+}
+
+inbound_obfs_field() {
+  local tag=$1 field=$2
+  [[ -r $META_FILE ]] || return 0
+  jq -r --arg tag "$tag" --arg field "$field" '.inbounds[$tag].obfs[$field] // empty' "$META_FILE" 2>/dev/null || true
+}
+
+inbound_effective_port() {
+  local tag=$1 port=""
+  if inbound_obfs_enabled "$tag"; then
+    port=$(inbound_obfs_field "$tag" port)
+  fi
+  if [[ -n $port ]]; then
+    printf '%s\n' "$port"
+  else
+    jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.port // empty' "$CONFIG_FILE"
+  fi
+}
+
+inbound_effective_listen() {
+  local tag=$1 listen=""
+  if inbound_obfs_enabled "$tag"; then
+    listen=$(inbound_obfs_field "$tag" listen)
+  fi
+  if [[ -n $listen ]]; then
+    printf '%s\n' "$listen"
+  else
+    jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.listen // "0.0.0.0"' "$CONFIG_FILE"
+  fi
+}
+
 port_in_config() {
   local port=$1 except=${2-}
-  [[ -r $CONFIG_FILE ]] || return 1
-  jq -e --argjson port "$port" --arg except "$except" '.inbounds[] | select(.port==$port and .tag!=$except)' "$CONFIG_FILE" >/dev/null 2>&1
+  if [[ -r $CONFIG_FILE ]]; then
+    jq -e --argjson port "$port" --arg except "$except" '.inbounds[] | select(.port==$port and .tag!=$except)' "$CONFIG_FILE" >/dev/null 2>&1 && return 0
+  fi
+  if [[ -r $META_FILE ]]; then
+    jq -e --argjson port "$port" --arg except "$except" '
+      .inbounds // {} | to_entries[] |
+      select(.key!=$except and .value.obfs.enabled==true and (.value.obfs.port==$port or .value.obfs.localPort==$port))
+    ' "$META_FILE" >/dev/null 2>&1 && return 0
+  fi
+  return 1
 }
 
 port_in_use_os() {
@@ -51,6 +93,26 @@ suggest_available_port() {
   return 1
 }
 
+suggest_available_port_excluding() {
+  local __var=$1 excluded=${2-} picked="" i fallback
+  for ((i=0; i<32; i++)); do
+    suggest_available_port picked || break
+    if [[ -z $excluded || $picked != "$excluded" ]]; then
+      printf -v "$__var" '%s' "$picked"
+      return 0
+    fi
+  done
+  for ((i=0; i<128; i++)); do
+    fallback=$((10000 + i))
+    [[ $fallback == "$excluded" ]] && continue
+    port_in_config "$fallback" && continue
+    port_in_use_os "$fallback" && continue
+    printf -v "$__var" '%s' "$fallback"
+    return 0
+  done
+  return 1
+}
+
 prompt_tag() {
   local __var=$1 default=${2:-node-$(random_hex 2)} value
   while true; do
@@ -67,7 +129,7 @@ prompt_port() {
     prompt_value value "监听端口" "$default" || return 1
     validate_port "$value" || { warn "端口必须是 1-65535。"; continue; }
     port_in_config "$value" "$except" && { warn "该端口已被另一条 Xray 入站使用。"; continue; }
-    [[ -z $except ]] || current_port=$(jq -r --arg tag "$except" '.inbounds[]|select(.tag==$tag)|.port // empty' "$CONFIG_FILE")
+    [[ -z $except ]] || current_port=$(inbound_effective_port "$except" 2>/dev/null || true)
     if port_in_use_os "$value" && ! { [[ -n $except && $value == "$current_port" ]] && service_is_active; }; then
       warn "系统检测到端口 ${value} 已被占用，请换一个端口。"
       continue
@@ -119,13 +181,19 @@ prompt_public_host() {
 
 add_inbound() {
   ensure_runtime_dependencies inbound-add; require_xray_installed; ensure_config
-  local inbound="" host="" public_key="" tag tmp
-  build_inbound inbound host public_key || return 1
+  local inbound="" host="" public_key="" obfs_meta="" tag tmp
+  build_inbound inbound host public_key obfs_meta || return 1
   : "$public_key"
+  if [[ -n $obfs_meta ]]; then
+    ensure_simple_obfs_installed || return 1
+  fi
   tag=$(jq -r '.tag' <<<"$inbound")
   tmp=$(temp_file)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" >"$tmp"
-  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" "$obfs_meta" || return
+  if [[ -n $obfs_meta ]]; then
+    obfs_service_setup "$tag" || warn "入站已创建，但 obfs-server 服务创建或启动失败，请检查 simple-obfs 状态。"
+  fi
   traffic_after_config_change || warn "入站已创建，但流量规则暂未同步，采集任务会自动重试。"
   info "入站 ${tag} 已创建并部署生效。"
   print_links "$tag" "" || true
@@ -133,9 +201,10 @@ add_inbound() {
 
 list_inbounds() {
   ensure_config
-  local count tag protocol port method security listen users sec_disp
+  local count tag protocol port method security listen users sec_disp meta_json
   count=$(jq '.inbounds|length' "$CONFIG_FILE")
   if ((count == 0)); then info "还没有入站。"; return; fi
+  meta_json=$(meta_json_or_empty)
   printf '  %s' "$C_DIM"
   print_table_cell_clipped "标签" 18; printf '  '
   print_table_cell_clipped "协议" 6; printf '  '
@@ -143,13 +212,17 @@ list_inbounds() {
   print_table_cell_clipped "传输" 7; printf '  '
   print_table_cell_clipped "安全" 8; printf '  '
   print_table_cell "用户" 4; printf '  监听%s\n' "$C_RESET"
-  jq -r --arg ss2022Method "$SS2022_METHOD" '.inbounds | to_entries[] |
-    [.value.tag,(if .value.protocol=="shadowsocks" then
+  jq -r --arg ss2022Method "$SS2022_METHOD" --argjson meta "$meta_json" '.inbounds | to_entries[] |
+    .value.tag as $tag |
+    [$tag,(if .value.protocol=="shadowsocks" then
        (if .value.settings.method==$ss2022Method then "SS2022" else "SS" end)
-     else .value.protocol end),(.value.port|tostring),
+     else .value.protocol end),
+     ((if .value.protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .value.port) else .value.port end)|tostring),
      (if .value.protocol=="vless" then
         (if (.value.streamSettings.network // .value.streamSettings.method // "raw")=="websocket" then "ws" else (.value.streamSettings.network // .value.streamSettings.method // "raw") end)
-      elif .value.protocol=="shadowsocks" then (.value.settings.network // "tcp") else "-" end),
+      elif .value.protocol=="shadowsocks" then
+        (if $meta.inbounds[$tag].obfs.enabled==true then "http" else (.value.settings.network // "tcp") end)
+      else "-" end),
      (if .value.protocol=="vless" then (.value.streamSettings.security // "none")
       elif .value.protocol=="socks" then (.value.settings.auth // "noauth")
       elif .value.protocol=="shadowsocks" then "AEAD"
@@ -157,7 +230,7 @@ list_inbounds() {
       else "noauth" end),
      (if (.value.protocol=="vless" or .value.protocol=="shadowsocks") then (.value.settings.clients // [] | length)
       else ((.value.settings.accounts // .settings.users // []) | length) end | tostring),
-     (.value.listen // "0.0.0.0")] | @tsv' "$CONFIG_FILE" \
+     (if .value.protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.listen // "0.0.0.0") else (.value.listen // "0.0.0.0") end)] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port method security users listen; do
         case $security in
           reality) sec_disp="${C_CYAN}${security}${C_RESET}" ;;
@@ -214,7 +287,7 @@ prompt_renamed_inbound_tag() {
 
 rename_inbound() {
   ensure_runtime_dependencies inbound-rename; require_xray_installed; ensure_config
-  local old_tag=${1-} new_tag=${2-} tmp
+  local old_tag=${1-} new_tag=${2-} tmp was_obfs=0
   [[ -n $old_tag ]] || select_inbound old_tag || return
   inbound_exists "$old_tag" || die "找不到入站：$old_tag"
   inbound_require_supported_configuration "$old_tag"
@@ -224,6 +297,7 @@ rename_inbound() {
   if inbound_exists "$new_tag" || outbound_exists "$new_tag"; then
     die "名称已被入站或出站使用：$new_tag"
   fi
+  inbound_obfs_enabled "$old_tag" && was_obfs=1
   tmp=$(temp_file)
   jq --arg old "$old_tag" --arg new "$new_tag" '
     (.inbounds[]|select(.tag==$old)|.tag)=$new |
@@ -236,25 +310,49 @@ rename_inbound() {
       if (.ruleTag // "")==("xrayctl-outbound:"+$old) then .ruleTag=("xrayctl-outbound:"+$new) else . end
     ))' "$CONFIG_FILE" >"$tmp"
   XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_rename "$old_tag" "$new_tag" || return
+  if ((was_obfs == 1)); then
+    obfs_service_remove "$old_tag"
+    obfs_service_setup "$new_tag" || warn "入站已重命名，但新 obfs-server 服务更新失败，请检查 simple-obfs 状态。"
+  fi
   traffic_after_config_change "$old_tag" "$new_tag" || warn "入站已重命名，但流量记录暂未同步，采集任务会自动重试。"
   info "入站已重命名：${old_tag} → ${new_tag}。"
 }
 
 modify_inbound_basic() {
   ensure_runtime_dependencies inbound-modify; ensure_config
-  local tag=${1-} current listen port host tmp old_port
+  local tag=${1-} current listen port host tmp old_port old_listen local_port="" obfs_host="" obfs_meta=""
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
-  old_port=$(jq -r '.port' <<<"$current")
-  prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")" || return 1
-  prompt_port port "$old_port" "$tag" || return 1
-  prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
-  tmp=$(temp_file)
-  jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-    '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
-  state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  if inbound_obfs_enabled "$tag"; then
+    old_listen=$(inbound_effective_listen "$tag")
+    old_port=$(inbound_effective_port "$tag")
+    local_port=$(inbound_obfs_field "$tag" localPort)
+    obfs_host=$(inbound_obfs_field "$tag" host)
+    prompt_value listen "监听地址" "${old_listen:-0.0.0.0}" || return 1
+    prompt_port port "$old_port" "$tag" || return 1
+    prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
+    if [[ -z $local_port || $local_port == "$port" ]] || ! validate_port "$local_port"; then
+      suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
+    fi
+    tmp=$(temp_file)
+    jq --arg tag "$tag" --argjson localPort "$local_port" \
+      '(.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp")' \
+      "$CONFIG_FILE" >"$tmp"
+    obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port")
+    state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" "$obfs_meta" || return
+    obfs_service_setup "$tag" || warn "入站已修改，但 obfs-server 服务更新失败，请检查 simple-obfs 状态。"
+  else
+    old_port=$(jq -r '.port' <<<"$current")
+    prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")" || return 1
+    prompt_port port "$old_port" "$tag" || return 1
+    prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
+    tmp=$(temp_file)
+    jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
+      '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
+    state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
+  fi
   traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
   current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
 }
@@ -262,34 +360,90 @@ modify_inbound_basic() {
 modify_inbound_transport() {
   ensure_runtime_dependencies inbound-transport; require_xray_installed; ensure_config
   local tag=${1-} protocol stream public_key="" tmp method security
-  [[ -n $tag ]] || select_inbound tag '^vless$' || return
+  local obfs_choice obfs_host ext_listen ext_port local_port obfs_meta="" was_obfs=0 had_active=0
+  [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks)$' || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
-  [[ $protocol == vless ]] || die "${protocol} 已停止支持或没有可修改的流式传输。"
-  warn "修改传输后，所有客户端都要同步更新配置。"
-  confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
-  build_stream_settings "$protocol" stream public_key || return 1
-  : "$public_key"
-  method=$(jq -r '.network // .method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
-  tmp=$(temp_file)
-  jq --arg tag "$tag" --argjson stream "$stream" --arg method "$method" --arg security "$security" '
-    (.inbounds[]|select(.tag==$tag)|.streamSettings)=$stream |
-    if (.inbounds[]|select(.tag==$tag)|.protocol)=="vless" then
-      (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(
-        if $method=="raw" and $security!="none" then .flow="xtls-rprx-vision" else del(.flow) end
-      )
-    else . end' "$CONFIG_FILE" >"$tmp"
-  XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" || return
-  traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
-  info "传输已更新，请重新导出客户端分享链接。"
+  case $protocol in
+    vless)
+      warn "修改传输后，所有客户端都要同步更新配置。"
+      confirm "为 ${tag} 重新选择传输和安全方式？" N || return 0
+      build_stream_settings "$protocol" stream public_key || return 1
+      : "$public_key"
+      method=$(jq -r '.network // .method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
+      tmp=$(temp_file)
+      jq --arg tag "$tag" --argjson stream "$stream" --arg method "$method" --arg security "$security" '
+        (.inbounds[]|select(.tag==$tag)|.streamSettings)=$stream |
+        if (.inbounds[]|select(.tag==$tag)|.protocol)=="vless" then
+          (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(
+            if $method=="raw" and $security!="none" then .flow="xtls-rprx-vision" else del(.flow) end
+          )
+        else . end' "$CONFIG_FILE" >"$tmp"
+      XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" || return
+      traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
+      info "传输已更新，请重新导出客户端分享链接。"
+      ;;
+    shadowsocks)
+      inbound_obfs_enabled "$tag" && was_obfs=1
+      ext_listen=$(inbound_effective_listen "$tag")
+      ext_port=$(inbound_effective_port "$tag")
+      choose obfs_choice "HTTP 混淆 (simple-obfs)" "关闭" "开启" || return 1
+      if [[ $obfs_choice == 2 ]]; then
+        prompt_validated_value obfs_host "混淆域名 (obfs-host)" "" validate_domain "混淆域名格式无效，请重新输入。" || return 1
+        ensure_simple_obfs_installed || return 1
+        local_port=$(inbound_obfs_field "$tag" localPort)
+        if [[ -z $local_port || $local_port == "$ext_port" ]] || ! validate_port "$local_port"; then
+          suggest_available_port_excluding local_port "$ext_port" || die "无法分配内部转发端口。"
+        fi
+        tmp=$(temp_file)
+        jq --arg tag "$tag" --argjson localPort "$local_port" '
+          (.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp")
+        ' "$CONFIG_FILE" >"$tmp"
+        obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$ext_listen" "$ext_port" "$local_port")
+        XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" "$obfs_meta" || return
+        obfs_service_setup "$tag" || warn "混淆参数已更新，但 obfs-server 服务启动失败，请检查 simple-obfs 状态。"
+        traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
+        info "HTTP 混淆已启用/更新，请重新导出客户端分享链接。"
+      else
+        if ((was_obfs == 0)); then
+          info "该入站当前未开启 HTTP 混淆，配置未变更。"
+          return 0
+        fi
+        confirm "关闭 ${tag} 的 HTTP 混淆并恢复直连 TCP/UDP？" N || return 0
+        obfs_service_is_active "$tag" && had_active=1
+        tmp=$(temp_file)
+        jq --arg tag "$tag" --arg listen "$ext_listen" --argjson port "$ext_port" '
+          (.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port | .settings.network="tcp,udp")
+        ' "$CONFIG_FILE" >"$tmp"
+        if ! validate_candidate "$tmp"; then
+          rm -f "$tmp"
+          return 1
+        fi
+        obfs_service_stop "$tag" || true
+        if ! XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" none; then
+          if ((had_active == 1)); then
+            obfs_service_setup "$tag" || true
+          fi
+          return 1
+        fi
+        obfs_service_remove "$tag"
+        traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
+        info "HTTP 混淆已关闭，请重新导出客户端分享链接。"
+      fi
+      ;;
+    *)
+      die "${protocol} 已停止支持或没有可修改的流式传输。"
+      ;;
+  esac
 }
 
 delete_inbound() {
   ensure_runtime_dependencies inbound-delete; ensure_config
-  local tag=${1-} assume_yes=${2:-0} tmp user_count rule_tag
+  local tag=${1-} assume_yes=${2:-0} tmp user_count rule_tag had_obfs=0
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
+  inbound_obfs_enabled "$tag" && had_obfs=1
   user_count=$(jq --arg tag "$tag" '
     [.inbounds[]|select(.tag==$tag)|((.settings.clients // .settings.accounts // .settings.users // [])|length)][0]' "$CONFIG_FILE")
   [[ $assume_yes == 1 ]] || confirm "删除入站 ${tag} 及其 ${user_count} 个用户？" N || return 0
@@ -308,6 +462,9 @@ delete_inbound() {
       )
     ]' "$CONFIG_FILE" >"$tmp"
   XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_delete "$tag" || return
+  if ((had_obfs == 1)) || obfs_service_exists "$tag" 2>/dev/null; then
+    obfs_service_remove "$tag"
+  fi
   traffic_after_config_change "$tag" || warn "入站已删除，但流量记录暂未同步，采集任务会自动重试。"
   info "已删除入站 ${tag} 及其 ${user_count} 个用户。"
 }

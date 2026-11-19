@@ -55,7 +55,7 @@ traffic_runtime_ensure() { :; }
 check_cancel add_outbound
 
 # EOF at later fields must propagate through nested builders too.
-for input in $'2\n' $'2\nnew-inbound\n' $'2\nnew-inbound\n127.0.0.1\n'; do
+for input in $'2\n' $'2\n1\nnew-inbound\n' $'2\n1\nnew-inbound\n127.0.0.1\n' $'2\n2\n' $'2\n2\nobfs.example.com\nnew-inbound\n'; do
   printf '%s' "$input" >"$TMP/input"
   CANCEL_INPUT="$TMP/input" check_cancel build_inbound value host public_key
 done

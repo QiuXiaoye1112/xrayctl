@@ -471,6 +471,9 @@ modify_inbound_menu() {
     if [[ $protocol == vless ]]; then
       ui_menu_group "传输与安全"
       ui_menu_item 3 "修改传输/安全"
+    elif [[ $protocol == shadowsocks ]]; then
+      ui_menu_group "混淆插件"
+      ui_menu_item 3 "修改 HTTP 混淆"
     fi
     ui_menu_footer "返回入站"
     read -r -p "  请选择: " choice || { cancel_selection; return 0; }
@@ -489,7 +492,7 @@ modify_inbound_menu() {
         ;;
       2) run_menu_action modify_inbound_basic "$current_tag"; pause;;
       3)
-        if [[ $protocol == vless ]]; then run_menu_action modify_inbound_transport "$current_tag"
+        if [[ $protocol == vless || $protocol == shadowsocks ]]; then run_menu_action modify_inbound_transport "$current_tag"
         else warn "无效选项。"; fi
         pause
         ;;
@@ -699,8 +702,32 @@ toggle_service_startup() {
   fi
 }
 
+obfs_menu() {
+  local choice
+  local XRAYCTL_UI_CRUMB="首页 › 服务管理 › HTTP 混淆"
+  while true; do
+    clear_screen
+    ui_page "HTTP 混淆 (simple-obfs)"
+    show_obfs_status
+    ui_menu_group "插件与服务操作"
+    ui_menu_item 1 "安装/更新 simple-obfs"
+    ui_menu_item 2 "重启混淆服务"
+    ui_menu_item 3 "查看混淆日志"
+    ui_menu_item 4 "卸载 simple-obfs"
+    ui_menu_footer "返回"
+    read -r -p "  请选择: " choice || { cancel_selection; return 0; }
+    case $choice in
+      1) run_menu_action install_or_update_simple_obfs; pause;;
+      2) run_menu_action _obfs_sync_menu_action restart; pause;;
+      3) run_menu_action show_obfs_logs 100; pause;;
+      4) run_menu_action uninstall_simple_obfs; pause;;
+      0) return;; *) warn "无效选项。"; pause;;
+    esac
+  done
+}
+
 service_menu() {
-  local choice svc_badge boot_badge bbr_badge
+  local choice svc_badge boot_badge bbr_badge obfs_badge
   local XRAYCTL_UI_CRUMB="首页 › 服务管理"
   while true; do
     clear_screen
@@ -708,10 +735,12 @@ service_menu() {
     svc_badge=$(_ui_state_badge "$(service_state_summary)")
     boot_badge=$(_ui_state_badge "$(startup_state_summary)")
     bbr_badge=$(_ui_state_badge "$(bbr_state_summary)")
+    obfs_badge=$(_ui_state_badge "$(obfs_state_summary)")
     ui_card_open "运行环境"
     ui_card_kv "服务状态" "$svc_badge" 12
     ui_card_kv "开机自启" "$boot_badge" 12
     ui_card_kv "Xray 核心" "$(xray_version_summary)" 12
+    ui_card_kv "HTTP 混淆" "$obfs_badge" 12
     ui_card_kv "TCP BBR" "$bbr_badge" 12
     ui_card_close
     ui_menu_group "服务控制"
@@ -722,6 +751,7 @@ service_menu() {
     ui_menu_item 4 "查看日志"
     ui_menu_item 5 "安装 Xray"
     ui_menu_item 6 "BBR启用/关闭"
+    ui_menu_item 7 "HTTP 混淆 (simple-obfs)"
     ui_menu_footer "返回"
     read -r -p "  请选择: " choice || { cancel_selection; return 0; }
     case $choice in
@@ -729,6 +759,7 @@ service_menu() {
       3) run_menu_action toggle_service_startup; pause;; 4) run_menu_action show_logs 100; pause;;
       5) run_menu_action install_or_update_xray; pause;;
       6) run_menu_action manage_bbr; pause;;
+      7) obfs_menu;;
       0) return;; *) warn "无效选项。"; pause;;
     esac
   done
@@ -969,6 +1000,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl cert renew <标识>          续期单个证书
   xrayctl cert cloudflare            管理 Cloudflare DNS 凭据
   xrayctl bbr                        启用/关闭 BBR（交互式）
+  xrayctl obfs [status|logs|install|uninstall] 管理 simple-obfs 混淆插件
   xrayctl version
 
 支持协议: VLESS、SS2022、SOCKS5、HTTP
@@ -1114,6 +1146,16 @@ dispatch() {
         *) die "未知 cert 子命令：${1}";; esac;;
 
     bbr) manage_bbr;;
+    obfs)
+      case ${1:-status} in
+        status) show_obfs_status;;
+        logs) show_obfs_logs "${2:-100}" "${3-}";;
+        install|update) install_or_update_simple_obfs;;
+        uninstall|remove) uninstall_simple_obfs "$([[ ${2-} == --yes ]] && printf 1 || printf 0)";;
+        restart|start|stop) ensure_runtime_dependencies obfs-service; obfs_services_sync_action "$1"; info "obfs-server 服务操作完成：${1}";;
+        *) die "未知 obfs 子命令：${1}";;
+      esac
+      ;;
     internal-script-update) update_script_resources;;
     internal-traffic-collect) internal_traffic_collect;;
     internal-traffic-ensure) traffic_runtime_ensure;;

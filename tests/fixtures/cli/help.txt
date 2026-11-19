@@ -54,6 +54,7 @@ xrayctl - Xray Linux 管理脚本
   xrayctl cert renew <标识>          续期单个证书
   xrayctl cert cloudflare            管理 Cloudflare DNS 凭据
   xrayctl bbr                        启用/关闭 BBR（交互式）
+  xrayctl obfs [status|logs|install|uninstall] 管理 simple-obfs 混淆插件
   xrayctl version
 
 支持协议: VLESS、SS2022、SOCKS5、HTTP

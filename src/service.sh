@@ -313,6 +313,7 @@ install_or_update_xray() {
   validate_candidate "$CONFIG_FILE"
   platform_service_enable >/dev/null
   restart_service
+  obfs_services_sync_action restart || warn "部分 obfs-server 服务重启失败，请运行 xrayctl obfs status 查看。"
   traffic_runtime_ensure || true
   info "Xray 已安装/修复：$($XRAY_BIN version | sed -n '1p')"
 }
@@ -378,8 +379,518 @@ install_quick_command() {
   meta_resource_register "quickSymlink" "$QUICK_SYMLINK"
 }
 
+obfs_server_bin() {
+  if [[ -n ${XRAYCTL_OBFS_SERVER_BIN:-} ]]; then
+    printf '%s\n' "$XRAYCTL_OBFS_SERVER_BIN"
+  elif [[ $OBFS_SERVER_BIN != /usr/local/bin/obfs-server ]]; then
+    printf '%s\n' "$OBFS_SERVER_BIN"
+  elif [[ -x $OBFS_SERVER_BIN ]]; then
+    printf '%s\n' "$OBFS_SERVER_BIN"
+  elif command_exists obfs-server; then
+    command -v obfs-server
+  else
+    printf '%s\n' "$OBFS_SERVER_BIN"
+  fi
+}
+
+obfs_server_installed() {
+  [[ -x $(obfs_server_bin) ]]
+}
+
+obfs_service_name() { printf 'xrayctl-obfs-%s\n' "$1"; }
+obfs_systemd_unit_path() { printf '%s/xrayctl-obfs-%s.service\n' "$SYSTEMD_UNIT_DIR" "$1"; }
+obfs_openrc_service_path() { printf '%s/xrayctl-obfs-%s\n' "$OPENRC_INIT_DIR" "$1"; }
+
+obfs_configured_tags() {
+  [[ -r $CONFIG_FILE && -r $META_FILE ]] || return 0
+  local meta_json
+  meta_json=$(meta_json_or_empty)
+  jq -r --argjson meta "$meta_json" '
+    .inbounds[]? | .tag as $tag |
+    select(.protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true) |
+    $tag
+  ' "$CONFIG_FILE" 2>/dev/null || true
+}
+
+obfs_service_exists() {
+  local tag=$1 init_sys
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd) [[ -f $(obfs_systemd_unit_path "$tag") ]] ;;
+    openrc) [[ -x $(obfs_openrc_service_path "$tag") ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+obfs_service_is_active() {
+  local tag=$1 svc init_sys
+  svc=$(obfs_service_name "$tag")
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd) systemctl is-active --quiet "$svc" 2>/dev/null ;;
+    openrc) obfs_service_exists "$tag" && platform_openrc_service "$svc" status >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+obfs_service_setup() {
+  local tag=$1 apply_runtime=${2:-1} listen="" port="" local_port="" obfs_bin svc init_sys unit_path
+  [[ -r $META_FILE ]] || return 1
+  jq -e --arg tag "$tag" '.inbounds[$tag].obfs.enabled==true' "$META_FILE" >/dev/null 2>&1 || return 1
+  listen=$(jq -r --arg tag "$tag" '.inbounds[$tag].obfs.listen // "0.0.0.0"' "$META_FILE")
+  port=$(jq -r --arg tag "$tag" '.inbounds[$tag].obfs.port // empty' "$META_FILE")
+  local_port=$(jq -r --arg tag "$tag" '.inbounds[$tag].obfs.localPort // empty' "$META_FILE")
+  if ! validate_port "$port" || ! validate_port "$local_port"; then
+    error "入站 ${tag} 的混淆端口元数据无效。"
+    return 1
+  fi
+  obfs_bin=$(obfs_server_bin)
+  svc=$(obfs_service_name "$tag")
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd)
+      unit_path=$(obfs_systemd_unit_path "$tag")
+      install -d -m 755 "$SYSTEMD_UNIT_DIR" || return 1
+      cat >"$unit_path" <<EOF
+# managed by xrayctl
+[Unit]
+Description=xrayctl simple-obfs server (${tag})
+After=network.target ${SYSTEMD_UNIT}
+
+[Service]
+Type=simple
+ExecStart=${obfs_bin} -s ${listen} -p ${port} --obfs http -r 127.0.0.1:${local_port}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      chmod 644 "$unit_path"
+      platform_daemon_reload
+      if service_exists || service_is_active; then
+        systemctl enable "$svc" >/dev/null 2>&1 || true
+      fi
+      if ((apply_runtime == 1)) && service_is_active; then
+        systemctl restart "$svc" || return 1
+      fi
+      ;;
+    openrc)
+      unit_path=$(obfs_openrc_service_path "$tag")
+      install -d -m 755 "$OPENRC_INIT_DIR" "$LOG_DIR" || return 1
+      cat >"$unit_path" <<EOF
+#!/sbin/openrc-run
+# managed by xrayctl
+name="xrayctl obfs-server (${tag})"
+description="xrayctl simple-obfs server (${tag})"
+command="${obfs_bin}"
+command_args="-s ${listen} -p ${port} --obfs http -r 127.0.0.1:${local_port}"
+command_background=true
+pidfile="/run/${svc}.pid"
+output_log="${LOG_DIR}/obfs-${tag}.log"
+error_log="${LOG_DIR}/obfs-${tag}-error.log"
+
+$(printf 'depend() { need net; after %s; }' "$SERVICE_NAME")
+EOF
+      chmod 755 "$unit_path"
+      if service_exists || service_is_active; then
+        rc-update add "$svc" default >/dev/null 2>&1 || true
+      fi
+      if ((apply_runtime == 1)) && service_is_active; then
+        if obfs_service_is_active "$tag"; then
+          platform_openrc_service "$svc" restart || return 1
+        else
+          platform_openrc_service "$svc" zap >/dev/null 2>&1 || true
+          rm -f "/run/${svc}.pid"
+          platform_openrc_service "$svc" start || return 1
+        fi
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+obfs_service_stop() {
+  local tag=$1 svc init_sys
+  svc=$(obfs_service_name "$tag")
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd) systemctl stop "$svc" >/dev/null 2>&1 || true ;;
+    openrc)
+      if obfs_service_exists "$tag"; then
+        platform_openrc_service "$svc" stop >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
+}
+
+obfs_service_remove() {
+  local tag=$1 svc init_sys
+  svc=$(obfs_service_name "$tag")
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd)
+      systemctl disable --now "$svc" >/dev/null 2>&1 || true
+      rm -f "$(obfs_systemd_unit_path "$tag")"
+      platform_daemon_reload
+      ;;
+    openrc)
+      if obfs_service_exists "$tag"; then
+        platform_openrc_service "$svc" stop >/dev/null 2>&1 || true
+        rc-update del "$svc" default >/dev/null 2>&1 || true
+      fi
+      rm -f "$(obfs_openrc_service_path "$tag")"
+      ;;
+  esac
+  rm -f "/run/${svc}.pid" "${LOG_DIR}/obfs-${tag}.log" "${LOG_DIR}/obfs-${tag}-error.log" 2>/dev/null || true
+}
+
+obfs_remove_all_services() {
+  local init_sys unit svc tag
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd)
+      for unit in "${SYSTEMD_UNIT_DIR}"/xrayctl-obfs-*.service; do
+        [[ -e $unit ]] || continue
+        svc=$(basename "$unit" .service)
+        tag=${svc#xrayctl-obfs-}
+        obfs_service_remove "$tag"
+      done
+      ;;
+    openrc)
+      for unit in "${OPENRC_INIT_DIR}"/xrayctl-obfs-*; do
+        [[ -e $unit ]] || continue
+        svc=$(basename "$unit")
+        tag=${svc#xrayctl-obfs-}
+        obfs_service_remove "$tag"
+      done
+      ;;
+  esac
+}
+
+obfs_services_sync_action() {
+  local action=$1 tag svc init_sys rc=0
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  [[ -n $init_sys ]] || return 0
+  while IFS= read -r tag; do
+    [[ -n $tag ]] || continue
+    svc=$(obfs_service_name "$tag")
+    if ! obfs_service_exists "$tag"; then
+      [[ $action == stop || $action == disable ]] && continue
+      obfs_service_setup "$tag" 0 || { rc=1; continue; }
+    fi
+    case $action in
+      start)
+        case $init_sys in
+          systemd) systemctl start "$svc" || rc=1 ;;
+          openrc) platform_openrc_service "$svc" start || rc=1 ;;
+        esac
+        ;;
+      stop)
+        obfs_service_stop "$tag"
+        ;;
+      restart)
+        case $init_sys in
+          systemd) systemctl restart "$svc" || rc=1 ;;
+          openrc)
+            if obfs_service_is_active "$tag"; then
+              platform_openrc_service "$svc" restart || rc=1
+            else
+              platform_openrc_service "$svc" zap >/dev/null 2>&1 || true
+              rm -f "/run/${svc}.pid"
+              platform_openrc_service "$svc" start || rc=1
+            fi
+            ;;
+        esac
+        ;;
+      enable)
+        case $init_sys in
+          systemd) systemctl enable "$svc" >/dev/null 2>&1 || rc=1; systemctl start "$svc" || rc=1 ;;
+          openrc) rc-update add "$svc" default >/dev/null 2>&1 || rc=1; platform_openrc_service "$svc" start || rc=1 ;;
+        esac
+        ;;
+      disable)
+        obfs_service_stop "$tag"
+        case $init_sys in
+          systemd) systemctl disable "$svc" >/dev/null 2>&1 || true ;;
+          openrc) rc-update del "$svc" default >/dev/null 2>&1 || true ;;
+        esac
+        ;;
+    esac
+  done < <(obfs_configured_tags)
+  return "$rc"
+}
+
+obfs_services_reconcile() {
+  local init_sys unit svc tag active_tags
+  active_tags=$'\n'"$(obfs_configured_tags)"$'\n'
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  case $init_sys in
+    systemd)
+      for unit in "${SYSTEMD_UNIT_DIR}"/xrayctl-obfs-*.service; do
+        [[ -e $unit ]] || continue
+        svc=$(basename "$unit" .service)
+        tag=${svc#xrayctl-obfs-}
+        [[ $active_tags == *$'\n'"$tag"$'\n'* ]] || obfs_service_remove "$tag"
+      done
+      ;;
+    openrc)
+      for unit in "${OPENRC_INIT_DIR}"/xrayctl-obfs-*; do
+        [[ -e $unit ]] || continue
+        svc=$(basename "$unit")
+        tag=${svc#xrayctl-obfs-}
+        [[ $active_tags == *$'\n'"$tag"$'\n'* ]] || obfs_service_remove "$tag"
+      done
+      ;;
+  esac
+  while IFS= read -r tag; do
+    [[ -n $tag ]] || continue
+    obfs_service_setup "$tag" 1 || return 1
+  done < <(obfs_configured_tags)
+}
+
+_obfs_sync_menu_action() {
+  local action=$1 tags
+  ensure_runtime_dependencies obfs-service
+  tags=$(obfs_configured_tags)
+  if [[ -z $tags ]]; then
+    info "当前没有启用 HTTP 混淆的入站。"
+    return 0
+  fi
+  obfs_services_sync_action "$action"
+  info "obfs-server 服务操作完成：${action}"
+}
+
+_build_simple_obfs_from_source() {
+  local manager build_dir target_bin install_dir
+  manager=$(pkg_manager) || die "未识别包管理器，无法安装构建 simple-obfs 所需依赖。"
+  case $manager in
+    apt) install_packages git build-essential autoconf automake libtool pkg-config libev-dev libc-ares-dev ;;
+    apk) install_packages git build-base autoconf automake libtool pkgconf libev-dev c-ares-dev linux-headers ;;
+    dnf|yum) install_packages git gcc make autoconf automake libtool pkgconfig libev-devel c-ares-devel ;;
+    pacman) install_packages git base-devel autoconf automake libtool pkgconf libev c-ares ;;
+    zypper) install_packages git gcc make autoconf automake libtool pkg-config libev-devel libcares-devel ;;
+  esac
+  build_dir=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-obfs-build.XXXXXX") || return 1
+  info "正在下载 simple-obfs 源码并编译。"
+  if ! run_bounded 300 git clone --recursive --depth 1 "$SIMPLE_OBFS_REPO_URL" "${build_dir}/simple-obfs"; then
+    rm -rf "$build_dir"
+    die "下载 simple-obfs 源码失败。"
+  fi
+  if ! (
+    cd "${build_dir}/simple-obfs" &&
+    { sed -i 's/-Werror//g' configure.ac Makefile.am src/Makefile.am 2>/dev/null || true; } &&
+    ./autogen.sh &&
+    ./configure --disable-documentation &&
+    make
+  ); then
+    rm -rf "$build_dir"
+    die "编译 simple-obfs 失败。"
+  fi
+  target_bin=$(find "${build_dir}/simple-obfs/src" -maxdepth 1 -type f -name 'obfs-server' | head -n1 || true)
+  if [[ -z $target_bin || ! -f $target_bin ]]; then
+    rm -rf "$build_dir"
+    die "编译完成但未找到 obfs-server 二进制。"
+  fi
+  install_dir=$(dirname "$OBFS_SERVER_BIN")
+  install -d -m 755 "$install_dir" || { rm -rf "$build_dir"; return 1; }
+  install -m 755 "$target_bin" "$OBFS_SERVER_BIN" || { rm -rf "$build_dir"; return 1; }
+  rm -rf "$build_dir"
+  meta_resource_register "simpleObfsBin" "$OBFS_SERVER_BIN"
+  info "simple-obfs 已从源码安装/更新：${OBFS_SERVER_BIN}"
+}
+
+install_or_update_simple_obfs() {
+  ensure_runtime_dependencies obfs-install
+  local manager="" preinstalled=0 managed_pkg=0
+  obfs_server_installed && preinstalled=1
+  manager=$(pkg_manager || true)
+  if [[ -r $META_FILE ]] && jq -e '.managedResources.simpleObfsPackage=="simple-obfs"' "$META_FILE" >/dev/null 2>&1; then
+    managed_pkg=1
+  fi
+  if [[ $manager == apt && ! -x $OBFS_SERVER_BIN ]]; then
+    DEBIAN_FRONTEND=noninteractive apt_get_guarded update -y >/dev/null 2>&1 || true
+    if DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y --no-install-recommends simple-obfs >/dev/null 2>&1 && obfs_server_installed; then
+      if ((preinstalled == 0 || managed_pkg == 1)); then
+        meta_resource_register "simpleObfsPackage" "simple-obfs"
+      fi
+      obfs_services_sync_action restart || true
+      info "simple-obfs 已安装/更新：$(obfs_server_bin)"
+      return 0
+    fi
+  elif [[ $manager == apk && ! -x $OBFS_SERVER_BIN ]]; then
+    if apk add --no-cache simple-obfs >/dev/null 2>&1 && obfs_server_installed; then
+      if ((preinstalled == 0 || managed_pkg == 1)); then
+        meta_resource_register "simpleObfsPackage" "simple-obfs"
+      fi
+      obfs_services_sync_action restart || true
+      info "simple-obfs 已安装/更新：$(obfs_server_bin)"
+      return 0
+    fi
+  fi
+  _build_simple_obfs_from_source || return 1
+  obfs_services_sync_action restart || true
+}
+
+ensure_simple_obfs_installed() {
+  obfs_server_installed && return 0
+  [[ ${XRAYCTL_TESTING:-0} != 1 ]] || return 0
+  install_or_update_simple_obfs
+}
+
+_obfs_uninstall_owned_binary_and_pkg() {
+  local meta_src=${1:-$META_FILE} owned_bin="" owned_pkg="" manager=""
+  if [[ -r $meta_src ]]; then
+    owned_bin=$(jq -r '.managedResources.simpleObfsBin // empty' "$meta_src" 2>/dev/null || true)
+    owned_pkg=$(jq -r '.managedResources.simpleObfsPackage // empty' "$meta_src" 2>/dev/null || true)
+  fi
+  if [[ -n $owned_bin && -e $owned_bin ]]; then
+    rm -f -- "$owned_bin"
+  fi
+  if [[ $owned_pkg == simple-obfs ]]; then
+    manager=$(pkg_manager || true)
+    case $manager in
+      apt) DEBIAN_FRONTEND=noninteractive apt_get_guarded remove -y simple-obfs >/dev/null 2>&1 || true ;;
+      apk) apk del simple-obfs >/dev/null 2>&1 || true ;;
+    esac
+  fi
+  if [[ -r $META_FILE ]] && jq -e 'type=="object"' "$META_FILE" >/dev/null 2>&1; then
+    meta_resource_remove_existing "simpleObfsBin"
+    meta_resource_remove_existing "simpleObfsPackage"
+  fi
+}
+
+uninstall_simple_obfs() {
+  local assume_yes=${1:-0} active_tags=""
+  if [[ $assume_yes == --yes ]]; then assume_yes=1; fi
+  ensure_runtime_dependencies obfs-uninstall
+  ensure_config
+  active_tags=$(obfs_configured_tags || true)
+  if [[ -n $active_tags ]]; then
+    error "仍有入站正在使用 HTTP 混淆，请先删除对应入站或关闭混淆后再卸载 simple-obfs。"
+    return 1
+  fi
+  [[ $assume_yes == 1 ]] || confirm "确定卸载 xrayctl 管理的 simple-obfs 吗？" N || return 0
+  obfs_remove_all_services || true
+  _obfs_uninstall_owned_binary_and_pkg
+  info "simple-obfs 已卸载。"
+}
+
+obfs_state_summary() {
+  local total=0 active=0 tag
+  while IFS= read -r tag; do
+    [[ -n $tag ]] || continue
+    total=$((total + 1))
+    if obfs_service_is_active "$tag"; then
+      active=$((active + 1))
+    fi
+  done < <(obfs_configured_tags)
+  if ((total > 0)); then
+    if ((active == total)); then
+      printf '运行中 (%d/%d)\n' "$active" "$total"
+    elif ((active > 0)); then
+      printf '部分运行 (%d/%d)\n' "$active" "$total"
+    else
+      printf '已停止 (0/%d)\n' "$total"
+    fi
+  elif obfs_server_installed; then
+    printf '已安装\n'
+  else
+    printf '未安装\n'
+  fi
+}
+
+show_obfs_status() {
+  local bin_path install_state svc tag listen port local_port obfs_host state_badge count=0 meta_json
+  bin_path=$(obfs_server_bin)
+  if obfs_server_installed; then
+    install_state=$(ui_badge ok "已安装 (${bin_path})")
+  else
+    install_state=$(ui_badge muted "未安装")
+  fi
+  heading "HTTP 混淆插件 (simple-obfs) 状态"
+  ui_card_open "插件概览"
+  ui_card_kv "obfs-server" "$install_state" 14
+  ui_card_kv "整体状态" "$(_ui_state_badge "$(obfs_state_summary)")" 14
+  ui_card_close
+
+  meta_json=$(meta_json_or_empty)
+  while IFS=$'\t' read -r tag listen port local_port obfs_host; do
+    [[ -n $tag ]] || continue
+    count=$((count + 1))
+    svc=$(obfs_service_name "$tag")
+    if ! obfs_service_exists "$tag"; then
+      state_badge=$(ui_badge muted "未创建服务")
+    elif obfs_service_is_active "$tag"; then
+      state_badge=$(ui_badge ok "运行中")
+    else
+      state_badge=$(ui_badge err "已停止")
+    fi
+    ui_card_open "混淆实例 · ${tag}"
+    ui_card_kv "服务单元" "${svc}  ${state_badge}" 12
+    ui_card_kv "监听转发" "${listen}:${port} → 127.0.0.1:${local_port}" 12
+    ui_card_kv "obfs-host" "$obfs_host" 12
+    ui_card_close
+  done < <(
+    if [[ -r $CONFIG_FILE ]]; then
+      jq -r --argjson meta "$meta_json" '
+        .inbounds[]? | .tag as $tag |
+        select(.protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true) |
+        [$tag, ($meta.inbounds[$tag].obfs.listen // "0.0.0.0"),
+         (($meta.inbounds[$tag].obfs.port // .port)|tostring),
+         (($meta.inbounds[$tag].obfs.localPort // .port)|tostring),
+         ($meta.inbounds[$tag].obfs.host // "-")] | @tsv
+      ' "$CONFIG_FILE" 2>/dev/null || true
+    fi
+  )
+  if ((count == 0)); then
+    info "当前没有启用 HTTP 混淆的 SS2022 入站。"
+  fi
+}
+
+show_obfs_logs() {
+  local lines=${1:-100} filter_tag=${2-} init_sys tag svc found=0 rc=0 out_log err_log
+  [[ $lines =~ ^[0-9]+$ ]] || die "日志行数必须是数字。"
+  init_sys=$(platform_init_system 2>/dev/null || true)
+  while IFS= read -r tag; do
+    [[ -n $tag ]] || continue
+    [[ -z $filter_tag || $tag == "$filter_tag" ]] || continue
+    found=1
+    svc=$(obfs_service_name "$tag")
+    heading "obfs-server 日志 · ${svc}"
+    case $init_sys in
+      systemd)
+        journalctl -u "$svc" -n "$lines" --no-pager || rc=$?
+        ;;
+      openrc)
+        out_log="${LOG_DIR}/obfs-${tag}.log"
+        err_log="${LOG_DIR}/obfs-${tag}-error.log"
+        if [[ -f $out_log || -f $err_log ]]; then
+          tail -n "$lines" "$err_log" "$out_log" 2>/dev/null || rc=$?
+        else
+          info "尚未生成 ${svc} 日志。"
+        fi
+        ;;
+      *)
+        warn "无法识别服务管理器。"
+        rc=1
+        ;;
+    esac
+  done < <(obfs_configured_tags)
+  if ((found == 0)); then
+    if [[ -n $filter_tag ]]; then
+      warn "未找到启用 HTTP 混淆的入站：${filter_tag}"
+    else
+      info "当前没有启用 HTTP 混淆的入站，暂无 obfs-server 日志。"
+    fi
+  fi
+  return "$rc"
+}
+
 show_status() {
-  local traffic_state backend svc_state svc_badge bbr_state bbr_badge inbound_cnt="0" cert_cnt="0"
+  local traffic_state backend svc_state svc_badge bbr_state bbr_badge obfs_badge inbound_cnt="0" cert_cnt="0"
   heading "Xray 运行状态"
   svc_state=$(service_state_summary)
   case $svc_state in
@@ -393,6 +904,7 @@ show_status() {
     未启用) bbr_badge=$(ui_badge muted "未启用") ;;
     *)      bbr_badge=$(ui_badge warn "$bbr_state") ;;
   esac
+  obfs_badge=$(_ui_state_badge "$(obfs_state_summary)")
   [[ -r $CONFIG_FILE ]] && inbound_cnt=$(jq '.inbounds|length' "$CONFIG_FILE" 2>/dev/null || printf '?')
   if declare -F certificate_count >/dev/null 2>&1; then
     cert_cnt=$(certificate_count 2>/dev/null || printf '0')
@@ -403,6 +915,7 @@ show_status() {
   ui_card_open "核心与服务概览"
   ui_card_kv "Xray 核心" "$(xray_version_summary)" 12
   ui_card_kv "服务状态" "${svc_badge}  (自启: $(startup_state_summary))" 12
+  ui_card_kv "HTTP 混淆" "$obfs_badge" 12
   ui_card_kv "TCP BBR" "$bbr_badge" 12
   ui_card_kv "入站 / 证书" "${inbound_cnt} 个入站 / ${cert_cnt} 张证书" 12
   ui_card_kv "流量统计" "${traffic_state} (${backend})" 12
@@ -418,6 +931,9 @@ show_status() {
     ui_section "服务单元详情"
     platform_service_status 2>/dev/null | sed -n '1,10p' | sed 's/^/  /' || true
   fi
+  if [[ -n $(obfs_configured_tags) ]]; then
+    show_obfs_status
+  fi
 }
 
 service_action() {
@@ -428,20 +944,25 @@ service_action() {
     traffic_user_collect_serialized || warn "服务操作前未能采集用户流量，未采集部分可能丢失。"
   fi
   case $action in
-    start) platform_service_start ;;
-    stop) platform_service_stop ;;
-    restart) platform_service_restart ;;
-    enable) platform_service_enable; platform_service_start ;;
-    disable) platform_service_stop || true; platform_service_disable ;;
+    start) platform_service_start; obfs_services_sync_action start ;;
+    stop) obfs_services_sync_action stop; platform_service_stop ;;
+    restart) platform_service_restart; obfs_services_sync_action restart ;;
+    enable) platform_service_enable; platform_service_start; obfs_services_sync_action enable ;;
+    disable) obfs_services_sync_action disable; platform_service_stop || true; platform_service_disable ;;
     *) die "未知服务操作：$action";;
   esac
   info "服务操作完成：$action"
 }
 
 show_logs() {
-  local lines=${1:-100}
+  local lines=${1:-100} rc=0
   [[ $lines =~ ^[0-9]+$ ]] || die "日志行数必须是数字。"
-  platform_service_logs "$lines"
+  platform_service_logs "$lines" || rc=$?
+  if [[ -n $(obfs_configured_tags) ]]; then
+    printf '\n'
+    show_obfs_logs "$lines" || rc=$?
+  fi
+  return "$rc"
 }
 
 _check_bbr_available() {
@@ -583,10 +1104,10 @@ startup_state_summary() {
 _ui_state_badge() {
   local label=$1
   case $label in
-    运行中|已开启|已启用) ui_badge ok "$label" ;;
-    已停止)               ui_badge err "$label" ;;
-    未安装|已关闭|未启用) ui_badge muted "$label" ;;
-    *)                    ui_badge warn "$label" ;;
+    运行中|运行中\ *|已开启|已启用|已安装) ui_badge ok "$label" ;;
+    已停止|已停止\ *)                     ui_badge err "$label" ;;
+    未安装|已关闭|未启用)                 ui_badge muted "$label" ;;
+    *)                                    ui_badge warn "$label" ;;
   esac
 }
 
@@ -605,26 +1126,27 @@ show_main_summary() {
 
 show_main_inbounds() {
   command_exists jq && [[ -r $CONFIG_FILE ]] || return 0
-  local count tag protocol port users outbound out_disp
+  local count tag protocol port users outbound out_disp meta_json
   count=$(jq -r '.inbounds|length' "$CONFIG_FILE" 2>/dev/null) || return 0
   ui_section "入站概览"
   if ((count == 0)); then
     printf '  %s○ 暂无入站节点，请选择 [1] 入站管理 创建首个节点%s\n' "$C_DIM" "$C_RESET"
     return 0
   fi
+  meta_json=$(meta_json_or_empty)
   printf '  %s' "$C_DIM"
   print_table_cell_clipped "标签" 16; printf '  '
   print_table_cell_clipped "协议" 6; printf '  '
   print_table_cell "端口" 6; printf '  '
   print_table_cell "用户" 4; printf '  默认出站%s\n' "$C_RESET"
-  jq -r --arg ss2022Method "$SS2022_METHOD" '
+  jq -r --arg ss2022Method "$SS2022_METHOD" --argjson meta "$meta_json" '
     (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
     .inbounds[] |
     .tag as $tag |
     [$tag,(if .protocol=="shadowsocks" then
        (if .settings.method==$ss2022Method then "SS2022" else "SS" end)
      else .protocol end),
-     (.port|tostring),
+     ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
      (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
       else ((.settings.accounts // .settings.users // []) | length) end | tostring),
      ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
@@ -642,25 +1164,30 @@ show_main_inbounds() {
 }
 
 show_node_summary() {
-  local tag=$1 protocol port method security listen users outbound host out_disp
-  IFS=$'\t' read -r protocol port method security listen users outbound < <(
-    jq -r --arg tag "$tag" --arg ss2022Method "$SS2022_METHOD" '
+  local tag=$1 protocol port method security listen users outbound host out_disp meta_json obfs_enabled obfs_host obfs_local_port obfs_svc_label
+  meta_json=$(meta_json_or_empty)
+  IFS=$'\t' read -r protocol port method security listen users outbound obfs_enabled obfs_host obfs_local_port < <(
+    jq -r --arg tag "$tag" --arg ss2022Method "$SS2022_METHOD" --argjson meta "$meta_json" '
       (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
       .inbounds[]|select(.tag==$tag)|[
         (if .protocol=="shadowsocks" and .settings.method==$ss2022Method then "SS2022" else .protocol end),
-        (.port|tostring),
+        ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
         (if .protocol=="vless" then (.streamSettings.network // .streamSettings.method // "raw")
-         elif .protocol=="shadowsocks" then (.settings.network // "tcp")
+         elif .protocol=="shadowsocks" then
+           (if $meta.inbounds[$tag].obfs.enabled==true then "tcp+http" else (.settings.network // "tcp") end)
          else "-" end),
         (if .protocol=="vless" then (.streamSettings.security // "none")
          elif .protocol=="shadowsocks" then (.settings.method // "AEAD")
          elif .protocol=="socks" then (.settings.auth // "noauth")
          elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
          else "noauth" end),
-        (.listen // "0.0.0.0"),
+        (if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.listen // "0.0.0.0") else (.listen // "0.0.0.0") end),
         (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
          else ((.settings.accounts // .settings.users // []) | length) end | tostring),
-        ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)
+        ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native),
+        ($meta.inbounds[$tag].obfs.enabled // false | tostring),
+        ($meta.inbounds[$tag].obfs.host // ""),
+        (($meta.inbounds[$tag].obfs.localPort // "")|tostring)
       ]|@tsv' "$CONFIG_FILE"
   )
   host=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
@@ -673,6 +1200,12 @@ show_node_summary() {
   ui_card_kv "协议 / 安全" "${protocol^^} · ${method} · ${security}" 12
   ui_card_kv "监听端口" "${listen}:${port}" 12
   [[ -z $host ]] || ui_card_kv "连接地址" "$host" 12
+  if [[ $obfs_enabled == true ]]; then
+    if obfs_service_is_active "$tag"; then obfs_svc_label=$(ui_badge ok "运行中");
+    elif obfs_service_exists "$tag"; then obfs_svc_label=$(ui_badge err "已停止");
+    else obfs_svc_label=$(ui_badge muted "未创建"); fi
+    ui_card_kv "HTTP 混淆" "${obfs_host}  (${obfs_svc_label}, 内部 127.0.0.1:${obfs_local_port})" 12
+  fi
   ui_card_kv "用户 / 出站" "${users} 个用户  ·  默认出站 ${out_disp}" 12
   ui_card_close
 }

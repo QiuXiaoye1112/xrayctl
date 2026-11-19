@@ -1003,11 +1003,19 @@ traffic_set_backend() {
 
 traffic_inventory_json() {
   [[ -r $CONFIG_FILE ]] || { warn "无法读取 Xray 配置，流量规则保持不变。"; return 1; }
-  jq -e '
+  local meta_json
+  meta_json=$(meta_json_or_empty)
+  jq -e --argjson meta "$meta_json" '
     if type != "object" or ((.inbounds | type) != "null" and (.inbounds | type) != "array") then
       error("invalid inbound inventory")
     else
-      [.inbounds[]? | {key:.tag,value:{protocol:.protocol,port:.port,disabled:false}}] | from_entries
+      [.inbounds[]? | .tag as $tag |
+        {key:$tag,value:{
+          protocol:.protocol,
+          port:(if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end),
+          disabled:false
+        }}
+      ] | from_entries
     end
   ' "$CONFIG_FILE" 2>/dev/null || { warn "Xray 配置无法解析，流量规则保持不变。"; return 1; }
 }
@@ -1330,45 +1338,66 @@ traffic_rules_clear() {
 }
 
 traffic_protocols_for_inbound() {
-  case $1 in shadowsocks|socks) printf '%s\n' tcp udp;; *) printf '%s\n' tcp;; esac
+  local protocol=$1 network=${2-}
+  case $protocol in
+    shadowsocks)
+      if [[ $network == tcp ]]; then printf '%s\n' tcp
+      else printf '%s\n' tcp udp
+      fi
+      ;;
+    socks) printf '%s\n' tcp udp ;;
+    *) printf '%s\n' tcp ;;
+  esac
 }
 
 traffic_restore_nft_rules() {
-  local tag inbound_protocol port transport_protocol count_comment count=0
+  local tag inbound_protocol port inbound_network transport_protocol count_comment count=0 meta_json
   command_exists nft || return 1
   traffic_clear_nft_rules || return 1
+  meta_json=$(meta_json_or_empty)
   nft add table inet "$TRAFFIC_NFT_TABLE" || return 1
   nft 'add chain inet xrayctl_traffic input { type filter hook input priority -5; policy accept; }' || return 1
   nft 'add chain inet xrayctl_traffic output { type filter hook output priority -5; policy accept; }' || return 1
-  while IFS=$'\t' read -r tag inbound_protocol port; do
+  while IFS=$'\t' read -r tag inbound_protocol port inbound_network; do
     if [[ -z $tag ]] || ! validate_port "$port"; then continue; fi
     count_comment="\"xrayctl-traffic:count:${tag}\""
     while IFS= read -r transport_protocol; do
       nft add rule inet "$TRAFFIC_NFT_TABLE" input "$transport_protocol" dport "$port" counter comment "$count_comment" || return 1
       nft add rule inet "$TRAFFIC_NFT_TABLE" output "$transport_protocol" sport "$port" counter comment "$count_comment" || return 1
       count=$((count + 1))
-    done < <(traffic_protocols_for_inbound "$inbound_protocol")
-  done < <(jq -r '.inbounds[]? | [.tag,.protocol,(.port|tostring)] | @tsv' "$CONFIG_FILE" 2>/dev/null || true)
+    done < <(traffic_protocols_for_inbound "$inbound_protocol" "$inbound_network")
+  done < <(jq -r --argjson meta "$meta_json" '
+    .inbounds[]? | .tag as $tag |
+    [$tag, .protocol,
+     ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
+     (if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then "tcp" else (.settings.network // "-") end)] | @tsv
+  ' "$CONFIG_FILE" 2>/dev/null || true)
   ((count > 0)) || traffic_clear_nft_rules
 }
 
 traffic_restore_iptables_rules() {
-  local command tag inbound_protocol port transport_protocol count=0
+  local command tag inbound_protocol port inbound_network transport_protocol count=0 meta_json
   traffic_clear_iptables_rules || return 1
+  meta_json=$(meta_json_or_empty)
   for command in iptables ip6tables; do
     command_exists "$command" || continue
     "$command" -t filter -N "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -N "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -C INPUT -j "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I INPUT 1 -j "$TRAFFIC_IPTABLES_IN_CHAIN"
     "$command" -t filter -C OUTPUT -j "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I OUTPUT 1 -j "$TRAFFIC_IPTABLES_OUT_CHAIN"
-    while IFS=$'\t' read -r tag inbound_protocol port; do
+    while IFS=$'\t' read -r tag inbound_protocol port inbound_network; do
       if [[ -z $tag ]] || ! validate_port "$port"; then continue; fi
       while IFS= read -r transport_protocol; do
         "$command" -t filter -A "$TRAFFIC_IPTABLES_IN_CHAIN" -p "$transport_protocol" --dport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
         "$command" -t filter -A "$TRAFFIC_IPTABLES_OUT_CHAIN" -p "$transport_protocol" --sport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
         count=$((count + 1))
-      done < <(traffic_protocols_for_inbound "$inbound_protocol")
-    done < <(jq -r '.inbounds[]? | [.tag,.protocol,(.port|tostring)] | @tsv' "$CONFIG_FILE" 2>/dev/null || true)
+      done < <(traffic_protocols_for_inbound "$inbound_protocol" "$inbound_network")
+    done < <(jq -r --argjson meta "$meta_json" '
+      .inbounds[]? | .tag as $tag |
+      [$tag, .protocol,
+       ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
+       (if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then "tcp" else (.settings.network // "-") end)] | @tsv
+    ' "$CONFIG_FILE" 2>/dev/null || true)
   done
   ((count > 0)) || traffic_clear_iptables_rules
 }

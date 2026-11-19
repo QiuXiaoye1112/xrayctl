@@ -575,12 +575,36 @@ temp_file() {
   printf '%s\n' "${path}.json"
 }
 
+meta_json_or_empty() {
+  local payload=""
+  if [[ -r $META_FILE ]]; then
+    payload=$(jq -c 'if type=="object" then . else {} end' "$META_FILE" 2>/dev/null || true)
+  fi
+  if [[ -n $payload ]]; then
+    printf '%s' "$payload"
+  else
+    printf '{}'
+  fi
+}
+
 _state_build_inbound_meta_set() {
-  local current=$1 candidate=$2 tag=$3 host=$4
-  jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-    '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now}) |
-     del(.inbounds[$tag].realityPublicKey)' \
-    "$current" >"$candidate"
+  local current=$1 candidate=$2 tag=$3 host=$4 obfs_json=${5-}
+  if [[ -n $obfs_json && $obfs_json != none ]]; then
+    jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --argjson obfs "$obfs_json" \
+      '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now,obfs:$obfs}) |
+       del(.inbounds[$tag].realityPublicKey)' \
+      "$current" >"$candidate"
+  elif [[ $obfs_json == none ]]; then
+    jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now}) |
+       del(.inbounds[$tag].realityPublicKey, .inbounds[$tag].obfs)' \
+      "$current" >"$candidate"
+  else
+    jq --arg tag "$tag" --arg host "$host" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      '.inbounds[$tag] = ((.inbounds[$tag] // {}) + {host:$host,managed:true,updatedAt:$now}) |
+       del(.inbounds[$tag].realityPublicKey)' \
+      "$current" >"$candidate"
+  fi
 }
 
 _state_build_inbound_meta_delete() {
@@ -597,7 +621,12 @@ _state_build_inbound_meta_rename() {
   local current=$1 candidate=$2 old_tag=$3 new_tag=$4
   jq --arg old "$old_tag" --arg new "$new_tag" --arg now "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '
     if .inbounds[$old] then
-      .inbounds[$new]=(.inbounds[$old] + {updatedAt:$now}) | del(.inbounds[$old])
+      .inbounds[$new]=(
+        (.inbounds[$old] + {updatedAt:$now}) |
+        if (.obfs | type)=="object" and (.obfs.enabled // false)==true then
+          .obfs.service = ("xrayctl-obfs-" + $new)
+        else . end
+      ) | del(.inbounds[$old])
     else . end |
     .domainTemplates = (.domainTemplates // {templates:[],userBindings:[]}) |
     .domainTemplates.userBindings = [.domainTemplates.userBindings[]? |
@@ -608,7 +637,7 @@ _state_build_inbound_meta_rename() {
 }
 
 state_commit_inbound_set() {
-  state_commit "$1" _state_build_inbound_meta_set "$2" "$3"
+  state_commit "$1" _state_build_inbound_meta_set "$2" "$3" "${4-}"
 }
 
 state_commit_inbound_delete() {
@@ -737,10 +766,12 @@ restore_backup() {
     init_meta || true
     setup_runtime_access || true
     restart_service || true
+    obfs_services_reconcile || true
     traffic_runtime_ensure || true
     rm -rf "$temp"
     die "恢复失败，已回滚配置、元数据、证书、流量记录和运行时规则。"
   fi
+  obfs_services_reconcile || warn "备份已恢复，但部分 obfs-server 服务同步失败，请检查 simple-obfs 状态。"
   rm -rf "$temp"; info "备份已恢复。"
 
   # Warn if any Let's Encrypt certs lack Certbot lineage after restore

@@ -56,12 +56,23 @@ prompt_client_label() { printf -v "$1" '%s' user; }
 prompt_optional_value() { printf -v "$1" '%s' user; }
 prompt_secret() { printf -v "$1" '%s' password; }
 for protocol_choice in 1 2 3 4; do
-  set_choices "$protocol_choice"
-  inbound="" host="" public_key=""
-  build_inbound inbound host public_key
+  if [[ $protocol_choice == 2 ]]; then
+    set_choices "$protocol_choice" 1
+  else
+    set_choices "$protocol_choice"
+  fi
+  inbound="" host="" public_key="" obfs_meta=""
+  build_inbound inbound host public_key obfs_meta
   assert_eq "0.0.0.0" "$(jq -r .listen <<<"$inbound")" "default listener must accept external connections for every protocol"
   expected=(unused vless shadowsocks socks http)
   assert_eq "${expected[$protocol_choice]}" "$(jq -r .protocol <<<"$inbound")" "protocol menu choice routed incorrectly"
 done
+
+set_choices 2 2
+inbound="" host="" public_key="" obfs_meta=""
+build_inbound inbound host public_key obfs_meta
+assert_eq "127.0.0.1" "$(jq -r .listen <<<"$inbound")" "obfs SS2022 inbound must bind localhost"
+assert_eq "tcp" "$(jq -r .settings.network <<<"$inbound")" "obfs SS2022 inbound must be TCP-only"
+assert_eq "www.microsoft.com" "$(jq -r .host <<<"$obfs_meta")" "obfs metadata must preserve obfs-host"
 
 pass "all protocol, security, and transport interactive builder choices are covered"

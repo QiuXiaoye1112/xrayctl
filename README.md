@@ -10,7 +10,7 @@
 
 - 主菜单彻底删除受管理资源
 - VLESS、SS2022、SOCKS5、HTTP 入站
-- SS2022 入站使用 `2022-blake3-aes-256-gcm` 和 TCP/UDP，自动生成服务端密钥和独立用户密钥。分享链接使用 `ss://`，入站至少保留一个用户。
+- SS2022 入站使用 `2022-blake3-aes-256-gcm`，自动生成服务端密钥和独立用户密钥，入站至少保留一个用户。支持直接 `TCP/UDP` 或可选 `simple-obfs` HTTP 混淆（仅 TCP，需强制输入 `obfs-host`，自动创建并联动管理 `obfs-server` 服务，分享链接自动附带 SIP003 `?plugin=...` 参数）。
 - 新建 SOCKS5/HTTP 入站必须设置用户名和密码；不创建无认证入站
 - RAW、XHTTP、WebSocket 传输
 - REALITY、TLS、无传输安全（仅建议可信私网）
@@ -73,7 +73,7 @@ Xray Linux 管理脚本
 │  ├─ 查看/刷新各入站当前月度周期流量
 │  ├─ 设置统一月度统计起点
 │  └─ 安装后自动开启每分钟采集
-├─ 服务管理（启停、重启、自启、查看日志、BBR）
+├─ 服务管理（启停、重启、自启、查看日志、BBR、HTTP 混淆 simple-obfs）
 └─ 卸载
 ```
 
@@ -153,6 +153,10 @@ xrayctl traffic user set TAG USER 100 15 18:30 # 用户每月 100 GB
 xrayctl traffic user remove TAG USER --yes # 取消用户额度
 xrayctl traffic user reset TAG USER --yes  # 清零用户流量和当前额度周期
 xrayctl cert issue example.com admin@example.com
+xrayctl obfs status              # 查看 simple-obfs 插件与实例状态
+xrayctl obfs logs 100            # 查看 obfs-server 服务日志
+xrayctl obfs install             # 安装/更新 simple-obfs
+xrayctl obfs uninstall --yes     # 卸载 xrayctl 托管的 simple-obfs
 ```
 
 非交互执行凭据轮换和用户路由恢复时必须显式添加 `--yes`，否则命令报错并返回非零状态。入站默认出站和用户默认出站的设置命令支持出站标签，也支持已配置本机出站的完整 IPv4/IPv6 地址；同一 IP 对应多个出站时需使用明确的标签。非交互执行 `xrayctl bbr` 只显示状态，不修改内核或持久化配置。
