@@ -210,20 +210,20 @@ jq --arg a "$id_a" '.inbounds.a.users[$a].limit.usedBytes=10' "$TRAFFIC_FILE" >"
 cp "$tmp/state" "$TRAFFIC_FILE"
 traffic_user_reconcile_locked
 (
-  cp "$TRAFFIC_FILE" "$tmp/stopped-traffic.json"
-  TRAFFIC_FILE="$tmp/stopped-traffic.json"
-  before=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$TRAFFIC_FILE")
+  stopped_traffic="$tmp/stopped-traffic.json"
+  cp "$TRAFFIC_FILE" "$stopped_traffic"
+  before=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$stopped_traffic")
   platform_service_is_stopped() { return 0; }
   traffic_user_core_epoch() { return 1; }
   traffic_user_read_samples() { printf 'unexpected API call\n' >&2; return 1; }
   traffic_read_counters() { printf 'a\t100\n'; }
   traffic_rules_restore() { :; }
   traffic_user_reconcile() { :; }
-  traffic_collect >"$tmp/stopped-stdout" 2>"$tmp/stopped-stderr"
+  TRAFFIC_FILE="$stopped_traffic" traffic_collect >"$tmp/stopped-stdout" 2>"$tmp/stopped-stderr"
   [[ ! -s $tmp/stopped-stdout && ! -s $tmp/stopped-stderr ]]
-  after=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$TRAFFIC_FILE")
+  after=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$stopped_traffic")
   [[ $before == "$after" ]]
-  jq -e '.inbounds.a.daily["2026-02-28"]==200' "$TRAFFIC_FILE" >/dev/null
+  jq -e '.inbounds.a.daily["2026-02-28"]==200' "$stopped_traffic" >/dev/null
 )
 (
   before=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$TRAFFIC_FILE")
