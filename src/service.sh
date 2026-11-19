@@ -937,29 +937,50 @@ _obfs_sync_menu_action() {
   info "obfs-server 服务操作完成：${action}"
 }
 
+_obfs_run_install_step() {
+  local log_file=$1
+  shift
+  if ( "$@" ) >"$log_file" 2>&1; then
+    return 0
+  fi
+  warn "操作失败，最近的诊断信息："
+  tail -n 30 "$log_file" >&2
+  return 1
+}
+
 _build_simple_obfs_from_source() {
-  local manager build_dir target_bin install_dir
+  local manager build_dir target_bin install_dir log_file
   manager=$(pkg_manager) || die "未识别包管理器，无法安装构建 simple-obfs 所需依赖。"
-  case $manager in
-    apt) install_packages git build-essential autoconf automake libtool pkg-config libev-dev libc-ares-dev ;;
-    apk) install_packages git build-base autoconf automake libtool pkgconf libev-dev c-ares-dev linux-headers ;;
-    dnf|yum) install_packages git gcc make autoconf automake libtool pkgconfig libev-devel c-ares-devel ;;
-    pacman) install_packages git base-devel autoconf automake libtool pkgconf libev c-ares ;;
-    zypper) install_packages git gcc make autoconf automake libtool pkg-config libev-devel libcares-devel ;;
-  esac
   build_dir=$(mktemp -d "$(runtime_tmp_dir)/xrayctl-obfs-build.XXXXXX") || return 1
-  info "正在下载 simple-obfs 源码并编译。"
-  if ! run_bounded 300 git clone --recursive --depth 1 "$SIMPLE_OBFS_REPO_URL" "${build_dir}/simple-obfs"; then
+  log_file="${build_dir}/install.log"
+  local -a dependencies
+  case $manager in
+    apt) dependencies=(git build-essential autoconf automake libtool pkg-config libev-dev libc-ares-dev) ;;
+    apk) dependencies=(git build-base autoconf automake libtool pkgconf libev-dev c-ares-dev linux-headers) ;;
+    dnf|yum) dependencies=(git gcc make autoconf automake libtool pkgconfig libev-devel c-ares-devel) ;;
+    pacman) dependencies=(git base-devel autoconf automake libtool pkgconf libev c-ares) ;;
+    zypper) dependencies=(git gcc make autoconf automake libtool pkg-config libev-devel libcares-devel) ;;
+  esac
+  info "正在准备 simple-obfs 构建依赖，请稍候。"
+  if ! _obfs_run_install_step "$log_file" install_packages "${dependencies[@]}"; then
+    rm -rf "$build_dir"
+    die "安装 simple-obfs 构建依赖失败。"
+  fi
+  info "正在下载 simple-obfs 源码，请稍候。"
+  if ! _obfs_run_install_step "$log_file" run_bounded 300 git clone --recursive --depth 1 "$SIMPLE_OBFS_REPO_URL" "${build_dir}/simple-obfs"; then
     rm -rf "$build_dir"
     die "下载 simple-obfs 源码失败。"
   fi
+  info "正在编译 simple-obfs，请稍候。"
   if ! (
     cd "${build_dir}/simple-obfs" &&
     { sed -i 's/-Werror//g' configure.ac Makefile.am src/Makefile.am 2>/dev/null || true; } &&
     ./autogen.sh &&
     ./configure --disable-documentation &&
     make
-  ); then
+  ) >"$log_file" 2>&1; then
+    warn "编译失败，最近的诊断信息："
+    tail -n 30 "$log_file" >&2
     rm -rf "$build_dir"
     die "编译 simple-obfs 失败。"
   fi
@@ -984,6 +1005,7 @@ install_or_update_simple_obfs() {
   if [[ -r $META_FILE ]] && jq -e '.managedResources.simpleObfsPackage=="simple-obfs"' "$META_FILE" >/dev/null 2>&1; then
     managed_pkg=1
   fi
+  info "正在安装 simple-obfs，请稍候。"
   if [[ $manager == apt && ! -x $OBFS_SERVER_BIN ]]; then
     DEBIAN_FRONTEND=noninteractive apt_get_guarded update -y >/dev/null 2>&1 || true
     if DEBIAN_FRONTEND=noninteractive apt_get_guarded install -y --no-install-recommends simple-obfs >/dev/null 2>&1 && obfs_server_installed; then

@@ -33,6 +33,14 @@ trap - ERR
 trap cleanup EXIT
 original_prompt_value=$(declare -f prompt_value)
 
+# Successful install steps stay quiet; failures retain useful diagnostics.
+_obfs_run_install_step "$TEST_ROOT/install.log" bash -c 'echo download-output' >"$TEST_ROOT/install.out" 2>&1
+[[ ! -s $TEST_ROOT/install.out ]]
+if _obfs_run_install_step "$TEST_ROOT/install.log" bash -c 'echo network-failure >&2; exit 1' >"$TEST_ROOT/install.out" 2>&1; then
+  fail "failed obfs installation step must return failure"
+fi
+grep -Fq 'network-failure' "$TEST_ROOT/install.out"
+
 ensure_runtime_dependencies() { :; }
 setup_runtime_access() { :; }
 service_is_active() { return 1; }
