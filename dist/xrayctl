@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="14d02212627f"
+readonly XRAYCTL_BUILD_COMMIT="a7f05950aefd"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -73,11 +73,13 @@ fi
 
 _ui_put() {
   local style=$1 text=$2 fd=${3:-1}
-  if [[ -t $fd && -z ${NO_COLOR:-} ]]; then
-    printf '%s%s%s' "$style" "$text" "$_ANSI_RESET" >&"$fd"
-  else
-    printf '%s' "$text" >&"$fd"
-  fi
+  local out=$text
+  [[ -t $fd && -z ${NO_COLOR:-} ]] && out="${style}${text}${_ANSI_RESET}"
+  case $fd in
+    2) printf '%s' "$out" >&2 2>/dev/null || true ;;
+    1) printf '%s' "$out" 2>/dev/null || true ;;
+    *) printf '%s' "$out" >&"$fd" || true ;;
+  esac
 }
 
 ui_width() {
@@ -226,9 +228,9 @@ ui_progress_enabled() {
 ui_step() {
   local step=$1 total=$2 label=$3
   ui_progress_enabled || return 0
-  printf '  ' >&2
+  printf '  ' >&2 2>/dev/null || true
   _ui_put "$_ANSI_CYAN" "[${step}/${total}]" 2
-  printf ' %s ... ' "$label" >&2
+  printf ' %s ... ' "$label" >&2 2>/dev/null || true
 }
 
 ui_step_done() {
@@ -240,10 +242,10 @@ ui_step_done() {
     fail) _ui_put "$_ANSI_RED" '✗' 2 ;;
   esac
   if [[ -n $detail ]]; then
-    printf ' ' >&2
+    printf ' ' >&2 2>/dev/null || true
     _ui_put "$_ANSI_DIM" "$detail" 2
   fi
-  printf '\n' >&2
+  printf '\n' >&2 2>/dev/null || true
 }
 
 print_notice() {
@@ -262,7 +264,7 @@ print_notice() {
     done <<<"$detail"
   done
   # Emit one block on one stream so details cannot overtake their warning.
-  printf '%s' "$rendered"
+  printf '%s' "$rendered" 2>/dev/null || true
 }
 
 info()    { print_notice "信息" "$C_GREEN" "${1-}" "${@:2}"; }
@@ -1357,8 +1359,9 @@ _state_cleanup_transaction_files() {
 }
 
 state_commit() {
+  trap '' HUP PIPE
   local candidate=$1 meta_mutator=${2-} old_active=0 traffic_locked=0
-  local config_snapshot meta_snapshot meta_candidate=""
+  local config_snapshot meta_snapshot meta_candidate="" obfs_ext_port="" obfs_port_bound_before=0
   if [[ -n $meta_mutator ]]; then shift 2; else shift; fi
   if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} == 1 ]]; then
     [[ -r $CONFIG_FILE && -r $META_FILE ]] || { error "用户额度配置事务缺少现有配置或 metadata。"; return 1; }
@@ -1426,6 +1429,18 @@ state_commit() {
   fi
   ui_step_done ok
 
+  if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
+    obfs_ext_port=$(jq -r '.port // empty' <<<"${3-}" 2>/dev/null || true)
+    if [[ -n $obfs_ext_port ]] && jq -e --argjson port "$obfs_ext_port" '[.inbounds[]? | select(.port==$port)] | length>0' "$config_snapshot" >/dev/null 2>&1; then
+      obfs_port_bound_before=1
+    fi
+    if ((obfs_port_bound_before == 0)); then
+      obfs_service_setup "$1" 1 || true
+    else
+      obfs_service_setup "$1" 0 || true
+    fi
+  fi
+
   if ((old_active)); then
     ui_step 3 3 "重启 Xray 服务使变更生效"
     if ! restart_service; then
@@ -1433,11 +1448,21 @@ state_commit() {
       error "重启失败，正在回滚配置和 metadata。"
       _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
       restart_service || true
+      if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
+        if jq -e --arg tag "$1" '.inbounds[$tag].obfs.enabled==true' "$meta_snapshot" >/dev/null 2>&1; then
+          obfs_service_setup "$1" 1 || true
+        else
+          obfs_service_remove "$1" 2>/dev/null || true
+        fi
+      fi
       ((traffic_locked == 0)) || traffic_lock_release
       _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
       return 1
     fi
     ui_step_done ok
+    if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
+      obfs_service_setup "$1" 1 || true
+    fi
   else
     ui_step 3 3 "检查服务状态"
     ui_step_done ok "服务未运行，无需重启"
@@ -1463,6 +1488,7 @@ state_commit() {
 apply_candidate() { state_commit "$1"; }
 
 state_apply_candidate_file() {
+  trap '' HUP PIPE
   local candidate=$1 operation=$2 rc normalized="" address
   shift 2
   if traffic_user_managed_config; then
