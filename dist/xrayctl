@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="30cdd870df58"
+readonly XRAYCTL_BUILD_COMMIT="436a65163fbc"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -3737,7 +3737,7 @@ modify_inbound_client_address() {
   current=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
   old_listen=$(inbound_effective_listen "$tag") || return 1
   old_port=$(inbound_effective_port "$tag") || return 1
-  info "当前客户端连接地址：${current:-未设置}；监听地址：${old_listen}。"
+  info "监听地址：${old_listen}"
   prompt_inbound_ip address || return 1
 
   # Older TLS inbounds reused the share host as SNI. Keep the name in links
@@ -9607,9 +9607,9 @@ show_main_inbounds() {
 }
 
 show_node_summary() {
-  local tag=$1 protocol port method security listen users outbound host out_disp meta_json obfs_enabled obfs_host obfs_local_port obfs_svc_label
+  local tag=$1 protocol port method security users outbound host out_disp meta_json obfs_enabled obfs_host obfs_local_port obfs_svc_label
   meta_json=$(meta_json_or_empty)
-  IFS=$'\t' read -r protocol port method security listen users outbound obfs_enabled obfs_host obfs_local_port < <(
+  IFS=$'\t' read -r protocol port method security users outbound obfs_enabled obfs_host obfs_local_port < <(
     jq -r --arg tag "$tag" --arg ss2022Method "$SS2022_METHOD" --argjson meta "$meta_json" '
       (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
       .inbounds[]|select(.tag==$tag)|[
@@ -9626,7 +9626,6 @@ show_node_summary() {
          elif .protocol=="socks" then (.settings.auth // "noauth")
          elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
          else "noauth" end),
-        (if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.listen // "0.0.0.0") else (.listen // "0.0.0.0") end),
         (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
          else ((.settings.accounts // .settings.users // []) | length) end | tostring),
         ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native),
@@ -9643,7 +9642,7 @@ show_node_summary() {
   fi
   ui_card_open "节点概览"
   ui_card_kv "协议 / 安全" "${protocol^^} · ${method} · ${security}" 12
-  ui_card_kv "监听端口" "${listen}:${port}" 12
+  ui_card_kv "监听端口" "$port" 12
   [[ -z $host ]] || ui_card_kv "连接地址" "$host" 12
   if [[ $obfs_enabled == true ]]; then
     if obfs_service_is_active "$tag"; then obfs_svc_label=$(ui_badge ok "运行中");
