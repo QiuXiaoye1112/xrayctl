@@ -403,7 +403,7 @@ modify_inbound_client_address() {
   current=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
   old_listen=$(inbound_effective_listen "$tag") || return 1
   old_port=$(inbound_effective_port "$tag") || return 1
-  info "当前客户端连接地址：${current:-未设置}；监听地址：${old_listen}。"
+  info "监听地址：${old_listen}"
   prompt_inbound_ip address || return 1
 
   # Older TLS inbounds reused the share host as SNI. Keep the name in links

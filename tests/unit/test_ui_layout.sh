@@ -85,6 +85,9 @@ main_out=$(printf '0\n' | main_menu)
 [[ $main_out == *'系统与运维'* ]] || fail 'main_menu omitted 系统与运维 group'
 [[ $main_out == *'入站概览'* && $main_out == *'edge'* && $main_out == *'0) 退出'* ]] \
   || fail 'main_menu omitted inbound overview or exit option'
+summary=$(show_node_summary edge)
+grep -Eq '^[[:space:]]*监听端口[[:space:]]+443[[:space:]]*$' <<<"$summary" || fail 'the node summary must show only the port in the listener row'
+grep -Eq '^[[:space:]]*连接地址[[:space:]]+203\.0\.113\.10[[:space:]]*$' <<<"$summary" || fail 'the node summary lost the separate client address'
 
 # 3. Delivery links output renders structured parameter card while keeping subscription URIs intact.
 _reality_public_key_for_tag() { printf 'PUBKEY_TEST'; }

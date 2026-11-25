@@ -84,6 +84,8 @@ cp "$META_FILE" "$TEST_ROOT/original-meta.json"
   modify_inbound_menu vless-node vless
 ) <<<$'2\n2\n1\n0' >"$TEST_ROOT/address-menu.out"
 grep -Fq '修改客户端连接地址' "$TEST_ROOT/address-menu.out"
+grep -Fxq '信息 · 监听地址：::' "$TEST_ROOT/address-menu.out"
+if grep -Fq '当前客户端连接地址' "$TEST_ROOT/address-menu.out"; then fail "the edit prompt repeated the client address"; fi
 grep -Fxq '    1) IPv4' "$TEST_ROOT/address-menu.out"
 grep -Fxq '    2) IPv6' "$TEST_ROOT/address-menu.out"
 if grep -Eq '^    [0-9]+\) .*域名|双栈' "$TEST_ROOT/address-menu.out"; then fail "the address menu offered a domain or wildcard mode"; fi

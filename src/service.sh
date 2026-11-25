@@ -1505,9 +1505,9 @@ show_main_inbounds() {
 }
 
 show_node_summary() {
-  local tag=$1 protocol port method security listen users outbound host out_disp meta_json obfs_enabled obfs_host obfs_local_port obfs_svc_label
+  local tag=$1 protocol port method security users outbound host out_disp meta_json obfs_enabled obfs_host obfs_local_port obfs_svc_label
   meta_json=$(meta_json_or_empty)
-  IFS=$'\t' read -r protocol port method security listen users outbound obfs_enabled obfs_host obfs_local_port < <(
+  IFS=$'\t' read -r protocol port method security users outbound obfs_enabled obfs_host obfs_local_port < <(
     jq -r --arg tag "$tag" --arg ss2022Method "$SS2022_METHOD" --argjson meta "$meta_json" '
       (.routing.rules // []) as $rules | (.outbounds[0].tag // "direct") as $native |
       .inbounds[]|select(.tag==$tag)|[
@@ -1524,7 +1524,6 @@ show_node_summary() {
          elif .protocol=="socks" then (.settings.auth // "noauth")
          elif (((.settings.accounts // .settings.users // [])|length)>0) then "password"
          else "noauth" end),
-        (if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.listen // "0.0.0.0") else (.listen // "0.0.0.0") end),
         (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
          else ((.settings.accounts // .settings.users // []) | length) end | tostring),
         ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native),
@@ -1541,7 +1540,7 @@ show_node_summary() {
   fi
   ui_card_open "节点概览"
   ui_card_kv "协议 / 安全" "${protocol^^} · ${method} · ${security}" 12
-  ui_card_kv "监听端口" "${listen}:${port}" 12
+  ui_card_kv "监听端口" "$port" 12
   [[ -z $host ]] || ui_card_kv "连接地址" "$host" 12
   if [[ $obfs_enabled == true ]]; then
     if obfs_service_is_active "$tag"; then obfs_svc_label=$(ui_badge ok "运行中");
