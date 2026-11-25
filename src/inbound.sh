@@ -353,7 +353,7 @@ rename_inbound() {
 
 prompt_inbound_ip() {
   local __out=$1 local_ip canonical family_choice=1 ip_choice
-  local label=${2:-选择要绑定的本机}
+  local label=${2:-选择要绑定的本机} network_v4=0 network_v6=0
   local -a addresses_v4=() addresses_v6=()
   local -A seen=()
   while IFS=$'\t' read -r _ local_ip _; do
@@ -364,10 +364,18 @@ prompt_inbound_ip() {
     seen[$canonical]=1
     if [[ $canonical == *:* ]]; then
       addresses_v6+=("$local_ip")
+      if [[ $canonical != 0000:0000:0000:0000:0000:0000:0000:0001 ]]; then network_v6=1; fi
     else
       addresses_v4+=("$canonical")
+      if [[ $canonical != 127.* ]]; then network_v4=1; fi
     fi
   done < <(detect_local_ips inbound)
+
+  # A loopback address alone does not make the other family available to clients.
+  if ((network_v4 || network_v6)); then
+    if ((network_v4 == 0)); then addresses_v4=(); fi
+    if ((network_v6 == 0)); then addresses_v6=(); fi
+  fi
 
   if ((${#addresses_v4[@]} == 0 && ${#addresses_v6[@]} == 0)); then
     warn "未检测到可绑定的本机 IPv4 或 IPv6 地址。"

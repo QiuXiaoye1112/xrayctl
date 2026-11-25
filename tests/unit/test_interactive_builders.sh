@@ -96,10 +96,16 @@ assert_eq 2001:db8::11 "$host" "the selected second IPv6 must be shared"
   assert_eq 2001:db8::10 "$host" "choosing a TLS connection address must not replace SNI"
 )
 (
-  detect_local_ips() { printf '%s\t%s\t%s\n' IPv6 2001:db8::10 eth0 IPv6 2001:db8::11 eth0; }
+  detect_local_ips() { printf '%s\t%s\t%s\n' IPv4 127.0.0.1 lo IPv6 2001:db8::10 eth0 IPv6 2001:db8::11 eth0; }
   set_choices 1 2
   build_inbound inbound host public_key obfs_meta
   assert_eq 2001:db8::11 "$host" "IPv6-only selection should open the address list directly"
+)
+(
+  detect_local_ips() { printf '%s\t%s\t%s\n' IPv4 203.0.113.10 eth0 IPv4 203.0.113.11 eth0 IPv6 ::1 lo; }
+  set_choices 1 2
+  build_inbound inbound host public_key obfs_meta
+  assert_eq 203.0.113.11 "$host" "IPv4-only selection should open the address list directly"
 )
 (
   detect_local_ips() { printf '%s\t%s\t%s\n' IPv4 0.0.0.0 eth0 IPv6 :: eth0 IPv6 fe80::1 eth0; }

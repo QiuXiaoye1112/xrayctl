@@ -209,3 +209,17 @@ modify_inbound_client_address socks-legacy <<<$'1\n1' >/dev/null
 jq -e '.inbounds[] | select(.tag=="socks-legacy") |
   .listen=="192.0.2.10" and .port==8443 and .settings.ip=="192.0.2.50"' "$CONFIG_FILE" >/dev/null
 pass "SOCKS address edits repair an advertised wildcard and preserve explicit relay addresses"
+
+(
+  detect_local_ips() { printf '%s\t%s\t%s\n' IPv4 192.0.2.10 eth0 IPv6 ::1 lo; }
+  modify_inbound_client_address vless-node <<<'1' >"$TEST_ROOT/single-family-edit.out"
+  grep -Fq '选择要绑定的本机 IPv4' "$TEST_ROOT/single-family-edit.out"
+  if grep -Fq '选择客户端连接地址类型' "$TEST_ROOT/single-family-edit.out"; then fail 'IPv4-only edit showed a family menu'; fi
+
+  detect_local_ips() { printf '%s\t%s\t%s\n' IPv4 127.0.0.1 lo IPv6 2001:db8::10 eth0; }
+  modify_inbound_client_address vless-node <<<'1' >"$TEST_ROOT/single-family-edit.out"
+  grep -Fq '选择要绑定的本机 IPv6' "$TEST_ROOT/single-family-edit.out"
+  if grep -Fq '选择客户端连接地址类型' "$TEST_ROOT/single-family-edit.out"; then fail 'IPv6-only edit showed a family menu'; fi
+  assert_eq 2001:db8::10 "$(inbound_effective_listen vless-node)" 'single-family edit picked the wrong IP'
+)
+pass "single-family edits open the matching address list directly"
