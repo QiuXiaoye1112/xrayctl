@@ -171,6 +171,54 @@ validate_ip_literal() {
   validate_ipv4 "$1" || [[ $1 == *:* && $1 =~ ^[0-9A-Fa-f:]+$ && ${#1} -le 45 ]]
 }
 
+# Compare socket addresses independently of their textual IPv6 representation.
+normalize_socket_ip() {
+  local address=$1 a b c d piece left right result="" missing
+  local -a before=() after=()
+  if validate_ipv4 "$address"; then
+    IFS=. read -r a b c d <<<"$address"
+    printf '%d.%d.%d.%d\n' "$((10#$a))" "$((10#$b))" "$((10#$c))" "$((10#$d))"
+    return
+  fi
+  if [[ $address == *:*.* ]]; then
+    piece=${address##*:}
+    validate_ipv4 "$piece" || return 1
+    IFS=. read -r a b c d <<<"$piece"
+    address="${address%:*}:$(printf '%x:%x' "$((10#$a * 256 + 10#$b))" "$((10#$c * 256 + 10#$d))")"
+  fi
+  [[ $address == *:* && $address =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+  if [[ $address == *::* ]]; then
+    left=${address%%::*}; right=${address#*::}
+    [[ $left != :* && $left != *: && $right != :* && $right != *: && $right != *::* ]] || return 1
+    [[ -z $left ]] || IFS=: read -r -a before <<<"$left"
+    [[ -z $right ]] || IFS=: read -r -a after <<<"$right"
+    missing=$((8 - ${#before[@]} - ${#after[@]}))
+    ((missing > 0)) || return 1
+  else
+    [[ $address != :* && $address != *: ]] || return 1
+    IFS=: read -r -a before <<<"$address"
+    ((${#before[@]} == 8)) || return 1
+    missing=0
+  fi
+  for piece in "${before[@]}"; do
+    [[ $piece =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+    result+="$(printf '%04x:' "$((16#$piece))")"
+  done
+  while ((missing > 0)); do result+='0000:'; missing=$((missing - 1)); done
+  for piece in "${after[@]}"; do
+    [[ $piece =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+    result+="$(printf '%04x:' "$((16#$piece))")"
+  done
+  result=${result%:}
+  case $result in
+    0000:0000:0000:0000:0000:0000:0000:0000) printf '::\n' ;;
+    0000:0000:0000:0000:0000:ffff:*)
+      left=${result%:*}; left=${left##*:}; right=${result##*:}
+      printf '%d.%d.%d.%d\n' "$((16#$left / 256))" "$((16#$left % 256))" "$((16#$right / 256))" "$((16#$right % 256))" ;;
+    *) printf '%s\n' "$result" ;;
+  esac
+}
+
 detect_public_ipv4() {
   local response raw
   command_exists curl || return 1

@@ -467,7 +467,7 @@ modify_inbound_menu() {
     ui_page "修改入站信息 · ${current_tag}"
     ui_menu_group "基础与网络"
     ui_menu_item 1 "修改入站名称"
-    ui_menu_item 2 "修改地址/端口"
+    ui_menu_item 2 "修改客户端连接地址"
     if [[ $protocol == vless ]]; then
       ui_menu_group "传输与安全"
       ui_menu_item 3 "修改传输/安全"
@@ -490,7 +490,7 @@ modify_inbound_menu() {
         fi
         pause
         ;;
-      2) run_menu_action modify_inbound_basic "$current_tag"; pause;;
+      2) run_menu_action modify_inbound_client_address "$current_tag"; pause;;
       3)
         if [[ $protocol == vless || $protocol == shadowsocks ]]; then run_menu_action modify_inbound_transport "$current_tag"
         else warn "无效选项。"; fi

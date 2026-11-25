@@ -38,7 +38,7 @@ show_inbound() {
   inbound_exists "$1" || fail "detail menu retained a stale tag: $1"
   printf 'show|%s\n' "$1" >>"$EVENTS"
 }
-modify_inbound_basic() { printf 'basic|%s\n' "$1" >>"$EVENTS"; }
+modify_inbound_client_address() { printf 'address|%s\n' "$1" >>"$EVENTS"; }
 modify_inbound_transport() { printf 'transport|%s\n' "$1" >>"$EVENTS"; }
 
 reset_case() {
@@ -58,7 +58,7 @@ check_rename_navigation() {
   local protocol=$1 security=$2 auth=$3 edit_choice=$4 json_choice=$5 inputs expected
   reset_case "$protocol" "$security" "$auth"
   inputs=$(printf '2\n%s\n1\nrenamed\n2\n' "$edit_choice")
-  expected=$'heading|入站管理\nheading|入站 · original\nheading|修改入站信息 · original\nheading|修改入站信息 · renamed\nbasic|renamed\nheading|修改入站信息 · renamed'
+  expected=$'heading|入站管理\nheading|入站 · original\nheading|修改入站信息 · original\nheading|修改入站信息 · renamed\naddress|renamed\nheading|修改入站信息 · renamed'
   if [[ $protocol == vless ]]; then
     inputs+=$'\n3'
     expected+=$'\ntransport|renamed\nheading|修改入站信息 · renamed'

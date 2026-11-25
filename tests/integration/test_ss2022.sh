@@ -47,6 +47,7 @@ service_is_active() { return 1; }
 require_xray_installed() { :; }
 traffic_after_config_change() { :; }
 traffic_user_choose_address() { printf '%s\n' '127.0.0.1:39083'; }
+detect_local_ips() { printf '%s\t%s\teth0\n' IPv4 192.0.2.10 IPv6 2001:db8::1; }
 next_obfs_choice=1
 choose() {
   case $2 in
@@ -66,7 +67,7 @@ choose() {
 prompt_tag() { printf -v "$1" '%s' "${next_tag:-ss2022-test}"; }
 prompt_value() {
   case ${2-} in
-    "监听地址") printf -v "$1" '%s' "${next_listen:-127.0.0.1}" ;;
+    "监听地址") fail "new inbound must infer its listener" ;;
     *) printf -v "$1" '%s' "${3-}" ;;
   esac
 }
@@ -144,7 +145,7 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   prompt_value() {
     case ${2-} in
       "混淆域名 (obfs-host)") printf -v "$1" '%s' "${next_obfs_host:-obfs.example.com}" ;;
-      "监听地址") printf -v "$1" '%s' "${next_listen:-0.0.0.0}" ;;
+      "监听地址") fail "inbound must infer its listener" ;;
       *) printf -v "$1" '%s' "${3-}" ;;
     esac
   }
@@ -154,7 +155,6 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   next_obfs_choice=2
   next_obfs_host=obfs.example.com
   next_tag=ss2022-obfs
-  next_listen=0.0.0.0
   next_port=39182
   next_public_host=edge.example.com
   next_user=alice
@@ -164,16 +164,16 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   local_port=$(jq -r '.inbounds[0].port' "$CONFIG_FILE")
   [[ $local_port != 39182 ]]
   jq -e '.inbounds[0] | .listen=="127.0.0.1" and .settings.network=="tcp,udp" and .settings.method=="2022-blake3-aes-256-gcm"' "$CONFIG_FILE" >/dev/null
-  jq -e --argjson lp "$local_port" '.inbounds["ss2022-obfs"].obfs | .enabled==true and .type=="http" and .host=="obfs.example.com" and .listen=="0.0.0.0" and .port==39182 and .localPort==$lp and .service=="xrayctl-obfs-ss2022-obfs"' "$META_FILE" >/dev/null
+  jq -e --argjson lp "$local_port" '.inbounds["ss2022-obfs"].obfs | .enabled==true and .type=="http" and .host=="obfs.example.com" and .listen=="::" and .port==39182 and .localPort==$lp and .service=="xrayctl-obfs-ss2022-obfs" and .dualStack==true' "$META_FILE" >/dev/null
   unit_file="$SYSTEMD_UNIT_DIR/xrayctl-obfs-ss2022-obfs.service"
   [[ -f $unit_file ]]
-  grep -Fq "ExecStart=${OBFS_SERVER_BIN} -s 0.0.0.0 -p 39182 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
+  grep -Fq "ExecStart=${OBFS_SERVER_BIN} -p 39182 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
 
   udp_unit_file="$SYSTEMD_UNIT_DIR/xrayctl-ss2022-udp.service"
   [[ -f $OBFS_UDP_CONFIG && -f $udp_unit_file ]]
   jq -e --argjson lp "$local_port" '
     (.inbounds | length)==1 and
-    (.inbounds[0] | .tag=="obfs-udp-ss2022-obfs" and .protocol=="dokodemo-door" and .listen=="0.0.0.0" and .port==39182 and .settings.address=="127.0.0.1" and .settings.port==$lp and .settings.network=="udp") and
+    (.inbounds[0] | .tag=="obfs-udp-ss2022-obfs" and .protocol=="dokodemo-door" and .listen=="::" and .port==39182 and .settings.address=="127.0.0.1" and .settings.port==$lp and .settings.network=="udp") and
     (.outbounds[0] | .protocol=="freedom" and .settings.finalRules==[{"ip":["127.0.0.1/32"],"action":"allow"}])
   ' "$OBFS_UDP_CONFIG" >/dev/null
   grep -Fq 'Environment=GOGC=20' "$udp_unit_file"
@@ -218,12 +218,22 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   grep -Fq 'obfs-journal-line: -u xrayctl-obfs-ss2022-obfs -n 20 --no-pager' <<<"$all_logs"
   grep -Fq 'obfs-journal-line: -u xrayctl-ss2022-udp -n 20 --no-pager' <<<"$all_logs"
 
-  next_listen=192.0.2.10
   next_port=39183
-  next_public_host=edge.example.com
+  next_public_host=192.0.2.10
   dispatch inbound modify ss2022-obfs >/dev/null
   grep -Fq "ExecStart=${OBFS_SERVER_BIN} -s 192.0.2.10 -p 39183 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
   jq -e '.inbounds[0] | .listen=="192.0.2.10" and .port==39183' "$OBFS_UDP_CONFIG" >/dev/null
+
+  # The menu changes the public TCP/UDP bind while leaving the SS2022
+  # backend on the original loopback address and port.
+  ensure_system_context() { :; }
+  (eval "$original_prompt_value"; modify_inbound_client_address ss2022-obfs) <<<'different.example.com' >/dev/null
+  grep -Fq "ExecStart=${OBFS_SERVER_BIN} -p 39183 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
+  jq -e '.inbounds[0] | .listen=="::" and .port==39183' "$OBFS_UDP_CONFIG" >/dev/null
+  jq -e --argjson port "$local_port" '.inbounds[0] | .listen=="127.0.0.1" and .port==$port' "$CONFIG_FILE" >/dev/null
+  assert_eq :: "$(traffic_inventory_json | jq -r '.["ss2022-obfs"].listen')" "traffic inventory must track the public dual-stack listener"
+  (eval "$original_prompt_value"; modify_inbound_client_address ss2022-obfs) <<<'192.0.2.10' >/dev/null
+  grep -Fq "ExecStart=${OBFS_SERVER_BIN} -s 192.0.2.10 -p 39183 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
 
   dispatch inbound rename ss2022-obfs ss2022-obfs2 >/dev/null
   [[ ! -e $unit_file ]]
@@ -320,7 +330,7 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   prompt_value() {
     case ${2-} in
       "混淆域名 (obfs-host)") printf -v "$1" '%s' "hup.example.com" ;;
-      "监听地址") printf -v "$1" '%s' "0.0.0.0" ;;
+      "监听地址") fail "new inbound must infer its listener" ;;
       *) printf -v "$1" '%s' "${3-}" ;;
     esac
   }

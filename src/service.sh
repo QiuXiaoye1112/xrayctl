@@ -650,7 +650,7 @@ EOF
 }
 
 obfs_service_setup() {
-  local tag=$1 apply_runtime=${2:-1} listen="" port="" local_port="" obfs_bin svc init_sys unit_path
+  local tag=$1 apply_runtime=${2:-1} listen="" port="" local_port="" obfs_bin svc init_sys unit_path bind_arg
   [[ -r $META_FILE ]] || return 1
   jq -e --arg tag "$tag" '.inbounds[$tag].obfs.enabled==true' "$META_FILE" >/dev/null 2>&1 || return 1
   listen=$(jq -r --arg tag "$tag" '.inbounds[$tag].obfs.listen // "0.0.0.0"' "$META_FILE")
@@ -660,6 +660,10 @@ obfs_service_setup() {
     error "入站 ${tag} 的混淆端口元数据无效。"
     return 1
   fi
+  # simple-obfs sets IPV6_V6ONLY when given an explicit -s address.
+  # Omitting -s lets it use its built-in dual-stack wildcard.
+  bind_arg="-s ${listen} "
+  if [[ $listen == :: && $(inbound_obfs_field "$tag" dualStack) == true ]]; then bind_arg=""; fi
   obfs_bin=$(obfs_server_bin)
   svc=$(obfs_service_name "$tag")
   init_sys=$(platform_init_system 2>/dev/null || true)
@@ -675,7 +679,7 @@ After=network.target ${SYSTEMD_UNIT}
 
 [Service]
 Type=simple
-ExecStart=${obfs_bin} -s ${listen} -p ${port} --obfs http -r 127.0.0.1:${local_port}
+ExecStart=${obfs_bin} ${bind_arg}-p ${port} --obfs http -r 127.0.0.1:${local_port}
 Restart=on-failure
 RestartSec=3
 
@@ -700,7 +704,7 @@ EOF
 name="xrayctl obfs-server (${tag})"
 description="xrayctl simple-obfs server (${tag})"
 command="${obfs_bin}"
-command_args="-s ${listen} -p ${port} --obfs http -r 127.0.0.1:${local_port}"
+command_args="${bind_arg}-p ${port} --obfs http -r 127.0.0.1:${local_port}"
 command_background=true
 pidfile="/run/${svc}.pid"
 output_log="${LOG_DIR}/obfs-${tag}.log"

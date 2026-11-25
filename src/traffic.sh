@@ -1005,16 +1005,15 @@ traffic_inventory_json() {
   [[ -r $CONFIG_FILE ]] || { warn "无法读取 Xray 配置，流量规则保持不变。"; return 1; }
   local meta_json
   meta_json=$(meta_json_or_empty)
-  jq -e --argjson meta "$meta_json" '
+  jq -e --argjson meta "$meta_json" "$INBOUND_SOCKETS_JQ"'
     if type != "object" or ((.inbounds | type) != "null" and (.inbounds | type) != "array") then
       error("invalid inbound inventory")
     else
       [.inbounds[]? | .tag as $tag |
-        {key:$tag,value:({
-          protocol:.protocol,
-          port:(if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end),
-          disabled:false
-        } + (if .protocol=="shadowsocks" then {network:(.settings.network // "tcp,udp")} else {} end))}
+        {key:$tag,value:(effective_socket($meta) + {
+          protocol:.protocol, disabled:false
+        } + (if .protocol=="shadowsocks" or (.protocol=="socks" and .settings.udp==false)
+             then {network:socket_network} else {} end))}
       ] | from_entries
     end
   ' "$CONFIG_FILE" 2>/dev/null || { warn "Xray 配置无法解析，流量规则保持不变。"; return 1; }
@@ -1345,69 +1344,80 @@ traffic_protocols_for_inbound() {
       else printf '%s\n' tcp udp
       fi
       ;;
-    socks) printf '%s\n' tcp udp ;;
+    socks) if [[ $network == tcp ]]; then printf '%s\n' tcp; else printf '%s\n' tcp udp; fi ;;
     *) printf '%s\n' tcp ;;
   esac
 }
 
+traffic_socket_rows() {
+  traffic_inventory_json | jq -r 'to_entries[] |
+    [.key, .value.protocol, (.value.port|tostring), (.value.network // "-"), .value.listen] | @tsv'
+}
+
 traffic_restore_nft_rules() {
-  local tag inbound_protocol port inbound_network transport_protocol count_comment count=0 meta_json
+  local tag inbound_protocol port inbound_network listen transport_protocol count_comment count=0 rows
+  local -a dst=() src=()
   command_exists nft || return 1
+  rows=$(traffic_socket_rows) || return 1
   traffic_clear_nft_rules || return 1
-  meta_json=$(meta_json_or_empty)
   nft add table inet "$TRAFFIC_NFT_TABLE" || return 1
   nft 'add chain inet xrayctl_traffic input { type filter hook input priority -5; policy accept; }' || return 1
   nft 'add chain inet xrayctl_traffic output { type filter hook output priority -5; policy accept; }' || return 1
-  while IFS=$'\t' read -r tag inbound_protocol port inbound_network; do
+  while IFS=$'\t' read -r tag inbound_protocol port inbound_network listen; do
     if [[ -z $tag ]] || ! validate_port "$port"; then continue; fi
     count_comment="\"xrayctl-traffic:count:${tag}\""
+    listen=$(normalize_socket_ip "$listen") || listen=""
+    dst=(); src=()
+    case $listen in
+      0.0.0.0|::|"") ;; # Xray wildcards may receive both families.
+      *:*) dst=(ip6 daddr "$listen"); src=(ip6 saddr "$listen");;
+      *) dst=(ip daddr "$listen"); src=(ip saddr "$listen");;
+    esac
     while IFS= read -r transport_protocol; do
-      nft add rule inet "$TRAFFIC_NFT_TABLE" input "$transport_protocol" dport "$port" counter comment "$count_comment" || return 1
-      nft add rule inet "$TRAFFIC_NFT_TABLE" output "$transport_protocol" sport "$port" counter comment "$count_comment" || return 1
+      nft add rule inet "$TRAFFIC_NFT_TABLE" input "${dst[@]}" "$transport_protocol" dport "$port" counter comment "$count_comment" || return 1
+      nft add rule inet "$TRAFFIC_NFT_TABLE" output "${src[@]}" "$transport_protocol" sport "$port" counter comment "$count_comment" || return 1
       count=$((count + 1))
     done < <(traffic_protocols_for_inbound "$inbound_protocol" "$inbound_network")
-  done < <(jq -r --argjson meta "$meta_json" '
-    .inbounds[]? | .tag as $tag |
-    [$tag, .protocol,
-     ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
-     (.settings.network // "-")] | @tsv
-  ' "$CONFIG_FILE" 2>/dev/null || true)
+  done <<<"$rows"
   ((count > 0)) || traffic_clear_nft_rules
 }
 
 traffic_restore_iptables_rules() {
-  local command tag inbound_protocol port inbound_network transport_protocol count=0 meta_json
+  local command tag inbound_protocol port inbound_network listen transport_protocol count=0 rows
+  local -a dst=() src=()
+  rows=$(traffic_socket_rows) || return 1
   traffic_clear_iptables_rules || return 1
-  meta_json=$(meta_json_or_empty)
   for command in iptables ip6tables; do
     command_exists "$command" || continue
     "$command" -t filter -N "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -N "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -C INPUT -j "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I INPUT 1 -j "$TRAFFIC_IPTABLES_IN_CHAIN"
     "$command" -t filter -C OUTPUT -j "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I OUTPUT 1 -j "$TRAFFIC_IPTABLES_OUT_CHAIN"
-    while IFS=$'\t' read -r tag inbound_protocol port inbound_network; do
+    while IFS=$'\t' read -r tag inbound_protocol port inbound_network listen; do
       if [[ -z $tag ]] || ! validate_port "$port"; then continue; fi
+      listen=$(normalize_socket_ip "$listen") || listen=""
+      dst=(); src=()
+      case $listen in
+        0.0.0.0|::|"") ;;
+        *:*) [[ $command == ip6tables ]] || continue; dst=(-d "$listen"); src=(-s "$listen");;
+        *) [[ $command == iptables ]] || continue; dst=(-d "$listen"); src=(-s "$listen");;
+      esac
       while IFS= read -r transport_protocol; do
-        "$command" -t filter -A "$TRAFFIC_IPTABLES_IN_CHAIN" -p "$transport_protocol" --dport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
-        "$command" -t filter -A "$TRAFFIC_IPTABLES_OUT_CHAIN" -p "$transport_protocol" --sport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
+        "$command" -t filter -A "$TRAFFIC_IPTABLES_IN_CHAIN" "${dst[@]}" -p "$transport_protocol" --dport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
+        "$command" -t filter -A "$TRAFFIC_IPTABLES_OUT_CHAIN" "${src[@]}" -p "$transport_protocol" --sport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
         count=$((count + 1))
       done < <(traffic_protocols_for_inbound "$inbound_protocol" "$inbound_network")
-    done < <(jq -r --argjson meta "$meta_json" '
-      .inbounds[]? | .tag as $tag |
-      [$tag, .protocol,
-       ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
-       (.settings.network // "-")] | @tsv
-    ' "$CONFIG_FILE" 2>/dev/null || true)
+    done <<<"$rows"
   done
   ((count > 0)) || traffic_clear_iptables_rules
 }
 
 traffic_rules_restore() {
-  local selected inventory epoch
+  local force=${1:-0} selected inventory epoch
   epoch=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf unknown)
   selected=$(traffic_backend)
   inventory=$(traffic_inventory_json) || return 1
-  if jq -e --arg epoch "$epoch" --argjson inventory "$inventory" ' .rulesInventory==$inventory and .rulesInventory!=null and .rulesEpoch==$epoch' "$TRAFFIC_FILE" >/dev/null 2>&1; then
+  if ((force == 0)) && jq -e --arg epoch "$epoch" --argjson inventory "$inventory" ' .rulesInventory==$inventory and .rulesInventory!=null and .rulesEpoch==$epoch' "$TRAFFIC_FILE" >/dev/null 2>&1; then
     [[ $inventory != '{}' ]] || return 0
     traffic_read_counters >/dev/null
     return $?
@@ -1441,18 +1451,10 @@ traffic_rules_restore_serialized() {
   return "$rc"
 }
 
-traffic_collect() {
-  traffic_is_enabled || return 0
-  traffic_require_root internal-traffic-collect
-  # Older installs may have users but no StatsService until the quota menu was
-  # opened. Initialize once outside the traffic lock; the guard prevents the
-  # initialization's own runtime check from recursing into this step.
-  if [[ ${XRAYCTL_USER_STATS_INITIALIZING:-0} != 1 ]] && ! traffic_user_managed_config && traffic_user_has_clients; then
-    ( XRAYCTL_USER_STATS_INITIALIZING=1; traffic_user_enable ) || \
-      warn "用户统计尚未自动启用，后台会继续重试；入站统计仍会采集。"
-  fi
-  traffic_lock_acquire || { warn "另一个流量采集任务正在运行。"; return 1; }
-  local counters samples rc=0 snapshot="" raw_samples epoch inventory empty_rules=0
+# Caller holds the traffic lock. A listener change samples the old firewall
+# rules with collect_users=0; the state transaction handles Xray user stats.
+traffic_collect_locked() {
+  local collect_users=${1:-1} counters samples rc=0 snapshot="" raw_samples epoch inventory empty_rules=0
   epoch=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf unknown)
   local previous_epoch
   previous_epoch=$(jq -r '.kernelCounterEpoch // .rulesEpoch // empty' "$TRAFFIC_FILE") || rc=1
@@ -1488,7 +1490,6 @@ traffic_collect() {
     # inventory of live rules or retry their installation and reset counters.
     if ! snapshot=$(temp_file) || ! cp -p "$TRAFFIC_FILE" "$snapshot"; then
       rm -f "$snapshot"
-      traffic_lock_release
       return 1
     fi
     TRAFFIC_RAW_SNAPSHOT="$raw_samples" TRAFFIC_COUNTER_EPOCH="$epoch" traffic_update_file "$samples" || rc=1
@@ -1497,17 +1498,37 @@ traffic_collect() {
   # A failed write leaves both unchanged, allowing an idempotent retry.
   if ((rc != 0)); then
     [[ -z $snapshot ]] || traffic_write_file "$snapshot" || true
-  elif ! traffic_user_collect_locked; then
+  elif ((collect_users)) && ! traffic_user_collect_locked; then
     # User API failures must never prevent the independent inbound accounting
     # and firewall quota rules from being committed.
     warn "用户流量本次未采集；入站流量采集仍已完成。"
     rc=2
   fi
   [[ -z $snapshot ]] || rm -f "$snapshot"
-  inventory=$(traffic_inventory_json) || rc=1
-  if ((rc == 0 || rc == 2)) && jq -e --argjson inventory "$inventory" '.rulesInventory!=null and .rulesInventory!=$inventory' "$TRAFFIC_FILE" >/dev/null; then
-    traffic_rules_restore || rc=1
+  # The address transaction installs its own rules after writing the new
+  # configuration. Avoid resetting a legacy rule set immediately beforehand.
+  if ((collect_users)); then
+    inventory=$(traffic_inventory_json) || rc=1
+    if ((rc == 0 || rc == 2)) && jq -e --argjson inventory "$inventory" '.rulesInventory!=null and .rulesInventory!=$inventory' "$TRAFFIC_FILE" >/dev/null; then
+      traffic_rules_restore || rc=1
+    fi
   fi
+  return "$rc"
+}
+
+traffic_collect() {
+  traffic_is_enabled || return 0
+  traffic_require_root internal-traffic-collect
+  # Older installs may have users but no StatsService until the quota menu was
+  # opened. Initialize once outside the traffic lock; the guard prevents the
+  # initialization's own runtime check from recursing into this step.
+  if [[ ${XRAYCTL_USER_STATS_INITIALIZING:-0} != 1 ]] && ! traffic_user_managed_config && traffic_user_has_clients; then
+    ( XRAYCTL_USER_STATS_INITIALIZING=1; traffic_user_enable ) || \
+      warn "用户统计尚未自动启用，后台会继续重试；入站统计仍会采集。"
+  fi
+  local rc=0
+  traffic_lock_acquire || { warn "另一个流量采集任务正在运行。"; return 1; }
+  traffic_collect_locked || rc=$?
   traffic_lock_release
   if ((rc == 0)); then
     traffic_user_reconcile || { warn "用户额度规则暂未同步，将在下次采集时重试。"; rc=2; }

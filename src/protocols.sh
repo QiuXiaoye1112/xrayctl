@@ -119,27 +119,28 @@ protocol_build() {
 }
 
 _inbound_build_obfs_meta() {
-  local tag=$1 obfs_host=$2 listen=$3 port=$4 local_port=$5
+  local tag=$1 obfs_host=$2 listen=$3 port=$4 local_port=$5 dual_stack=${6:-false}
   jq -nc \
     --arg host "$obfs_host" \
     --arg listen "$listen" \
     --argjson port "$port" \
     --argjson localPort "$local_port" \
-    --arg service "xrayctl-obfs-${tag}" \
-    '{enabled:true,type:"http",host:$host,listen:$listen,port:$port,localPort:$localPort,service:$service}'
+    --arg service "xrayctl-obfs-${tag}" --argjson dualStack "$dual_stack" \
+    '{enabled:true,type:"http",host:$host,listen:$listen,port:$port,localPort:$localPort,service:$service} +
+     (if $dualStack then {dualStack:true} else {} end)'
 }
 
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3 __obfs_meta=${4-}
   local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
   local obfs_choice=1 obfs_host="" obfs_meta_json="" local_port="" xray_listen="" xray_port="" ss_network="tcp,udp"
-  local total_steps=3 listen_step=2 user_step=3
+  local total_steps=3 listen_step=2 user_step=3 bind_network=tcp dual_stack=false
   ui_wizard_step 1 "" "选择入站协议"
   choose choice "选择入站协议" "VLESS" "SS2022" "SOCKS5" "HTTP" || return 1
   case $choice in
     1) protocol=vless; total_steps=4; listen_step=3; user_step=4 ;;
-    2) protocol=shadowsocks; total_steps=4; listen_step=3; user_step=4 ;;
-    3) protocol=socks ;;
+    2) protocol=shadowsocks; total_steps=4; listen_step=3; user_step=4; bind_network=tcp,udp ;;
+    3) protocol=socks; bind_network=tcp,udp ;;
     4) protocol=http ;;
   esac
 
@@ -156,22 +157,20 @@ build_inbound() {
 
   ui_wizard_step "$listen_step" "$total_steps" "监听参数与连接地址"
   prompt_tag tag "${protocol}-$(random_hex 2)" || return 1
-  prompt_value listen "监听地址" "0.0.0.0" || return 1
+  prompt_public_host public_host "" "$suggested_host" || return 1
+
+  listen=$(inbound_auto_listen "$public_host") || return 1
   suggest_available_port suggested_port || suggested_port=443
-  prompt_port port "$suggested_port" || return 1
-  if [[ -n $suggested_host ]]; then
-    public_host=$suggested_host
-    info "客户端连接地址：${public_host}"
-  else
-    prompt_public_host public_host "" "$suggested_host" || return 1
-  fi
+  prompt_port port "$suggested_port" "" "$listen" "$bind_network" || return 1
+  inbound_report_listener "$listen" "$port" "$public_host"
 
   if [[ $protocol == shadowsocks && $obfs_choice == 2 ]]; then
+    [[ $listen != :: ]] || dual_stack=true
     suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
     xray_listen="127.0.0.1"
     xray_port=$local_port
     ss_network="tcp,udp"
-    obfs_meta_json=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port")
+    obfs_meta_json=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port" "$dual_stack")
   else
     xray_listen=$listen
     xray_port=$port

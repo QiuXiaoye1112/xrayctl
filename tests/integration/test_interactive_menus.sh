@@ -243,13 +243,13 @@ if rg -q '开启流量统计|停止流量统计|4\) (开启|停止)' "$TEST_ROOT
 if ! rg -q '4\) 设置月度统计起点' "$TEST_ROOT/traffic-menu.txt"; then fail 'traffic period option was not renumbered after removing the toggle'; fi
 
 prompt_renamed_inbound_tag() { printf -v "$1" '%s' "$2"; }
-for spec in '1 rename_inbound node node' '2 modify_inbound_basic node' '3 modify_inbound_transport node'; do
+for spec in '1 rename_inbound node node' '2 modify_inbound_client_address node' '3 modify_inbound_transport node'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route modify_inbound_menu "$choice" "$action" node vless
 done
-for spec in '1 rename_inbound node node' '2 modify_inbound_basic node' '3 modify_inbound_transport node'; do
+for spec in '1 rename_inbound node node' '2 modify_inbound_client_address node' '3 modify_inbound_transport node'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route modify_inbound_menu "$choice" "$action" node shadowsocks
 done
-for spec in '1 rename_inbound node node' '2 modify_inbound_basic node'; do
+for spec in '1 rename_inbound node node' '2 modify_inbound_client_address node'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route modify_inbound_menu "$choice" "$action" node socks
 done
 

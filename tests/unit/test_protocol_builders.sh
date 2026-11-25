@@ -30,6 +30,7 @@ prompt_value() {
 }
 prompt_port() { printf -v "$1" '%s' '443'; }
 prompt_public_host() { printf -v "$1" '%s' 'edge.example.com'; }
+detect_local_ips() { printf '%s\t%s\teth0\n' IPv4 192.0.2.10; }
 prompt_client_label() { printf -v "$1" '%s' 'alice'; }
 prompt_secret() { printf -v "$1" '%s' 'fixed-password'; }
 prompt_optional_value() { printf -v "$1" '%s' 'alice'; }

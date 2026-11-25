@@ -11,6 +11,15 @@ print_share_entry() {
   printf '%s: %s\n' "$field" "$value"
 }
 
+_share_tls_server_name() {
+  local tag=$1 stream=$2 sni
+  sni=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
+  if [[ -z $sni ]]; then
+    sni=$(jq -r --arg tag "$tag" '.inbounds[$tag].shareTlsServerName // empty' "$META_FILE" 2>/dev/null || true)
+  fi
+  if [[ -n $sni ]]; then printf '%s' "$sni"; else public_host_for_tag "$tag"; fi
+}
+
 _share_print_params_card() {
   local tag=$1 protocol=$2 uri_host=$3 port=$4
   local stream method security path="" sni="" sid="" pbk="" flow="" auth="" obfs_host="" ss_network=""
@@ -35,8 +44,7 @@ _share_print_params_card() {
       esac
       case $security in
         tls)
-          sni=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
-          [[ -n $sni ]] || sni=$(public_host_for_tag "$tag")
+          sni=$(_share_tls_server_name "$tag" "$stream")
           ui_card_kv "TLS SNI" "$sni" 12
           ui_card_kv "指纹 (fp)" "chrome" 12
           ;;
@@ -98,8 +106,7 @@ link_query_for_stream() {
   query+="&security=$(url_encode "$security")"
   case $security in
     tls)
-      sni=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
-      [[ -n $sni ]] || sni=$(public_host_for_tag "$tag")
+      sni=$(_share_tls_server_name "$tag" "$stream")
       query+="&sni=$(url_encode "$sni")"
       [[ $method == websocket ]] && query+="&host=$(url_encode "$sni")"
       query+="&fp=chrome"

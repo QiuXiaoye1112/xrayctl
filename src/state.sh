@@ -383,7 +383,15 @@ state_commit() {
   trap '' HUP PIPE
   local candidate=$1 meta_mutator=${2-} old_active=0 traffic_locked=0
   local config_snapshot meta_snapshot meta_candidate="" obfs_ext_port="" obfs_port_bound_before=0
+  local listener_change=0 remap_traffic=0 obfs_tag="" apply_error=""
   if [[ -n $meta_mutator ]]; then shift 2; else shift; fi
+  if [[ $meta_mutator == _state_build_inbound_client_address ]]; then
+    listener_change=1
+    if [[ -f $TRAFFIC_FILE ]] && traffic_is_enabled && [[ -n $(traffic_recorded_backend) ]]; then remap_traffic=1; fi
+  fi
+  if [[ ( $meta_mutator == _state_build_inbound_meta_set || $listener_change == 1 ) && -n ${3-} && ${3-} != none ]]; then
+    obfs_tag=$1
+  fi
   if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} == 1 ]]; then
     [[ -r $CONFIG_FILE && -r $META_FILE ]] || { error "用户额度配置事务缺少现有配置或 metadata。"; return 1; }
   else
@@ -418,11 +426,13 @@ state_commit() {
   # Keep the stats snapshot and the restart in the same traffic-lock critical
   # section. The timer never acquires the management lock while holding this
   # lock, so it cannot invert the management -> traffic lock ordering.
-  if [[ -f $TRAFFIC_FILE ]] && { jq -e '.xrayctlUserStats.enabled==true' "$CONFIG_FILE" >/dev/null 2>&1 || jq -e '.xrayctlUserStats.enabled==true' "$candidate" >/dev/null 2>&1; }; then
+  if ((remap_traffic)) || { [[ -f $TRAFFIC_FILE ]] &&
+    { jq -e '.xrayctlUserStats.enabled==true' "$CONFIG_FILE" >/dev/null 2>&1 ||
+      jq -e '.xrayctlUserStats.enabled==true' "$candidate" >/dev/null 2>&1; }; }; then
     if [[ ${TRAFFIC_LOCK_HELD:-0} != 1 ]]; then
       if ! traffic_lock_acquire; then
         _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
-        warn "用户流量采集正在运行，配置暂未提交。"
+        warn "流量采集正在运行，配置暂未提交。"
         return 1
       fi
       traffic_locked=1
@@ -430,6 +440,13 @@ state_commit() {
     if ((old_active)) && [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} != 1 ]]; then
       traffic_user_collect_locked || warn "重启前未能采集用户流量，该间隔可能丢失。"
     fi
+  fi
+
+  if ((remap_traffic)) && ! traffic_collect_locked 0; then
+    error "旧入站流量未能采集，已取消监听地址变更。"
+    ((traffic_locked == 0)) || traffic_lock_release
+    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+    return 1
   fi
 
   ui_step 2 3 "备份并写入配置与元数据"
@@ -448,44 +465,62 @@ state_commit() {
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
   fi
+  # Install the new IP-specific rules before opening the new listener. The
+  # old counters have been persisted under the same tag and traffic lock.
+  if ((remap_traffic)) && ! traffic_rules_restore; then
+    ui_step_done fail
+    error "无法更新入站流量规则，正在恢复原配置。"
+    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
+    traffic_rules_restore 1 || warn "旧流量规则恢复失败，请检查防火墙。"
+    ((traffic_locked == 0)) || traffic_lock_release
+    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+    return 1
+  fi
   ui_step_done ok
 
-  if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
+  if [[ -n $obfs_tag ]] && ((listener_change == 0)); then
     obfs_ext_port=$(jq -r '.port // empty' <<<"${3-}" 2>/dev/null || true)
     if [[ -n $obfs_ext_port ]] && jq -e --argjson port "$obfs_ext_port" '[.inbounds[]? | select(.port==$port)] | length>0' "$config_snapshot" >/dev/null 2>&1; then
       obfs_port_bound_before=1
     fi
     if ((obfs_port_bound_before == 0)); then
-      obfs_service_setup "$1" 1 || true
+      obfs_service_setup "$obfs_tag" 1 || true
     else
-      obfs_service_setup "$1" 0 || true
+      obfs_service_setup "$obfs_tag" 0 || true
     fi
   fi
 
   if ((old_active)); then
     ui_step 3 3 "重启 Xray 服务使变更生效"
-    if ! restart_service; then
-      ui_step_done fail "已回滚"
-      error "重启失败，正在回滚配置和 metadata。"
-      _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
-      restart_service || true
-      if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
-        if jq -e --arg tag "$1" '.inbounds[$tag].obfs.enabled==true' "$meta_snapshot" >/dev/null 2>&1; then
-          obfs_service_setup "$1" 1 || true
-        else
-          obfs_service_remove "$1" 2>/dev/null || true
-        fi
-      fi
-      ((traffic_locked == 0)) || traffic_lock_release
-      _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
-      return 1
-    fi
-    ui_step_done ok
-    if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
-      obfs_service_setup "$1" 1 || true
-    fi
+    restart_service || apply_error="重启 Xray 失败"
   else
     ui_step 3 3 "检查服务状态"
+  fi
+  if [[ -z $apply_error && -n $obfs_tag ]] && ((listener_change)); then
+    obfs_service_setup "$obfs_tag" "$old_active" || apply_error="更新混淆监听失败"
+  fi
+  if [[ -n $apply_error ]]; then
+    ui_step_done fail "已回滚"
+    error "${apply_error}，正在恢复原配置和 metadata。"
+    if ((remap_traffic)); then traffic_collect_locked 0 || true; fi
+    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
+    if ((remap_traffic)); then traffic_rules_restore 1 || warn "旧流量规则恢复失败，请检查防火墙。"; fi
+    ((old_active == 0)) || restart_service || true
+    if [[ -n $obfs_tag ]]; then
+      if jq -e --arg tag "$obfs_tag" '.inbounds[$tag].obfs.enabled==true' "$meta_snapshot" >/dev/null 2>&1; then
+        obfs_service_setup "$obfs_tag" "$old_active" || true
+      else
+        obfs_service_remove "$obfs_tag" 2>/dev/null || true
+      fi
+    fi
+    ((traffic_locked == 0)) || traffic_lock_release
+    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+    return 1
+  fi
+  if ((old_active)); then
+    ui_step_done ok
+    if [[ -n $obfs_tag ]] && ((listener_change == 0)); then obfs_service_setup "$obfs_tag" 1 || true; fi
+  else
     ui_step_done ok "服务未运行，无需重启"
   fi
 
@@ -629,6 +664,17 @@ _state_build_inbound_meta_set() {
        del(.inbounds[$tag].realityPublicKey)' \
       "$current" >"$candidate"
   fi
+}
+
+_state_build_inbound_client_address() {
+  local current=$1 candidate=$2 tag=$3 address=$4 obfs=$5 tls_fallback=$6
+  jq --arg tag "$tag" --arg address "$address" --argjson obfs "${obfs:-null}" --arg tlsFallback "$tls_fallback" '
+    .inbounds[$tag].host = $address |
+    if $obfs != null then .inbounds[$tag].obfs = $obfs else . end |
+    if $tlsFallback != "" and (.inbounds[$tag].shareTlsServerName // "") == "" then
+      .inbounds[$tag].shareTlsServerName = $tlsFallback
+    else . end
+  ' "$current" >"$candidate"
 }
 
 _state_build_inbound_meta_delete() {
