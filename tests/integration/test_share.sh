@@ -30,7 +30,7 @@ cat >"$XRAYCTL_CONFIG_FILE" <<'JSON'
   "log": {"loglevel": "warning"},
   "inbounds": [{
     "tag": "vless-node",
-    "listen": "127.0.0.1",
+    "listen": "::",
     "port": 443,
     "protocol": "vless",
     "settings": {"clients": [{"id": "123e4567-e89b-12d3-a456-426614174000", "email": "alice"}], "decryption": "none"},
@@ -82,8 +82,14 @@ cp "$META_FILE" "$TEST_ROOT/original-meta.json"
   pause() { :; }
   clear_screen() { :; }
   modify_inbound_menu vless-node vless
-) <<<$'2\n[2001:db8::10]\n0' >"$TEST_ROOT/address-menu.out"
+) <<<$'2\n2\n1\n0' >"$TEST_ROOT/address-menu.out"
 grep -Fq '修改客户端连接地址' "$TEST_ROOT/address-menu.out"
+grep -Fxq '    1) IPv4' "$TEST_ROOT/address-menu.out"
+grep -Fxq '    2) IPv6' "$TEST_ROOT/address-menu.out"
+if grep -Eq '^    [0-9]+\) .*域名|双栈' "$TEST_ROOT/address-menu.out"; then fail "the address menu offered a domain or wildcard mode"; fi
+grep -Fxq '    2) 2001:db8::20' "$TEST_ROOT/address-menu.out"
+if grep -Fq '192.0.2.20' "$TEST_ROOT/address-menu.out"; then fail "IPv6 mode offered an IPv4 address"; fi
+if grep -Fq 'eth0' "$TEST_ROOT/address-menu.out"; then fail "the address list displayed a network interface"; fi
 if grep -Fq '修改地址/端口' "$TEST_ROOT/address-menu.out"; then fail "the edit menu still exposes the old address/port entry"; fi
 assert_eq '2001:db8::10' "$(inbound_effective_listen vless-node)" "the address edit must change the listener to IPv6"
 assert_eq '2001:db8::10' "$(jq -r '.inbounds["vless-node"].host' "$META_FILE")" "IPv6 must be stored without URI brackets"
@@ -93,53 +99,111 @@ jq -S 'del(.inbounds["vless-node"].host)' "$TEST_ROOT/original-meta.json" >"$TES
 jq -S 'del(.inbounds["vless-node"].host)' "$META_FILE" >"$TEST_ROOT/new-other.json"
 assert_file_eq "$TEST_ROOT/old-other.json" "$TEST_ROOT/new-other.json" "the address edit changed unrelated metadata"
 
-modify_inbound_client_address vless-node <<<'192.0.2.10' >/dev/null
+modify_inbound_client_address vless-node <<<$'1\n1' >/dev/null
 assert_eq '192.0.2.10' "$(inbound_effective_listen vless-node)" "IPv6-to-IPv4 edit must rebind the original port"
 assert_eq "${expected/@edge.example.com:/@192.0.2.10:}" "$(print_subscription | base64 --decode)" "IPv6-to-IPv4 edit did not update the combined subscription"
 
-# An unrelated inbound on IPv6 can share 443, but prevents the IPv4 listener
-# from expanding to a wildcard (or changing to that occupied IPv6 address).
+# Another listener can share 443 on an unoccupied address.
 cp "$CONFIG_FILE" "$TEST_ROOT/single.json"
 jq '.inbounds += [{tag:"existing-v6",listen:"2001:db8::20",port:443,protocol:"vless"}]' "$TEST_ROOT/single.json" >"$CONFIG_FILE"
 cp "$CONFIG_FILE" "$TEST_ROOT/conflict.json"
 cp "$META_FILE" "$TEST_ROOT/conflict-meta.json"
-assert_failure modify_inbound_client_address vless-node <<<'replacement.example.com'
-assert_failure modify_inbound_client_address vless-node <<<'2001:db8::20'
+assert_failure modify_inbound_client_address vless-node <<<$'2\n2'
 assert_file_eq "$TEST_ROOT/conflict.json" "$CONFIG_FILE" "a conflicting listener changed config"
 assert_file_eq "$TEST_ROOT/conflict-meta.json" "$META_FILE" "a conflicting listener changed the share address"
 assert_eq 2 "$(wc -l <"$TEST_ROOT/restarts" | tr -d '[:space:]')" "conflict restarted Xray"
 
 cp "$TEST_ROOT/single.json" "$CONFIG_FILE"
 touch "$TEST_ROOT/force-restart-failure"
-assert_failure modify_inbound_client_address vless-node <<<'replacement.example.com'
+assert_failure modify_inbound_client_address vless-node <<<$'2\n1'
 assert_file_eq "$TEST_ROOT/single.json" "$CONFIG_FILE" "restart failure did not restore the original listener"
 assert_file_eq "$TEST_ROOT/conflict-meta.json" "$META_FILE" "restart failure did not restore metadata"
-modify_inbound_client_address vless-node <<<'replacement.example.com' >/dev/null
-assert_eq '::' "$(inbound_effective_listen vless-node)" "a domain on a dual-stack host should bind the wildcard"
-assert_eq "${expected/@edge.example.com:/@replacement.example.com:}" "$(print_subscription vless-node | base64 --decode)" "IPv4-to-domain edit did not update the subscription"
-modify_inbound_client_address vless-node <<<'another.example.com' >/dev/null
-assert_eq 5 "$(wc -l <"$TEST_ROOT/restarts" | tr -d '[:space:]')" "a domain-to-domain edit on the same listener should not restart"
+modify_inbound_client_address vless-node <<<$'2\n1' >/dev/null
+assert_eq '2001:db8::10' "$(inbound_effective_listen vless-node)" "the new IPv6 listener did not take effect after retry"
 cp "$META_FILE" "$TEST_ROOT/valid-meta.json"
-modify_inbound_client_address vless-node <<<'' >/dev/null
-assert_file_eq "$TEST_ROOT/valid-meta.json" "$META_FILE" "accepting the current address should not rewrite metadata"
-assert_failure modify_inbound_client_address vless-node <<<'https://invalid.example.com:443'
-assert_failure modify_inbound_client_address vless-node <<<'198.51.100.20'
-assert_file_eq "$TEST_ROOT/valid-meta.json" "$META_FILE" "an invalid or ambiguous address changed metadata"
+modify_inbound_client_address vless-node <<<$'2\n1' >/dev/null
+assert_eq 5 "$(wc -l <"$TEST_ROOT/restarts" | tr -d '[:space:]')" "selecting the same address should not restart"
+assert_failure modify_inbound_client_address vless-node <<<$'3\nedge.example.com'
+assert_failure modify_inbound_client_address vless-node <<<'2'
+assert_file_eq "$TEST_ROOT/valid-meta.json" "$META_FILE" "an invalid or incomplete selection changed metadata"
 jq -S 'del(.inbounds[0].listen)' "$TEST_ROOT/original.json" >"$TEST_ROOT/original-static.json"
 jq -S 'del(.inbounds[0].listen)' "$CONFIG_FILE" >"$TEST_ROOT/current-static.json"
 assert_file_eq "$TEST_ROOT/original-static.json" "$TEST_ROOT/current-static.json" "switching address families changed unrelated Xray settings"
 
-# Keep the former client SNI for imported TLS configurations without an
-# explicit serverName, even when the new listener uses another IP family.
+# Keep the former client SNI for a legacy TLS domain as it moves to an IP.
 jq '.inbounds[0].streamSettings.security="tls" | .inbounds[0].streamSettings.tlsSettings={}' "$CONFIG_FILE" >"$TEST_ROOT/legacy-tls.json"
 cp "$TEST_ROOT/legacy-tls.json" "$CONFIG_FILE"
-modify_inbound_client_address vless-node <<<'2001:db8::20' >/dev/null
+jq '.inbounds["vless-node"].host="cert.example.com"' "$META_FILE" >"$TEST_ROOT/legacy-tls-meta.json"
+cp "$TEST_ROOT/legacy-tls-meta.json" "$META_FILE"
+modify_inbound_client_address vless-node <<<$'2\n1' >/dev/null
 decoded=$(print_subscription vless-node | base64 --decode)
-[[ $decoded == *'@[2001:db8::20]:443?'* && $decoded == *'&sni=another.example.com&'* ]]
-modify_inbound_client_address vless-node <<<'192.0.2.20' >/dev/null
+[[ $decoded == *'@[2001:db8::10]:443?'* && $decoded == *'&sni=cert.example.com&'* ]]
+assert_eq 5 "$(wc -l <"$TEST_ROOT/restarts" | tr -d '[:space:]')" "changing the share address alone should not restart"
+modify_inbound_client_address vless-node <<<$'1\n2' >/dev/null
 decoded=$(print_subscription vless-node | base64 --decode)
-[[ $decoded == *'@192.0.2.20:443?'* && $decoded == *'&sni=another.example.com&'* ]]
+[[ $decoded == *'@192.0.2.20:443?'* && $decoded == *'&sni=cert.example.com&'* ]]
 assert_eq 443 "$(inbound_effective_port vless-node)" "the original port must remain fixed"
+assert_eq 192.0.2.20 "$(inbound_effective_listen vless-node)" "editing must use the selected second IPv4 address"
 jq -e '.inbounds[0].streamSettings.tlsSettings=={}' "$CONFIG_FILE" >/dev/null
 
 pass "client address edits rebind safely, preserve the port and TLS identity, and roll back on failure"
+
+# A hand-written inbound can lack both a saved host and a saved TLS name.
+unset XRAYCTL_PUBLIC_HOST
+jq 'del(.inbounds["vless-node"].host, .inbounds["vless-node"].shareTlsServerName)' "$META_FILE" >"$TEST_ROOT/imported-meta.json"
+cp "$TEST_ROOT/imported-meta.json" "$META_FILE"
+decoded=$(print_subscription vless-node | base64 --decode)
+[[ $decoded == *'@192.0.2.20:443?'* && $decoded == *'&sni=192.0.2.20&'* ]]
+decoded=$(XRAYCTL_PUBLIC_HOST=override.example.com print_subscription vless-node | base64 --decode)
+[[ $decoded == *'@override.example.com:443?'* && $decoded == *'&sni=override.example.com&'* ]]
+
+jq '.inbounds[0].listen="::"' "$CONFIG_FILE" >"$TEST_ROOT/imported-config.json"
+cp "$TEST_ROOT/imported-config.json" "$CONFIG_FILE"
+python3 - "$REPO_ROOT/xrayctl.sh" <<'PY'
+import os
+import pty
+import subprocess
+import sys
+
+script = r'''
+source "$1"
+detect_local_ips() { printf '%s\t%s\teth0\n' IPv4 192.0.2.20 IPv6 2001:db8::20; }
+print_links vless-node
+'''
+master, slave = pty.openpty()
+with subprocess.Popen(['bash', '-c', script, 'share-test', sys.argv[1]], stdin=slave,
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+    os.close(slave)
+    try:
+        os.write(master, b'2\n1\n')
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise AssertionError('sharing asked for the host more than once')
+    finally:
+        os.close(master)
+    assert process.returncode == 0, stderr
+    assert stderr.count('选择客户端连接地址类型') == 1, stderr
+    links = [line for line in stdout.splitlines() if line.startswith('链接: vless://')]
+    assert len(links) == 1 and '@[2001:db8::20]:443?' in links[0], stdout
+    assert '&sni=2001%3Adb8%3A%3A20&' in links[0], stdout
+PY
+pass "imported inbounds share their concrete address or prompt once on a wildcard"
+
+jq '.inbounds += [{tag:"socks-legacy", listen:"2001:db8::20", port:8443, protocol:"socks",
+  settings:{auth:"password", users:[{user:"fixture",pass:"fixture"}], udp:true, ip:"0.0.0.0"}}]' \
+  "$CONFIG_FILE" >"$TEST_ROOT/socks-config.json"
+cp "$TEST_ROOT/socks-config.json" "$CONFIG_FILE"
+jq '.inbounds["socks-legacy"].host="2001:db8::20"' "$META_FILE" >"$TEST_ROOT/socks-meta.json"
+cp "$TEST_ROOT/socks-meta.json" "$META_FILE"
+modify_inbound_client_address socks-legacy <<<$'2\n2' >/dev/null
+jq -e '.inbounds[] | select(.tag=="socks-legacy") |
+  .listen=="2001:db8::20" and .port==8443 and .settings.udp==true and (.settings|has("ip")|not)' "$CONFIG_FILE" >/dev/null
+jq '(.inbounds[] | select(.tag=="socks-legacy") | .settings.ip)="192.0.2.50"' \
+  "$CONFIG_FILE" >"$TEST_ROOT/socks-config.json"
+cp "$TEST_ROOT/socks-config.json" "$CONFIG_FILE"
+modify_inbound_client_address socks-legacy <<<$'1\n1' >/dev/null
+jq -e '.inbounds[] | select(.tag=="socks-legacy") |
+  .listen=="192.0.2.10" and .port==8443 and .settings.ip=="192.0.2.50"' "$CONFIG_FILE" >/dev/null
+pass "SOCKS address edits repair an advertised wildcard and preserve explicit relay addresses"

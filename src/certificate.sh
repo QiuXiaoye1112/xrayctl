@@ -73,7 +73,7 @@ ensure_certbot_environment() {
   local need_install=0
 
   if [[ ! -x $CERTBOT_BIN ]]; then need_install=1
-  elif ! "$CERTBOT_BIN" --help all 2>/dev/null | grep -q -- '--ip-address'; then need_install=1
+  elif ! "$CERTBOT_BIN" --help all 2>/dev/null | grep -F -- '--ip-address' >/dev/null; then need_install=1
   elif ! "$CERTBOT_VENV/bin/python" -c 'import certbot_dns_cloudflare' >/dev/null 2>&1; then need_install=1
   elif ! "$CERTBOT_VENV/bin/python" -c 'import certbot_nginx' >/dev/null 2>&1; then need_install=1
   fi
@@ -116,9 +116,9 @@ ensure_certbot_environment() {
     --timeout 15 --retries 2 --upgrade 'certbot>=5.4' certbot-dns-cloudflare certbot-nginx \
     || die "Certbot / 插件安装失败。"
 
-  "$CERTBOT_BIN" --help all 2>/dev/null | grep -q -- '--ip-address' \
+  "$CERTBOT_BIN" --help all 2>/dev/null | grep -F -- '--ip-address' >/dev/null \
     || die "当前安装的 Certbot 不支持 IP 证书。"
-  "$CERTBOT_VENV/bin/pip" list 2>/dev/null | grep -q 'certbot-dns-cloudflare' \
+  "$CERTBOT_VENV/bin/python" -c 'import certbot_dns_cloudflare' >/dev/null 2>&1 \
     || warn "certbot-dns-cloudflare 插件安装可能失败，Cloudflare DNS 验证不可用。"
   fi  # end of need_install == 1 block
 

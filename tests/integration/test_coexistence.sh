@@ -90,6 +90,42 @@ certbot_cmd certonly --cert-name stale >/dev/null
 if CERTBOT_STUB_FAIL=1 certbot_cmd certonly --cert-name failed >/dev/null 2>&1; then fail 'Certbot failure was not propagated'; fi
 [[ ! -e $CERTBOT_SHARED_LOCK ]] || fail 'xrayctl did not release the lock after Certbot failure'
 
+# A working Certbot can write more help text than fits in a pipe. Reading
+# only up to the option name must not make the environment probe fail.
+(
+  CERTBOT_VENV="$TEST_ROOT/certbot-probe"
+  CERTBOT_BIN="$CERTBOT_VENV/bin/certbot"
+  CERTBOT_WORK_DIR="$TEST_ROOT/probe-work"
+  CERTBOT_LOGS_DIR="$TEST_ROOT/probe-logs"
+  pkg_manager() { printf 'apt\n'; }
+  apt_get_guarded() { :; }
+  meta_resource_register() { :; }
+  mkdir -p "$CERTBOT_VENV/bin"
+  cat >"$CERTBOT_BIN" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '--ip-address'
+awk 'BEGIN { for (i=0; i<12000; i++) print "another Certbot help option" }'
+SH
+  cat >"$CERTBOT_VENV/bin/python" <<'SH'
+#!/usr/bin/env bash
+[[ $1 == -c && -f ${0%/*}/plugins-installed ]]
+SH
+  cat >"$CERTBOT_VENV/bin/pip" <<'SH'
+#!/usr/bin/env bash
+case $1 in
+  install) touch "${0%/*}/plugins-installed" ;;
+  list) printf 'certbot-dns-cloudflare 5.10.0\n'; exit 120 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$CERTBOT_BIN" "$CERTBOT_VENV/bin/"{python,pip}
+  output=$(ensure_certbot_environment 2>&1) || fail "Certbot setup rejected a valid environment: $output"
+  [[ -f $CERTBOT_VENV/bin/plugins-installed ]] || fail 'Certbot plugin installation was skipped'
+  [[ $output != *'Cloudflare DNS 验证不可用'* ]] || fail 'working Cloudflare plugin emitted an installation warning'
+  output=$(ensure_certbot_environment 2>&1) || fail "Certbot recheck failed: $output"
+  [[ $output != *'正在安装 Certbot'* ]] || fail 'working Certbot environment was reinstalled'
+)
+
 # Multiple Certbot accounts must be resolved deterministically. Existing lineage
 # ownership takes priority; otherwise an explicit account is required in a
 # non-interactive session.

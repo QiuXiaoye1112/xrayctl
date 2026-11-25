@@ -29,23 +29,20 @@ prompt_value() {
   case ${2-} in 用户名) printf -v "$1" '%s' 'alice';; *) printf -v "$1" '%s' '0.0.0.0';; esac
 }
 prompt_port() { printf -v "$1" '%s' '443'; }
-prompt_public_host() { printf -v "$1" '%s' 'edge.example.com'; }
-detect_local_ips() { printf '%s\t%s\teth0\n' IPv4 192.0.2.10; }
+prompt_inbound_ip() { printf -v "$1" '%s' 192.0.2.10; }
 prompt_client_label() { printf -v "$1" '%s' 'alice'; }
 prompt_secret() { printf -v "$1" '%s' 'fixed-password'; }
 prompt_optional_value() { printf -v "$1" '%s' 'alice'; }
 generate_uuid() { printf '%s\n' '123e4567-e89b-12d3-a456-426614174000'; }
 
 run_fixture() {
-  local protocol=$1 choice=$2 inbound='' host='' public_key='' actual
+  local protocol=$1 choice=$2 inbound='' host='' public_key='' expected
   TEST_PROTOCOL=$protocol
   TEST_PROTOCOL_CHOICE=$choice
   build_inbound inbound host public_key
-  actual=$(mktemp "${TMPDIR:-/tmp}/xrayctl-fixture.XXXXXX")
-  jq -S . <<<"$inbound" >"$actual"
-  assert_file_eq "${REPO_ROOT}/tests/fixtures/protocols/${protocol}.json" "$actual" "${protocol} builder changed"
-  rm -f "$actual"
-  assert_eq edge.example.com "$host" "${protocol} public host changed"
+  expected=$(jq -S '.listen="192.0.2.10"' "${REPO_ROOT}/tests/fixtures/protocols/${protocol}.json")
+  assert_eq "$expected" "$(jq -S . <<<"$inbound")" "${protocol} builder changed"
+  assert_eq 192.0.2.10 "$host" "${protocol} public host changed"
 }
 
 run_fixture vless 1

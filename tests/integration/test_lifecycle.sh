@@ -81,10 +81,10 @@ assert_eq 323e4567-e89b-12d3-a456-426614174000 \
 
 prompt_value() { printf -v "$1" '%s' 127.0.0.1; }
 prompt_port() { printf -v "$1" '%s' 8443; }
-prompt_public_host() { printf -v "$1" '%s' modified.example.com; }
+prompt_inbound_ip() { printf -v "$1" '%s' 192.0.2.10; }
 modify_inbound_basic vless-node >/dev/null
 assert_eq 8443 "$(jq -r '.inbounds[0].port' "$CONFIG_FILE")" "inbound port modification failed"
-assert_eq modified.example.com "$(jq -r '.inbounds["vless-node"].host' "$META_FILE")" "inbound host metadata modification failed"
+assert_eq 192.0.2.10 "$(jq -r '.inbounds["vless-node"].host' "$META_FILE")" "inbound host metadata modification failed"
 
 candidate=$(temp_file)
 jq '.outbounds += [{tag:"proxy-out",protocol:"socks",settings:{address:"127.0.0.1",port:1080}}]' \

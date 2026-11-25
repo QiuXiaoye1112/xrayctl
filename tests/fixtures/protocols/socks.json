@@ -10,7 +10,6 @@
       }
     ],
     "auth": "password",
-    "ip": "0.0.0.0",
     "udp": true,
     "users": [
       {

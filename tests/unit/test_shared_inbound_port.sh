@@ -137,7 +137,7 @@ restart_service() {
 }
 
 sample 35 15 >"$root/counters.json"
-modify_inbound_client_address v4 <<<'192.0.2.11' >/dev/null
+modify_inbound_client_address v4 <<<$'1\n1' >/dev/null
 jq -e '.rulesInventory.v4.listen=="192.0.2.11" and .kernelCounters=={} and
   .inbounds.v4.cycles["2026-11-01 00:00:00"]==370 and .totals.cycles["2026-11-01 00:00:00"]==540' "$TRAFFIC_FILE" >/dev/null
 assert_eq 443 "$(inbound_effective_port v4)" "switching the listener changed the port"
@@ -147,7 +147,7 @@ cp "$META_FILE" "$root/before-failure-meta.json"
 
 sample 5 0 >"$root/counters.json"
 touch "$root/fail-firewall"
-assert_failure modify_inbound_client_address v4 <<<'192.0.2.12'
+assert_failure modify_inbound_client_address v4 <<<$'1\n2'
 assert_file_eq "$root/before-failure.json" "$CONFIG_FILE" "firewall failure changed listener config"
 assert_file_eq "$root/before-failure-meta.json" "$META_FILE" "firewall failure changed share metadata"
 assert_eq restart "$(cat "$root/restart-log")" "firewall failure must stop before restarting Xray"

@@ -87,8 +87,7 @@ protocol_build_socks() {
       auth:"password",
       accounts:[{user:$user,pass:$pass}],
       users:[{user:$user,pass:$pass}],
-      udp:true,
-      ip:"0.0.0.0"
+      udp:true
     }}')
   printf -v "$__out" '%s' "$result"
 }
@@ -132,9 +131,9 @@ _inbound_build_obfs_meta() {
 
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3 __obfs_meta=${4-}
-  local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
+  local choice protocol tag listen port email password="" stream="" inbound_json username="" generated_public_key="" suggested_port=""
   local obfs_choice=1 obfs_host="" obfs_meta_json="" local_port="" xray_listen="" xray_port="" ss_network="tcp,udp"
-  local total_steps=3 listen_step=2 user_step=3 bind_network=tcp dual_stack=false
+  local total_steps=3 listen_step=2 user_step=3 bind_network=tcp
   ui_wizard_step 1 "" "选择入站协议"
   choose choice "选择入站协议" "VLESS" "SS2022" "SOCKS5" "HTTP" || return 1
   case $choice in
@@ -146,7 +145,6 @@ build_inbound() {
 
   if protocol_supports_stream "$protocol"; then
     build_stream_settings "$protocol" stream generated_public_key || return 1
-    suggested_host=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
   elif [[ $protocol == shadowsocks ]]; then
     ui_wizard_step 2 "$total_steps" "HTTP 混淆设置"
     choose obfs_choice "HTTP 混淆 (simple-obfs)" "关闭" "开启" || return 1
@@ -157,20 +155,17 @@ build_inbound() {
 
   ui_wizard_step "$listen_step" "$total_steps" "监听参数与连接地址"
   prompt_tag tag "${protocol}-$(random_hex 2)" || return 1
-  prompt_public_host public_host "" "$suggested_host" || return 1
-
-  listen=$(inbound_auto_listen "$public_host") || return 1
+  prompt_inbound_ip listen || return 1
   suggest_available_port suggested_port || suggested_port=443
   prompt_port port "$suggested_port" "" "$listen" "$bind_network" || return 1
-  inbound_report_listener "$listen" "$port" "$public_host"
+  inbound_report_listener "$listen" "$port"
 
   if [[ $protocol == shadowsocks && $obfs_choice == 2 ]]; then
-    [[ $listen != :: ]] || dual_stack=true
     suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
     xray_listen="127.0.0.1"
     xray_port=$local_port
     ss_network="tcp,udp"
-    obfs_meta_json=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port" "$dual_stack")
+    obfs_meta_json=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port")
   else
     xray_listen=$listen
     xray_port=$port
@@ -199,7 +194,7 @@ build_inbound() {
   esac
 
   printf -v "$__inbound" '%s' "$inbound_json"
-  printf -v "$__host" '%s' "$public_host"
+  printf -v "$__host" '%s' "$listen"
   printf -v "$__public_key" '%s' "$generated_public_key"
   [[ -z $__obfs_meta ]] || printf -v "$__obfs_meta" '%s' "$obfs_meta_json"
 }

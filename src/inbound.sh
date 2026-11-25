@@ -206,85 +206,10 @@ prompt_port() {
   done
 }
 
-# Public addresses reported by remote lookup may belong to a NAT gateway.
-# Bind a literal only if it is configured locally, or use a local address of
-# that family when the gateway exposes an address of its own.
-inbound_auto_listen() {
-  local host=$1 require_local_family=${2:-0} requested="" label local_ip iface canonical fallback="" matches=0 saw_ipv6=0
-  if [[ $host == \[*\] ]]; then host=${host#\[}; host=${host%\]}; fi
-  requested=$(normalize_socket_ip "$host") || requested=""
-  case $requested in
-    127.*|0000:0000:0000:0000:0000:0000:0000:0001) printf '%s\n' "$host"; return ;;
-  esac
-  while IFS=$'\t' read -r label local_ip iface; do
-    [[ -n ${iface:-} || -n $label ]] || continue
-    canonical=$(normalize_socket_ip "$local_ip") || continue
-    if [[ $canonical == *:* ]]; then saw_ipv6=1; fi
-    if [[ $canonical == "$requested" ]]; then printf '%s\n' "$local_ip"; return; fi
-    if [[ -n $requested ]] &&
-       { [[ $canonical == *:* && $requested == *:* ]] || [[ $canonical != *:* && $requested != *:* ]]; }; then
-      fallback=$local_ip; matches=$((matches + 1))
-    fi
-  done < <(detect_local_ips)
-  if ((matches == 1)); then
-    printf '%s\n' "$fallback"
-  elif [[ -n $requested ]] && ((require_local_family)); then
-    return 1
-  elif [[ $requested == *:* ]] || { [[ -z $requested ]] && ((saw_ipv6)); }; then
-    printf '::\n'
-  else
-    printf '0.0.0.0\n'
-  fi
-}
-
 inbound_report_listener() {
-  local address=$1 port=$2 host=$3
+  local address=$1 port=$2
   if [[ $address == *:* ]]; then address="[${address}]"; fi
   info "实际监听：${address}:${port}"
-  if [[ $address == '[::]' && $host != *:* ]]; then
-    info "如需通过此域名使用双栈，请配置指向本机的 A 和 AAAA 记录。"
-  fi
-}
-
-prompt_public_host() {
-  local __var=$1 default=${2:-${XRAYCTL_PUBLIC_HOST:-}} preferred=${3:-} value ipv4="" ipv6="" address_choice prompt_label="客户端连接地址" cert_id cert_subject
-  local labels=() values=()
-  if [[ -z $default ]]; then
-    ipv4=$(detect_public_ipv4 || true)
-    ipv6=$(detect_public_ipv6 || true)
-    if [[ -n $preferred ]]; then labels+=("证书域名/IP  ${preferred}"); values+=("$preferred"); fi
-    while IFS= read -r cert_id; do
-      [[ -n $cert_id ]] || continue
-      cert_subject=$(meta_cert_get_field "$cert_id" subject 2>/dev/null || true)
-      [[ -n $cert_subject ]] || continue
-      [[ $cert_subject == "$preferred" ]] && continue
-      [[ " ${values[*]} " == *" $cert_subject "* ]] && continue
-      labels+=("证书域名/IP  ${cert_subject}"); values+=("$cert_subject")
-    done < <(meta_cert_list 2>/dev/null || true)
-    if [[ -n $ipv4 && $ipv4 != "$preferred" ]]; then labels+=("IPv4  ${ipv4}"); values+=("$ipv4"); fi
-    if [[ -n $ipv6 && $ipv6 != "$preferred" ]]; then labels+=("IPv6  ${ipv6}"); values+=("$ipv6"); fi
-    if ((${#values[@]} > 1)); then
-      labels+=("域名/其他地址")
-      choose address_choice "选择客户端连接地址" "${labels[@]}" || return 1
-      if ((address_choice <= ${#values[@]})); then
-        printf -v "$__var" '%s' "${values[$((address_choice-1))]}"
-        return 0
-      fi
-      prompt_label="客户端连接域名/IP"
-    elif ((${#values[@]} == 1)); then
-      default=${values[0]}
-    else
-      prompt_label="客户端连接域名/IP"
-    fi
-  fi
-  while true; do
-    prompt_value value "$prompt_label" "$default" || return 1
-    if [[ -n $value && $value != *" "* ]]; then
-      printf -v "$__var" '%s' "$value"
-      return
-    fi
-    warn "地址无效。"
-  done
 }
 
 add_inbound() {
@@ -426,116 +351,134 @@ rename_inbound() {
   info "入站已重命名：${old_tag} → ${new_tag}。"
 }
 
-validate_client_connection_address() {
-  local address=$1 canonical
-  if [[ $address == \[*\] ]]; then
-    address=${address#\[}; address=${address%\]}
-    [[ $address == *:* ]] || return 1
+prompt_inbound_ip() {
+  local __out=$1 local_ip canonical family_choice=1 ip_choice
+  local label=${2:-选择要绑定的本机}
+  local -a addresses_v4=() addresses_v6=()
+  local -A seen=()
+  while IFS=$'\t' read -r _ local_ip _; do
+    [[ -n $local_ip ]] || continue
+    canonical=$(normalize_socket_ip "$local_ip") || continue
+    case $canonical in 0.0.0.0|::|fe[89ab][0-9a-f]:*) continue;; esac
+    [[ -z ${seen[$canonical]+x} ]] || continue
+    seen[$canonical]=1
+    if [[ $canonical == *:* ]]; then
+      addresses_v6+=("$local_ip")
+    else
+      addresses_v4+=("$canonical")
+    fi
+  done < <(detect_local_ips inbound)
+
+  if ((${#addresses_v4[@]} == 0 && ${#addresses_v6[@]} == 0)); then
+    warn "未检测到可绑定的本机 IPv4 或 IPv6 地址。"
+    return 1
   fi
-  if canonical=$(normalize_socket_ip "$address"); then
-    [[ $canonical != 0.0.0.0 && $canonical != :: ]]
+  if ((${#addresses_v4[@]} > 0 && ${#addresses_v6[@]} > 0)); then
+    choose family_choice "选择客户端连接地址类型" "IPv4" "IPv6" || return 1
+  elif ((${#addresses_v4[@]} == 0)); then
+    family_choice=2
+  fi
+
+  if ((family_choice == 1)); then
+    choose ip_choice "${label} IPv4" "${addresses_v4[@]}" || return 1
+    printf -v "$__out" '%s' "${addresses_v4[$((ip_choice-1))]}"
   else
-    validate_domain "${address%.}"
+    choose ip_choice "${label} IPv6" "${addresses_v6[@]}" || return 1
+    printf -v "$__out" '%s' "${addresses_v6[$((ip_choice-1))]}"
   fi
 }
 
 modify_inbound_client_address() {
-  local tag=$1 current address tls_fallback="" old_listen listen port network candidate obfs="" old_obfs=""
-  ensure_system_context || return 1
+  local tag=$1 edit_port=${2:-0} current address tls_fallback="" old_listen port old_port network candidate obfs="" old_obfs=""
+  local local_port="" reset_socks_udp_ip=false
+  if ((edit_port)); then
+    ensure_runtime_dependencies inbound-modify || return 1
+    ensure_config || return 1
+    [[ -n $tag ]] || select_inbound tag || return 1
+  else
+    ensure_system_context || return 1
+  fi
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
   current=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
-  prompt_validated_value address "客户端连接地址" "${current:-${XRAYCTL_PUBLIC_HOST:-}}" \
-    validate_client_connection_address "请输入 IPv4、IPv6 或域名，无需填写协议和端口。" || return 1
-  if [[ $address == \[*\] ]]; then address=${address#\[}; address=${address%\]}; fi
-  if [[ $address == "$current" ]]; then
-    info "客户端连接地址未更改。"
-    return 0
-  fi
+  old_listen=$(inbound_effective_listen "$tag") || return 1
+  old_port=$(inbound_effective_port "$tag") || return 1
+  info "当前客户端连接地址：${current:-未设置}；监听地址：${old_listen}。"
+  prompt_inbound_ip address || return 1
 
-  # Older TLS inbounds reused the share host as SNI. Preserve that value so
-  # switching the dial address does not change the certificate name in links.
+  # Older TLS inbounds reused the share host as SNI. Keep the name in links
+  # when migrating one of those inbounds to an IP address.
   if jq -e --arg tag "$tag" '.inbounds[] | select(.tag==$tag) |
     .protocol=="vless" and .streamSettings.security=="tls" and
     (.streamSettings.tlsSettings.serverName // "")==""' "$CONFIG_FILE" >/dev/null; then
     tls_fallback=${current:-${XRAYCTL_PUBLIC_HOST:-}}
   fi
-  if ! listen=$(inbound_auto_listen "$address" 1); then
-    warn "无法为此地址确定本机监听 IP。请先将新 IP 配置到网卡，或选择可用的本机 IP。"
-    return 1
+
+  port=$old_port
+  network=$(jq -r --arg tag "$tag" "$INBOUND_SOCKETS_JQ"'
+    .inbounds[] | select(.tag==$tag) | socket_network' "$CONFIG_FILE") || return 1
+  # A wildcard SOCKS UDP reply is unusable for clients that use the advertised
+  # address. With ip omitted, Xray uses the local address of the TCP connection.
+  if jq -e --arg tag "$tag" '.inbounds[] | select(.tag==$tag) |
+    .protocol=="socks" and .settings.udp==true and (.settings.ip=="0.0.0.0" or .settings.ip=="::")' "$CONFIG_FILE" >/dev/null; then
+    reset_socks_udp_ip=true
   fi
-  old_listen=$(inbound_effective_listen "$tag") || return 1
-  port=$(inbound_effective_port "$tag") || return 1
+  if ((edit_port)); then
+    prompt_port port "$old_port" "$tag" "$address" "$network" || return 1
+  fi
   if inbound_obfs_enabled "$tag"; then
     old_obfs=$(jq -c --arg tag "$tag" '.inbounds[$tag].obfs' "$META_FILE") || return 1
-    obfs=$(jq -c --arg listen "$listen" '
-      .listen=$listen | if $listen=="::" then .dualStack=true else del(.dualStack) end' <<<"$old_obfs") || return 1
+    obfs=$(jq -c --arg address "$address" '.listen=$address | del(.dualStack)' <<<"$old_obfs") || return 1
+    if ((edit_port)); then
+      local_port=$(jq -r '.localPort // empty' <<<"$obfs") || return 1
+      if [[ $local_port == "$port" ]] || ! validate_port "$local_port"; then
+        suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
+      fi
+      obfs=$(jq -c --argjson port "$port" --argjson localPort "$local_port" \
+        '.port=$port | .localPort=$localPort' <<<"$obfs") || return 1
+    fi
   fi
 
-  if [[ $listen == "$old_listen" && $obfs == "$old_obfs" ]]; then
+  if [[ $address == "$old_listen" && $port == "$old_port" && $obfs == "$old_obfs" && $reset_socks_udp_ip == false ]]; then
+    if [[ $address == "$current" ]]; then
+      info "客户端连接地址未更改。"
+      return 0
+    fi
     state_commit_metadata _state_build_inbound_client_address "$tag" "$address" "" "$tls_fallback" || return 1
   else
     if ! validate_port "$port"; then
       warn "此入站的端口无法自动切换监听，请检查现有配置。"
       return 1
     fi
-    network=$(jq -r --arg tag "$tag" "$INBOUND_SOCKETS_JQ"'
-      .inbounds[] | select(.tag==$tag) | socket_network' "$CONFIG_FILE") || return 1
-    if port_in_config "$((10#$port))" "$tag" "$listen" "$network" ||
-       port_in_use_os "$((10#$port))" "$listen" "$network" "$tag"; then
+    if port_in_config "$((10#$port))" "$tag" "$address" "$network" ||
+       port_in_use_os "$((10#$port))" "$address" "$network" "$tag"; then
       warn "新监听地址与端口 ${port} 上的其他监听冲突，入站未更改。"
       return 1
     fi
     candidate=$(temp_file) || return 1
-    if [[ -n $obfs ]]; then
+    if [[ -n $local_port ]]; then
+      jq --arg tag "$tag" --argjson localPort "$local_port" '
+        (.inbounds[] | select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp,udp")
+      ' "$CONFIG_FILE" >"$candidate" || { rm -f "$candidate"; return 1; }
+    elif [[ -n $obfs ]]; then
       cp "$CONFIG_FILE" "$candidate" || { rm -f "$candidate"; return 1; }
-    elif ! jq --arg tag "$tag" --arg listen "$listen" '
-      (.inbounds[] | select(.tag==$tag) | .listen)=$listen' "$CONFIG_FILE" >"$candidate"; then
-      rm -f "$candidate"
-      return 1
+    else
+      jq --arg tag "$tag" --arg address "$address" --argjson port "$((10#$port))" --argjson editPort "$edit_port" \
+        --argjson resetSocksUdpIP "$reset_socks_udp_ip" '
+        (.inbounds[] | select(.tag==$tag)) |=
+          (.listen=$address | if $editPort==1 then .port=$port else . end |
+           if $resetSocksUdpIP then del(.settings.ip) else . end)
+      ' "$CONFIG_FILE" >"$candidate" || { rm -f "$candidate"; return 1; }
     fi
     XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$candidate" state_commit \
       _state_build_inbound_client_address "$tag" "$address" "$obfs" "$tls_fallback" || return 1
   fi
-  inbound_report_listener "$listen" "$port" "$address"
+  inbound_report_listener "$address" "$port"
   info "客户端连接地址已更新为 ${address}。请重新获取分享链接或订阅内容。"
 }
 
 modify_inbound_basic() {
-  ensure_runtime_dependencies inbound-modify; ensure_config
-  local tag=${1-} listen port host tmp old_port bind_network
-  local local_port="" obfs_host="" obfs_meta="" dual_stack=false
-  [[ -n $tag ]] || select_inbound tag || return
-  inbound_exists "$tag" || die "找不到入站：$tag"
-  inbound_require_supported_configuration "$tag"
-  old_port=$(inbound_effective_port "$tag")
-  bind_network=$(jq -r --arg tag "$tag" "$INBOUND_SOCKETS_JQ"'
-    .inbounds[] | select(.tag==$tag) | socket_network' "$CONFIG_FILE")
-  prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
-  listen=$(inbound_auto_listen "$host") || return 1
-  prompt_port port "$old_port" "$tag" "$listen" "$bind_network" || return 1
-  inbound_report_listener "$listen" "$port" "$host"
-  if inbound_obfs_enabled "$tag"; then
-    local_port=$(inbound_obfs_field "$tag" localPort)
-    obfs_host=$(inbound_obfs_field "$tag" host)
-    [[ $listen != :: ]] || dual_stack=true
-    if [[ -z $local_port || $local_port == "$port" ]] || ! validate_port "$local_port"; then
-      suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
-    fi
-    tmp=$(temp_file)
-    jq --arg tag "$tag" --argjson localPort "$local_port" \
-      '(.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp,udp")' \
-      "$CONFIG_FILE" >"$tmp"
-    obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port" "$dual_stack")
-    state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" "$obfs_meta" || return
-    obfs_service_setup "$tag" || warn "入站已修改，但 obfs-server 服务更新失败，请检查 simple-obfs 状态。"
-  else
-    tmp=$(temp_file)
-    jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
-      '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
-    state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
-  fi
-  traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
+  modify_inbound_client_address "${1-}" 1
 }
 
 modify_inbound_transport() {
@@ -975,12 +918,18 @@ rename_client() {
 }
 
 public_host_for_tag() {
-  local tag=$1 host
+  local tag=$1 host listen canonical
   host=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
+  host=${host:-${XRAYCTL_PUBLIC_HOST:-}}
   if [[ -z $host ]]; then
-    if [[ -n ${XRAYCTL_PUBLIC_HOST:-} ]]; then host=$XRAYCTL_PUBLIC_HOST;
-    elif [[ -t 0 ]]; then prompt_public_host host || return 1;
-    else die "缺少客户端连接地址。请在入站 ${tag} 的「修改入站信息」中设置，或指定 XRAYCTL_PUBLIC_HOST。"; fi
+    listen=$(inbound_effective_listen "$tag") || return 1
+    if canonical=$(normalize_socket_ip "$listen") && [[ $canonical != 0.0.0.0 && $canonical != :: ]]; then
+      host=$listen
+    elif [[ -t 0 ]]; then
+      prompt_inbound_ip host "选择分享链接使用的本机" >&2 || return 1
+    else
+      die "缺少客户端连接地址。请在入站 ${tag} 的「修改入站信息」中设置，或指定 XRAYCTL_PUBLIC_HOST。"
+    fi
   fi
   printf '%s' "$host"
 }

@@ -12,16 +12,16 @@ print_share_entry() {
 }
 
 _share_tls_server_name() {
-  local tag=$1 stream=$2 sni
+  local tag=$1 stream=$2 host=${3-} sni
   sni=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
   if [[ -z $sni ]]; then
     sni=$(jq -r --arg tag "$tag" '.inbounds[$tag].shareTlsServerName // empty' "$META_FILE" 2>/dev/null || true)
   fi
-  if [[ -n $sni ]]; then printf '%s' "$sni"; else public_host_for_tag "$tag"; fi
+  if [[ -n ${sni:-$host} ]]; then printf '%s' "${sni:-$host}"; else public_host_for_tag "$tag"; fi
 }
 
 _share_print_params_card() {
-  local tag=$1 protocol=$2 uri_host=$3 port=$4
+  local tag=$1 protocol=$2 uri_host=$3 port=$4 host=$5
   local stream method security path="" sni="" sid="" pbk="" flow="" auth="" obfs_host="" ss_network=""
   ui_card_open "连接参数 · ${tag}"
   case $protocol in
@@ -44,7 +44,7 @@ _share_print_params_card() {
       esac
       case $security in
         tls)
-          sni=$(_share_tls_server_name "$tag" "$stream")
+          sni=$(_share_tls_server_name "$tag" "$stream" "$host")
           ui_card_kv "TLS SNI" "$sni" 12
           ui_card_kv "指纹 (fp)" "chrome" 12
           ;;
@@ -94,7 +94,7 @@ _share_print_params_card() {
 }
 
 link_query_for_stream() {
-  local tag=$1 protocol=$2 stream method security query="" path sni sid pbk flow
+  local tag=$1 protocol=$2 host=${3-} stream method security query="" path sni sid pbk flow
   stream=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.streamSettings // {network:"raw",security:"none"}' "$CONFIG_FILE")
   method=$(jq -r '.network // .method // "raw"' <<<"$stream"); security=$(jq -r '.security // "none"' <<<"$stream")
   case $method in
@@ -106,7 +106,7 @@ link_query_for_stream() {
   query+="&security=$(url_encode "$security")"
   case $security in
     tls)
-      sni=$(_share_tls_server_name "$tag" "$stream")
+      sni=$(_share_tls_server_name "$tag" "$stream" "$host")
       query+="&sni=$(url_encode "$sni")"
       [[ $method == websocket ]] && query+="&host=$(url_encode "$sni")"
       query+="&fp=chrome"
@@ -132,14 +132,15 @@ print_links() {
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
   protocol=$(jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.protocol' "$CONFIG_FILE")
-  host=$(public_host_for_tag "$tag"); uri_host=$host
+  host=$(public_host_for_tag "$tag") || return 1
+  uri_host=$host
   [[ $uri_host == *:* && $uri_host != \[*\] ]] && uri_host="[${uri_host}]"
   port=$(inbound_effective_port "$tag")
   heading "${tag} · 节点交付"
-  _share_print_params_card "$tag" "$protocol" "$uri_host" "$port"
+  _share_print_params_card "$tag" "$protocol" "$uri_host" "$port" "$host"
   case $protocol in
     vless)
-      query=$(link_query_for_stream "$tag" "$protocol")
+      query=$(link_query_for_stream "$tag" "$protocol" "$host")
       while IFS= read -r -d '' label && IFS= read -r -d '' id; do
         [[ -z $filter || $label == "$filter" ]] || continue
         idx=$((idx + 1))

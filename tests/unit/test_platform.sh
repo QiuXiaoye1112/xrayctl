@@ -116,6 +116,7 @@ ifconfig() {
     '          inet addr:172.17.0.1  Bcast:172.17.255.255  Mask:255.255.0.0' \
     'lo        Link encap:Local Loopback' \
     '          inet addr:127.0.0.1  Mask:255.0.0.0' \
+    '          inet6 addr: ::1/128 Scope:Host' \
     'ens3: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500' \
     '        inet 198.51.100.20  netmask 255.255.255.0  broadcast 198.51.100.255' \
     '        inet6 2001:db8::20%ens3  prefixlen 64  scopeid 0x0<global>' \
@@ -128,6 +129,11 @@ local_rows=$(detect_local_ips)
 [[ $local_rows == *$'2001:db8::20 (IPv6)\t2001:db8::20\tens3'* ]] || fail "scoped IPv6 was not normalized"
 [[ $local_rows != *172.17.0.1* && $local_rows != *127.0.0.1* && $local_rows != *fe80::* ]] \
   || fail "virtual, loopback, or link-local address was not filtered"
+inbound_rows=$(detect_local_ips inbound)
+[[ $inbound_rows == *$'172.17.0.1 (IPv4)\t172.17.0.1\tdocker0'* &&
+   $inbound_rows == *$'127.0.0.1 (IPv4)\t127.0.0.1\tlo'* &&
+   $inbound_rows == *$'::1 (IPv6)\t::1\tlo'* &&
+   $inbound_rows != *fe80::* ]] || fail "inbound selection lost a bindable address or included link-local"
 eval "$original_command_exists"
 grep -Fq 'iproute2' "${REPO_ROOT}/alpine/install.sh" || fail "Alpine bootstrap does not install iproute2"
 

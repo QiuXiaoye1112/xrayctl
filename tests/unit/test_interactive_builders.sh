@@ -55,55 +55,65 @@ prompt_value() {
   printf -v "$1" '%s' "${3-}"
 }
 prompt_port() { printf -v "$1" '%s' 39081; }
-connection_host=203.0.113.10
-prompt_public_host() {
-  if [[ -n ${tls_sni:-} ]]; then assert_eq "$tls_sni" "${3-}" "TLS SNI should be offered as a connection address"; fi
-  printf -v "$1" '%s' "$connection_host"
+prompt_validated_value() {
+  case $2 in
+    用户名) printf -v "$1" '%s' user ;;
+    "混淆域名 (obfs-host)") printf -v "$1" '%s' www.microsoft.com ;;
+    *) fail "unexpected input: $2" ;;
+  esac
 }
 detect_local_ips() {
-  printf '%s\t%s\teth0\n' IPv4 203.0.113.10 IPv6 2001:db8::10
+  printf '%s\t%s\t%s\n' IPv4 203.0.113.10 eth0 IPv4 203.0.113.11 eth1 \
+    IPv6 2001:db8::10 eth0 IPv6 2001:db8::11 eth1 IPv6 2001:0DB8:0:0:0:0:0:11 eth1
 }
 prompt_client_label() { printf -v "$1" '%s' user; }
 prompt_optional_value() { printf -v "$1" '%s' user; }
 prompt_secret() { printf -v "$1" '%s' password; }
 for protocol_choice in 1 2 3 4; do
   if [[ $protocol_choice == 2 ]]; then
-    set_choices "$protocol_choice" 1
+    set_choices "$protocol_choice" 1 1 2
   else
-    set_choices "$protocol_choice"
+    set_choices "$protocol_choice" 1 2
   fi
   inbound="" host="" public_key="" obfs_meta=""
   build_inbound inbound host public_key obfs_meta
-  assert_eq 203.0.113.10 "$(jq -r .listen <<<"$inbound")" "selecting a local IPv4 must bind that address"
+  assert_eq 203.0.113.11 "$(jq -r .listen <<<"$inbound")" "the selected second IPv4 must be bound"
+  assert_eq 203.0.113.11 "$host" "the selected second IPv4 must be shared"
   expected=(unused vless shadowsocks socks http)
   assert_eq "${expected[$protocol_choice]}" "$(jq -r .protocol <<<"$inbound")" "protocol menu choice routed incorrectly"
 done
 
-for expected_bind in '2001:DB8::10 2001:db8::10' 'edge.example.com ::'; do
-  IFS=' ' read -r connection_host expected_address <<<"$expected_bind"
-  set_choices 1
-  build_inbound inbound host public_key obfs_meta
-  assert_eq "$expected_address" "$(jq -r .listen <<<"$inbound")" "automatic IPv6 or domain listener"
-  assert_eq "$connection_host" "$host" "share address must remain independent of the listener"
-done
+set_choices 1 2 2
+build_inbound inbound host public_key obfs_meta
+assert_eq 2001:db8::11 "$(jq -r .listen <<<"$inbound")" "the selected second IPv6 must be bound"
+assert_eq 2001:db8::11 "$host" "the selected second IPv6 must be shared"
 
 (
-  tls_sni=certificate.example.com
   stream_fixture='{"network":"raw","security":"tls","tlsSettings":{"serverName":"certificate.example.com"}}'
-  connection_host=2001:db8::10
-  set_choices 1
+  set_choices 1 2 1
   build_inbound inbound host public_key obfs_meta
-  jq -e --arg sni "$tls_sni" '.listen=="2001:db8::10" and .streamSettings.tlsSettings.serverName==$sni' <<<"$inbound" >/dev/null
-  assert_eq "$connection_host" "$host" "choosing a TLS connection address must not replace SNI"
+  jq -e '.listen=="2001:db8::10" and .streamSettings.tlsSettings.serverName=="certificate.example.com"' <<<"$inbound" >/dev/null
+  assert_eq 2001:db8::10 "$host" "choosing a TLS connection address must not replace SNI"
 )
-assert_eq 203.0.113.10 "$(inbound_auto_listen 198.51.100.9)" "non-local share address should use a local bind address"
+(
+  detect_local_ips() { printf '%s\t%s\t%s\n' IPv6 2001:db8::10 eth0 IPv6 2001:db8::11 eth0; }
+  set_choices 1 2
+  build_inbound inbound host public_key obfs_meta
+  assert_eq 2001:db8::11 "$host" "IPv6-only selection should open the address list directly"
+)
+(
+  detect_local_ips() { printf '%s\t%s\t%s\n' IPv4 0.0.0.0 eth0 IPv6 :: eth0 IPv6 fe80::1 eth0; }
+  set_choices
+  assert_failure prompt_inbound_ip host
+)
 
-set_choices 2 2
+set_choices 2 2 2 1
 inbound="" host="" public_key="" obfs_meta=""
 build_inbound inbound host public_key obfs_meta
-assert_eq "127.0.0.1" "$(jq -r .listen <<<"$inbound")" "obfs SS2022 inbound must bind localhost"
+assert_eq "127.0.0.1" "$(jq -r .listen <<<"$inbound")" "obfs SS2022 backend must bind localhost"
 assert_eq "tcp,udp" "$(jq -r .settings.network <<<"$inbound")" "obfs SS2022 inbound must support TCP and UDP"
-assert_eq true "$(jq -r .dualStack <<<"$obfs_meta")" "obfs should preserve the dual-stack choice"
+jq -e '.listen=="2001:db8::10" and .dualStack==null' <<<"$obfs_meta" >/dev/null
+assert_eq 2001:db8::10 "$host" "obfs must share its public listener IP"
 assert_eq "www.microsoft.com" "$(jq -r .host <<<"$obfs_meta")" "obfs metadata must preserve obfs-host"
 
-pass "all protocol, security, and transport interactive builder choices are covered"
+pass "protocols, transport, multi-IP selection, single-family selection and obfs are covered"

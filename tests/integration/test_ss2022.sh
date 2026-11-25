@@ -32,6 +32,7 @@ source "$REPO_ROOT/xrayctl.sh"
 trap - ERR
 trap cleanup EXIT
 original_prompt_value=$(declare -f prompt_value)
+original_choose=$(declare -f choose)
 
 # Successful install steps stay quiet; failures retain useful diagnostics.
 _obfs_run_install_step "$TEST_ROOT/install.log" bash -c 'echo download-output' >"$TEST_ROOT/install.out" 2>&1
@@ -72,7 +73,10 @@ prompt_value() {
   esac
 }
 prompt_port() { printf -v "$1" '%s' "${next_port:-39082}"; }
-prompt_public_host() { printf -v "$1" '%s' "${next_public_host:-2001:db8::1}"; }
+# Builder fixtures prescribe the endpoint independently of menu input. The
+# actual address selector is exercised below when modifying the inbound.
+original_prompt_inbound_ip=$(declare -f prompt_inbound_ip)
+prompt_inbound_ip() { printf -v "$1" '%s' "${next_public_host:-2001:db8::1}"; }
 prompt_client_label() { printf -v "$1" '%s' "$next_user"; }
 
 jq -n '{inbounds:[],outbounds:[{protocol:"freedom",tag:"direct"}],routing:{rules:[]}}' >"$CONFIG_FILE"
@@ -156,7 +160,7 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   next_obfs_host=obfs.example.com
   next_tag=ss2022-obfs
   next_port=39182
-  next_public_host=edge.example.com
+  next_public_host=2001:db8::1
   next_user=alice
   dispatch inbound add >"$TEST_ROOT/obfs-add.out"
   validate_candidate "$CONFIG_FILE"
@@ -164,16 +168,16 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   local_port=$(jq -r '.inbounds[0].port' "$CONFIG_FILE")
   [[ $local_port != 39182 ]]
   jq -e '.inbounds[0] | .listen=="127.0.0.1" and .settings.network=="tcp,udp" and .settings.method=="2022-blake3-aes-256-gcm"' "$CONFIG_FILE" >/dev/null
-  jq -e --argjson lp "$local_port" '.inbounds["ss2022-obfs"].obfs | .enabled==true and .type=="http" and .host=="obfs.example.com" and .listen=="::" and .port==39182 and .localPort==$lp and .service=="xrayctl-obfs-ss2022-obfs" and .dualStack==true' "$META_FILE" >/dev/null
+  jq -e --argjson lp "$local_port" '.inbounds["ss2022-obfs"].obfs | .enabled==true and .type=="http" and .host=="obfs.example.com" and .listen=="2001:db8::1" and .port==39182 and .localPort==$lp and .service=="xrayctl-obfs-ss2022-obfs" and .dualStack==null' "$META_FILE" >/dev/null
   unit_file="$SYSTEMD_UNIT_DIR/xrayctl-obfs-ss2022-obfs.service"
   [[ -f $unit_file ]]
-  grep -Fq "ExecStart=${OBFS_SERVER_BIN} -p 39182 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
+  grep -Fq "ExecStart=${OBFS_SERVER_BIN} -s 2001:db8::1 -p 39182 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
 
   udp_unit_file="$SYSTEMD_UNIT_DIR/xrayctl-ss2022-udp.service"
   [[ -f $OBFS_UDP_CONFIG && -f $udp_unit_file ]]
   jq -e --argjson lp "$local_port" '
     (.inbounds | length)==1 and
-    (.inbounds[0] | .tag=="obfs-udp-ss2022-obfs" and .protocol=="dokodemo-door" and .listen=="::" and .port==39182 and .settings.address=="127.0.0.1" and .settings.port==$lp and .settings.network=="udp") and
+    (.inbounds[0] | .tag=="obfs-udp-ss2022-obfs" and .protocol=="dokodemo-door" and .listen=="2001:db8::1" and .port==39182 and .settings.address=="127.0.0.1" and .settings.port==$lp and .settings.network=="udp") and
     (.outbounds[0] | .protocol=="freedom" and .settings.finalRules==[{"ip":["127.0.0.1/32"],"action":"allow"}])
   ' "$OBFS_UDP_CONFIG" >/dev/null
   grep -Fq 'Environment=GOGC=20' "$udp_unit_file"
@@ -188,7 +192,7 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   grep -Fq 'SS2022 · TCP/UDP · HTTP 混淆' "$TEST_ROOT/obfs-add.out"
   grep -Fq 'plugin: obfs, mode: http, host: obfs.example.com' "$TEST_ROOT/obfs-add.out"
   sub_uri=$(dispatch subscription ss2022-obfs | base64 --decode)
-  [[ $sub_uri == *"@edge.example.com:39182/?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dobfs.example.com#ss2022-obfs-alice" ]]
+  [[ $sub_uri == *"@[2001:db8::1]:39182/?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dobfs.example.com#ss2022-obfs-alice" ]]
 
   next_user=bob
   dispatch client add ss2022-obfs >/dev/null
@@ -227,12 +231,12 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   # The menu changes the public TCP/UDP bind while leaving the SS2022
   # backend on the original loopback address and port.
   ensure_system_context() { :; }
-  (eval "$original_prompt_value"; modify_inbound_client_address ss2022-obfs) <<<'different.example.com' >/dev/null
-  grep -Fq "ExecStart=${OBFS_SERVER_BIN} -p 39183 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
-  jq -e '.inbounds[0] | .listen=="::" and .port==39183' "$OBFS_UDP_CONFIG" >/dev/null
+  (eval "$original_prompt_value"$'\n'"$original_choose"$'\n'"$original_prompt_inbound_ip"; modify_inbound_client_address ss2022-obfs) <<<$'2\n1' >/dev/null
+  grep -Fq "ExecStart=${OBFS_SERVER_BIN} -s 2001:db8::1 -p 39183 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
+  jq -e '.inbounds[0] | .listen=="2001:db8::1" and .port==39183' "$OBFS_UDP_CONFIG" >/dev/null
   jq -e --argjson port "$local_port" '.inbounds[0] | .listen=="127.0.0.1" and .port==$port' "$CONFIG_FILE" >/dev/null
-  assert_eq :: "$(traffic_inventory_json | jq -r '.["ss2022-obfs"].listen')" "traffic inventory must track the public dual-stack listener"
-  (eval "$original_prompt_value"; modify_inbound_client_address ss2022-obfs) <<<'192.0.2.10' >/dev/null
+  assert_eq 2001:db8::1 "$(traffic_inventory_json | jq -r '.["ss2022-obfs"].listen')" "traffic inventory must track the public IPv6 listener"
+  (eval "$original_prompt_value"$'\n'"$original_choose"$'\n'"$original_prompt_inbound_ip"; modify_inbound_client_address ss2022-obfs) <<<$'1\n1' >/dev/null
   grep -Fq "ExecStart=${OBFS_SERVER_BIN} -s 192.0.2.10 -p 39183 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
 
   dispatch inbound rename ss2022-obfs ss2022-obfs2 >/dev/null
@@ -336,7 +340,7 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   }
   next_tag=ss2022-hup
   next_port=39192
-  next_public_host=edge.example.com
+  next_public_host=2001:db8::1
   next_user=alice
   dispatch inbound add >"$TEST_ROOT/hup-add.out"
 
