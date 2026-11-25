@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly XRAYCTL_VERSION="1.4.0"
-readonly XRAYCTL_BUILD_COMMIT="4ed0b48f358e"
+readonly XRAYCTL_BUILD_COMMIT="9fe9e399a2a3"
 readonly XRAY_CORE_PINNED_VERSION="26.6.27"
 readonly OFFICIAL_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
@@ -718,6 +718,54 @@ validate_ip_literal() {
   validate_ipv4 "$1" || [[ $1 == *:* && $1 =~ ^[0-9A-Fa-f:]+$ && ${#1} -le 45 ]]
 }
 
+# Compare socket addresses independently of their textual IPv6 representation.
+normalize_socket_ip() {
+  local address=$1 a b c d piece left right result="" missing
+  local -a before=() after=()
+  if validate_ipv4 "$address"; then
+    IFS=. read -r a b c d <<<"$address"
+    printf '%d.%d.%d.%d\n' "$((10#$a))" "$((10#$b))" "$((10#$c))" "$((10#$d))"
+    return
+  fi
+  if [[ $address == *:*.* ]]; then
+    piece=${address##*:}
+    validate_ipv4 "$piece" || return 1
+    IFS=. read -r a b c d <<<"$piece"
+    address="${address%:*}:$(printf '%x:%x' "$((10#$a * 256 + 10#$b))" "$((10#$c * 256 + 10#$d))")"
+  fi
+  [[ $address == *:* && $address =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+  if [[ $address == *::* ]]; then
+    left=${address%%::*}; right=${address#*::}
+    [[ $left != :* && $left != *: && $right != :* && $right != *: && $right != *::* ]] || return 1
+    [[ -z $left ]] || IFS=: read -r -a before <<<"$left"
+    [[ -z $right ]] || IFS=: read -r -a after <<<"$right"
+    missing=$((8 - ${#before[@]} - ${#after[@]}))
+    ((missing > 0)) || return 1
+  else
+    [[ $address != :* && $address != *: ]] || return 1
+    IFS=: read -r -a before <<<"$address"
+    ((${#before[@]} == 8)) || return 1
+    missing=0
+  fi
+  for piece in "${before[@]}"; do
+    [[ $piece =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+    result+="$(printf '%04x:' "$((16#$piece))")"
+  done
+  while ((missing > 0)); do result+='0000:'; missing=$((missing - 1)); done
+  for piece in "${after[@]}"; do
+    [[ $piece =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+    result+="$(printf '%04x:' "$((16#$piece))")"
+  done
+  result=${result%:}
+  case $result in
+    0000:0000:0000:0000:0000:0000:0000:0000) printf '::\n' ;;
+    0000:0000:0000:0000:0000:ffff:*)
+      left=${result%:*}; left=${left##*:}; right=${result##*:}
+      printf '%d.%d.%d.%d\n' "$((16#$left / 256))" "$((16#$left % 256))" "$((16#$right / 256))" "$((16#$right % 256))" ;;
+    *) printf '%s\n' "$result" ;;
+  esac
+}
+
 detect_public_ipv4() {
   local response raw
   command_exists curl || return 1
@@ -1363,7 +1411,15 @@ state_commit() {
   trap '' HUP PIPE
   local candidate=$1 meta_mutator=${2-} old_active=0 traffic_locked=0
   local config_snapshot meta_snapshot meta_candidate="" obfs_ext_port="" obfs_port_bound_before=0
+  local listener_change=0 remap_traffic=0 obfs_tag="" apply_error=""
   if [[ -n $meta_mutator ]]; then shift 2; else shift; fi
+  if [[ $meta_mutator == _state_build_inbound_client_address ]]; then
+    listener_change=1
+    if [[ -f $TRAFFIC_FILE ]] && traffic_is_enabled && [[ -n $(traffic_recorded_backend) ]]; then remap_traffic=1; fi
+  fi
+  if [[ ( $meta_mutator == _state_build_inbound_meta_set || $listener_change == 1 ) && -n ${3-} && ${3-} != none ]]; then
+    obfs_tag=$1
+  fi
   if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} == 1 ]]; then
     [[ -r $CONFIG_FILE && -r $META_FILE ]] || { error "用户额度配置事务缺少现有配置或 metadata。"; return 1; }
   else
@@ -1398,11 +1454,13 @@ state_commit() {
   # Keep the stats snapshot and the restart in the same traffic-lock critical
   # section. The timer never acquires the management lock while holding this
   # lock, so it cannot invert the management -> traffic lock ordering.
-  if [[ -f $TRAFFIC_FILE ]] && { jq -e '.xrayctlUserStats.enabled==true' "$CONFIG_FILE" >/dev/null 2>&1 || jq -e '.xrayctlUserStats.enabled==true' "$candidate" >/dev/null 2>&1; }; then
+  if ((remap_traffic)) || { [[ -f $TRAFFIC_FILE ]] &&
+    { jq -e '.xrayctlUserStats.enabled==true' "$CONFIG_FILE" >/dev/null 2>&1 ||
+      jq -e '.xrayctlUserStats.enabled==true' "$candidate" >/dev/null 2>&1; }; }; then
     if [[ ${TRAFFIC_LOCK_HELD:-0} != 1 ]]; then
       if ! traffic_lock_acquire; then
         _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
-        warn "用户流量采集正在运行，配置暂未提交。"
+        warn "流量采集正在运行，配置暂未提交。"
         return 1
       fi
       traffic_locked=1
@@ -1410,6 +1468,13 @@ state_commit() {
     if ((old_active)) && [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} != 1 ]]; then
       traffic_user_collect_locked || warn "重启前未能采集用户流量，该间隔可能丢失。"
     fi
+  fi
+
+  if ((remap_traffic)) && ! traffic_collect_locked 0; then
+    error "旧入站流量未能采集，已取消监听地址变更。"
+    ((traffic_locked == 0)) || traffic_lock_release
+    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+    return 1
   fi
 
   ui_step 2 3 "备份并写入配置与元数据"
@@ -1428,44 +1493,62 @@ state_commit() {
     _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
     return 1
   fi
+  # Install the new IP-specific rules before opening the new listener. The
+  # old counters have been persisted under the same tag and traffic lock.
+  if ((remap_traffic)) && ! traffic_rules_restore; then
+    ui_step_done fail
+    error "无法更新入站流量规则，正在恢复原配置。"
+    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
+    traffic_rules_restore 1 || warn "旧流量规则恢复失败，请检查防火墙。"
+    ((traffic_locked == 0)) || traffic_lock_release
+    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+    return 1
+  fi
   ui_step_done ok
 
-  if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
+  if [[ -n $obfs_tag ]] && ((listener_change == 0)); then
     obfs_ext_port=$(jq -r '.port // empty' <<<"${3-}" 2>/dev/null || true)
     if [[ -n $obfs_ext_port ]] && jq -e --argjson port "$obfs_ext_port" '[.inbounds[]? | select(.port==$port)] | length>0' "$config_snapshot" >/dev/null 2>&1; then
       obfs_port_bound_before=1
     fi
     if ((obfs_port_bound_before == 0)); then
-      obfs_service_setup "$1" 1 || true
+      obfs_service_setup "$obfs_tag" 1 || true
     else
-      obfs_service_setup "$1" 0 || true
+      obfs_service_setup "$obfs_tag" 0 || true
     fi
   fi
 
   if ((old_active)); then
     ui_step 3 3 "重启 Xray 服务使变更生效"
-    if ! restart_service; then
-      ui_step_done fail "已回滚"
-      error "重启失败，正在回滚配置和 metadata。"
-      _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
-      restart_service || true
-      if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
-        if jq -e --arg tag "$1" '.inbounds[$tag].obfs.enabled==true' "$meta_snapshot" >/dev/null 2>&1; then
-          obfs_service_setup "$1" 1 || true
-        else
-          obfs_service_remove "$1" 2>/dev/null || true
-        fi
-      fi
-      ((traffic_locked == 0)) || traffic_lock_release
-      _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
-      return 1
-    fi
-    ui_step_done ok
-    if [[ $meta_mutator == _state_build_inbound_meta_set && -n ${3-} && ${3-} != none ]]; then
-      obfs_service_setup "$1" 1 || true
-    fi
+    restart_service || apply_error="重启 Xray 失败"
   else
     ui_step 3 3 "检查服务状态"
+  fi
+  if [[ -z $apply_error && -n $obfs_tag ]] && ((listener_change)); then
+    obfs_service_setup "$obfs_tag" "$old_active" || apply_error="更新混淆监听失败"
+  fi
+  if [[ -n $apply_error ]]; then
+    ui_step_done fail "已回滚"
+    error "${apply_error}，正在恢复原配置和 metadata。"
+    if ((remap_traffic)); then traffic_collect_locked 0 || true; fi
+    _state_restore_snapshot "$config_snapshot" "$meta_snapshot" || true
+    if ((remap_traffic)); then traffic_rules_restore 1 || warn "旧流量规则恢复失败，请检查防火墙。"; fi
+    ((old_active == 0)) || restart_service || true
+    if [[ -n $obfs_tag ]]; then
+      if jq -e --arg tag "$obfs_tag" '.inbounds[$tag].obfs.enabled==true' "$meta_snapshot" >/dev/null 2>&1; then
+        obfs_service_setup "$obfs_tag" "$old_active" || true
+      else
+        obfs_service_remove "$obfs_tag" 2>/dev/null || true
+      fi
+    fi
+    ((traffic_locked == 0)) || traffic_lock_release
+    _state_cleanup_transaction_files "$config_snapshot" "$meta_snapshot" "$meta_candidate"
+    return 1
+  fi
+  if ((old_active)); then
+    ui_step_done ok
+    if [[ -n $obfs_tag ]] && ((listener_change == 0)); then obfs_service_setup "$obfs_tag" 1 || true; fi
+  else
     ui_step_done ok "服务未运行，无需重启"
   fi
 
@@ -1609,6 +1692,17 @@ _state_build_inbound_meta_set() {
        del(.inbounds[$tag].realityPublicKey)' \
       "$current" >"$candidate"
   fi
+}
+
+_state_build_inbound_client_address() {
+  local current=$1 candidate=$2 tag=$3 address=$4 obfs=$5 tls_fallback=$6
+  jq --arg tag "$tag" --arg address "$address" --argjson obfs "${obfs:-null}" --arg tlsFallback "$tls_fallback" '
+    .inbounds[$tag].host = $address |
+    if $obfs != null then .inbounds[$tag].obfs = $obfs else . end |
+    if $tlsFallback != "" and (.inbounds[$tag].shareTlsServerName // "") == "" then
+      .inbounds[$tag].shareTlsServerName = $tlsFallback
+    else . end
+  ' "$current" >"$candidate"
 }
 
 _state_build_inbound_meta_delete() {
@@ -3158,27 +3252,28 @@ protocol_build() {
 }
 
 _inbound_build_obfs_meta() {
-  local tag=$1 obfs_host=$2 listen=$3 port=$4 local_port=$5
+  local tag=$1 obfs_host=$2 listen=$3 port=$4 local_port=$5 dual_stack=${6:-false}
   jq -nc \
     --arg host "$obfs_host" \
     --arg listen "$listen" \
     --argjson port "$port" \
     --argjson localPort "$local_port" \
-    --arg service "xrayctl-obfs-${tag}" \
-    '{enabled:true,type:"http",host:$host,listen:$listen,port:$port,localPort:$localPort,service:$service}'
+    --arg service "xrayctl-obfs-${tag}" --argjson dualStack "$dual_stack" \
+    '{enabled:true,type:"http",host:$host,listen:$listen,port:$port,localPort:$localPort,service:$service} +
+     (if $dualStack then {dualStack:true} else {} end)'
 }
 
 build_inbound() {
   local __inbound=$1 __host=$2 __public_key=$3 __obfs_meta=${4-}
   local choice protocol tag listen port public_host email password="" stream="" inbound_json username="" generated_public_key="" suggested_host="" suggested_port=""
   local obfs_choice=1 obfs_host="" obfs_meta_json="" local_port="" xray_listen="" xray_port="" ss_network="tcp,udp"
-  local total_steps=3 listen_step=2 user_step=3
+  local total_steps=3 listen_step=2 user_step=3 bind_network=tcp dual_stack=false
   ui_wizard_step 1 "" "选择入站协议"
   choose choice "选择入站协议" "VLESS" "SS2022" "SOCKS5" "HTTP" || return 1
   case $choice in
     1) protocol=vless; total_steps=4; listen_step=3; user_step=4 ;;
-    2) protocol=shadowsocks; total_steps=4; listen_step=3; user_step=4 ;;
-    3) protocol=socks ;;
+    2) protocol=shadowsocks; total_steps=4; listen_step=3; user_step=4; bind_network=tcp,udp ;;
+    3) protocol=socks; bind_network=tcp,udp ;;
     4) protocol=http ;;
   esac
 
@@ -3195,22 +3290,20 @@ build_inbound() {
 
   ui_wizard_step "$listen_step" "$total_steps" "监听参数与连接地址"
   prompt_tag tag "${protocol}-$(random_hex 2)" || return 1
-  prompt_value listen "监听地址" "0.0.0.0" || return 1
+  prompt_public_host public_host "" "$suggested_host" || return 1
+
+  listen=$(inbound_auto_listen "$public_host") || return 1
   suggest_available_port suggested_port || suggested_port=443
-  prompt_port port "$suggested_port" || return 1
-  if [[ -n $suggested_host ]]; then
-    public_host=$suggested_host
-    info "客户端连接地址：${public_host}"
-  else
-    prompt_public_host public_host "" "$suggested_host" || return 1
-  fi
+  prompt_port port "$suggested_port" "" "$listen" "$bind_network" || return 1
+  inbound_report_listener "$listen" "$port" "$public_host"
 
   if [[ $protocol == shadowsocks && $obfs_choice == 2 ]]; then
+    [[ $listen != :: ]] || dual_stack=true
     suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
     xray_listen="127.0.0.1"
     xray_port=$local_port
     ss_network="tcp,udp"
-    obfs_meta_json=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port")
+    obfs_meta_json=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port" "$dual_stack")
   else
     xray_listen=$listen
     xray_port=$port
@@ -3292,33 +3385,101 @@ inbound_effective_listen() {
   local tag=$1 listen=""
   if inbound_obfs_enabled "$tag"; then
     listen=$(inbound_obfs_field "$tag" listen)
-  fi
-  if [[ -n $listen ]]; then
-    printf '%s\n' "$listen"
+    printf '%s\n' "${listen:-0.0.0.0}"
   else
     jq -r --arg tag "$tag" '.inbounds[]|select(.tag==$tag)|.listen // "0.0.0.0"' "$CONFIG_FILE"
   fi
 }
 
+# shellcheck disable=SC2016
+readonly INBOUND_SOCKETS_JQ='
+  def obfs($meta): if .protocol=="shadowsocks" and $meta.inbounds[.tag].obfs.enabled==true
+    then $meta.inbounds[.tag].obfs else {} end;
+  def socket_network:
+    if .protocol=="shadowsocks" then (.settings.network // "tcp,udp")
+    elif .protocol=="socks" and (.settings.udp != false) then "tcp,udp"
+    else "tcp" end;
+  def effective_socket($meta):
+    obfs($meta) as $obfs |
+    {listen:(if $obfs.enabled==true then ($obfs.listen // "0.0.0.0") else (.listen // "0.0.0.0") end),
+     port:($obfs.port // .port)};
+'
+
+inbound_sockets_for_port() {
+  local port=$1 except=${2-} metadata
+  [[ -r $CONFIG_FILE ]] || return 0
+  metadata=$(meta_json_or_empty)
+  jq -r --argjson port "$port" --arg except "$except" --argjson meta "$metadata" "$INBOUND_SOCKETS_JQ"'
+    def contains_port:
+      tostring | split(",") | any(.[]; split("-") | map(try tonumber catch -1) |
+        (.[0] <= $port and $port <= (.[1] // .[0])));
+    .inbounds[]? | select(.tag!=$except) | socket_network as $network |
+    [ {listen:(.listen // "0.0.0.0"), port:.port}, effective_socket($meta) ] | unique[] |
+    select(.port | contains_port) | [.listen, $network] | @tsv
+  ' "$CONFIG_FILE"
+}
+
+listener_addresses_overlap() {
+  local first second
+  first=$(normalize_socket_ip "$1") || first='*'
+  second=$(normalize_socket_ip "$2") || second='*'
+  # Xray can open either wildcard as a dual-stack socket.
+  case $first in 0.0.0.0|::|'*') return 0;; esac
+  case $second in 0.0.0.0|::|'*') return 0;; esac
+  [[ $first == "$second" ]]
+}
+
+listener_networks_overlap() {
+  [[ (",$1," == *,tcp,* && ",$2," == *,tcp,*) || (",$1," == *,udp,* && ",$2," == *,udp,*) ]]
+}
+
 port_in_config() {
-  local port=$1 except=${2-}
-  if [[ -r $CONFIG_FILE ]]; then
-    jq -e --argjson port "$port" --arg except "$except" '.inbounds[] | select(.port==$port and .tag!=$except)' "$CONFIG_FILE" >/dev/null 2>&1 && return 0
-  fi
-  if [[ -r $META_FILE ]]; then
-    jq -e --argjson port "$port" --arg except "$except" '
-      .inbounds // {} | to_entries[] |
-      select(.key!=$except and .value.obfs.enabled==true and (.value.obfs.port==$port or .value.obfs.localPort==$port))
-    ' "$META_FILE" >/dev/null 2>&1 && return 0
-  fi
+  local port=$1 except=${2-} listen=${3:-0.0.0.0} network=${4:-tcp,udp} endpoints bound_listen bound_network
+  endpoints=$(inbound_sockets_for_port "$port" "$except") || return 0
+  while IFS=$'\t' read -r bound_listen bound_network; do
+    [[ -n $bound_listen ]] || continue
+    listener_networks_overlap "$network" "$bound_network" && listener_addresses_overlap "$listen" "$bound_listen" && return 0
+  done <<<"$endpoints"
   return 1
 }
 
 port_in_use_os() {
-  local port=$1
-  if command_exists ss; then ss -H -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "(^|:)$port$";
-  elif command_exists netstat; then netstat -lntu 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$";
-  else return 1; fi
+  local port=$1 listen=${2:-0.0.0.0} network=${3:-tcp,udp} except=${4-}
+  local socket_rows socket_type endpoint details addr current_port="" current_listen="" own_binary=${XRAY_BIN##*/}
+  if command_exists ss && socket_rows=$(ss -H -lntupe 2>/dev/null || ss -H -lntup 2>/dev/null); then
+    socket_rows=$(awk '{print $1 "\t" $5 "\t" $0}' <<<"$socket_rows")
+  elif command_exists netstat && socket_rows=$(netstat -lntup 2>/dev/null || netstat -lntu 2>/dev/null); then
+    socket_rows=$(awk '$1 ~ /^(tcp|udp)/ {print substr($1,1,3) "\t" $4 "\t" $0}' <<<"$socket_rows")
+  else
+    return 1
+  fi
+  if [[ -n $except ]] && service_is_active; then
+    current_port=$(inbound_effective_port "$except")
+    current_listen=$(inbound_effective_listen "$except")
+  fi
+  while IFS=$'\t' read -r socket_type endpoint details; do
+    [[ ${endpoint##*:} == "$port" ]] || continue
+    listener_networks_overlap "$network" "$socket_type" || continue
+    addr=${endpoint%:*}; addr=${addr#\[}; addr=${addr%\]}; addr=${addr%%%*}
+    # An existing socket of the inbound being edited will be released on restart.
+    if [[ $port == "$current_port" ]] &&
+       { [[ $details == *"\"${own_binary}\""* || $details == *"/${own_binary}" ]] ||
+         { inbound_obfs_enabled "$except" &&
+           [[ $details == *"\"${OBFS_SERVER_BIN##*/}\""* || $details == *"/${OBFS_SERVER_BIN##*/}" ]]; }; }; then
+      if [[ $(normalize_socket_ip "$addr" || printf '*') == "$(normalize_socket_ip "$current_listen")" ]] ||
+         { [[ $addr == '*' || $addr == :: || $addr == 0.0.0.0 ]] &&
+           [[ $current_listen == 0.0.0.0 || $current_listen == :: ]]; }; then
+        continue
+      fi
+    fi
+    # ss distinguishes a native IPv4 wildcard from a dual-stack wildcard.
+    if [[ $addr == 0.0.0.0 && $listen == *:* && $listen != :: ]] ||
+       { [[ $addr == :: && $details == *v6only:1* && $listen != 0.0.0.0 && $listen != *:* ]]; }; then
+      continue
+    fi
+    listener_addresses_overlap "$listen" "$addr" && return 0
+  done <<<"$socket_rows"
+  return 1
 }
 
 suggest_available_port() {
@@ -3370,18 +3531,58 @@ prompt_tag() {
 }
 
 prompt_port() {
-  local __var=$1 default=${2:-443} except=${3-} value current_port=""
+  local __var=$1 default=${2:-443} except=${3-} bind_address=${4:-0.0.0.0} bind_network=${5:-tcp,udp} value
   while true; do
     prompt_value value "监听端口" "$default" || return 1
     validate_port "$value" || { warn "端口必须是 1-65535。"; continue; }
-    port_in_config "$value" "$except" && { warn "该端口已被另一条 Xray 入站使用。"; continue; }
-    [[ -z $except ]] || current_port=$(inbound_effective_port "$except" 2>/dev/null || true)
-    if port_in_use_os "$value" && ! { [[ -n $except && $value == "$current_port" ]] && service_is_active; }; then
-      warn "系统检测到端口 ${value} 已被占用，请换一个端口。"
+    value=$((10#$value))
+    if port_in_config "$value" "$except" "$bind_address" "$bind_network" ||
+       port_in_use_os "$value" "$bind_address" "$bind_network" "$except"; then
+      warn "所选监听地址的端口 ${value} 已被占用，请换一个端口。"
       continue
     fi
     printf -v "$__var" '%s' "$value"; return
   done
+}
+
+# Public addresses reported by remote lookup may belong to a NAT gateway.
+# Bind a literal only if it is configured locally, or use a local address of
+# that family when the gateway exposes an address of its own.
+inbound_auto_listen() {
+  local host=$1 require_local_family=${2:-0} requested="" label local_ip iface canonical fallback="" matches=0 saw_ipv6=0
+  if [[ $host == \[*\] ]]; then host=${host#\[}; host=${host%\]}; fi
+  requested=$(normalize_socket_ip "$host") || requested=""
+  case $requested in
+    127.*|0000:0000:0000:0000:0000:0000:0000:0001) printf '%s\n' "$host"; return ;;
+  esac
+  while IFS=$'\t' read -r label local_ip iface; do
+    [[ -n ${iface:-} || -n $label ]] || continue
+    canonical=$(normalize_socket_ip "$local_ip") || continue
+    if [[ $canonical == *:* ]]; then saw_ipv6=1; fi
+    if [[ $canonical == "$requested" ]]; then printf '%s\n' "$local_ip"; return; fi
+    if [[ -n $requested ]] &&
+       { [[ $canonical == *:* && $requested == *:* ]] || [[ $canonical != *:* && $requested != *:* ]]; }; then
+      fallback=$local_ip; matches=$((matches + 1))
+    fi
+  done < <(detect_local_ips)
+  if ((matches == 1)); then
+    printf '%s\n' "$fallback"
+  elif [[ -n $requested ]] && ((require_local_family)); then
+    return 1
+  elif [[ $requested == *:* ]] || { [[ -z $requested ]] && ((saw_ipv6)); }; then
+    printf '::\n'
+  else
+    printf '0.0.0.0\n'
+  fi
+}
+
+inbound_report_listener() {
+  local address=$1 port=$2 host=$3
+  if [[ $address == *:* ]]; then address="[${address}]"; fi
+  info "实际监听：${address}:${port}"
+  if [[ $address == '[::]' && $host != *:* ]]; then
+    info "如需通过此域名使用双栈，请配置指向本机的 A 和 AAAA 记录。"
+  fi
 }
 
 prompt_public_host() {
@@ -3564,21 +3765,99 @@ rename_inbound() {
   info "入站已重命名：${old_tag} → ${new_tag}。"
 }
 
+validate_client_connection_address() {
+  local address=$1 canonical
+  if [[ $address == \[*\] ]]; then
+    address=${address#\[}; address=${address%\]}
+    [[ $address == *:* ]] || return 1
+  fi
+  if canonical=$(normalize_socket_ip "$address"); then
+    [[ $canonical != 0.0.0.0 && $canonical != :: ]]
+  else
+    validate_domain "${address%.}"
+  fi
+}
+
+modify_inbound_client_address() {
+  local tag=$1 current address tls_fallback="" old_listen listen port network candidate obfs="" old_obfs=""
+  ensure_system_context || return 1
+  inbound_exists "$tag" || die "找不到入站：$tag"
+  inbound_require_supported_configuration "$tag"
+  current=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
+  prompt_validated_value address "客户端连接地址" "${current:-${XRAYCTL_PUBLIC_HOST:-}}" \
+    validate_client_connection_address "请输入 IPv4、IPv6 或域名，无需填写协议和端口。" || return 1
+  if [[ $address == \[*\] ]]; then address=${address#\[}; address=${address%\]}; fi
+  if [[ $address == "$current" ]]; then
+    info "客户端连接地址未更改。"
+    return 0
+  fi
+
+  # Older TLS inbounds reused the share host as SNI. Preserve that value so
+  # switching the dial address does not change the certificate name in links.
+  if jq -e --arg tag "$tag" '.inbounds[] | select(.tag==$tag) |
+    .protocol=="vless" and .streamSettings.security=="tls" and
+    (.streamSettings.tlsSettings.serverName // "")==""' "$CONFIG_FILE" >/dev/null; then
+    tls_fallback=${current:-${XRAYCTL_PUBLIC_HOST:-}}
+  fi
+  if ! listen=$(inbound_auto_listen "$address" 1); then
+    warn "无法为此地址确定本机监听 IP。请先将新 IP 配置到网卡，或选择可用的本机 IP。"
+    return 1
+  fi
+  old_listen=$(inbound_effective_listen "$tag") || return 1
+  port=$(inbound_effective_port "$tag") || return 1
+  if inbound_obfs_enabled "$tag"; then
+    old_obfs=$(jq -c --arg tag "$tag" '.inbounds[$tag].obfs' "$META_FILE") || return 1
+    obfs=$(jq -c --arg listen "$listen" '
+      .listen=$listen | if $listen=="::" then .dualStack=true else del(.dualStack) end' <<<"$old_obfs") || return 1
+  fi
+
+  if [[ $listen == "$old_listen" && $obfs == "$old_obfs" ]]; then
+    state_commit_metadata _state_build_inbound_client_address "$tag" "$address" "" "$tls_fallback" || return 1
+  else
+    if ! validate_port "$port"; then
+      warn "此入站的端口无法自动切换监听，请检查现有配置。"
+      return 1
+    fi
+    network=$(jq -r --arg tag "$tag" "$INBOUND_SOCKETS_JQ"'
+      .inbounds[] | select(.tag==$tag) | socket_network' "$CONFIG_FILE") || return 1
+    if port_in_config "$((10#$port))" "$tag" "$listen" "$network" ||
+       port_in_use_os "$((10#$port))" "$listen" "$network" "$tag"; then
+      warn "新监听地址与端口 ${port} 上的其他监听冲突，入站未更改。"
+      return 1
+    fi
+    candidate=$(temp_file) || return 1
+    if [[ -n $obfs ]]; then
+      cp "$CONFIG_FILE" "$candidate" || { rm -f "$candidate"; return 1; }
+    elif ! jq --arg tag "$tag" --arg listen "$listen" '
+      (.inbounds[] | select(.tag==$tag) | .listen)=$listen' "$CONFIG_FILE" >"$candidate"; then
+      rm -f "$candidate"
+      return 1
+    fi
+    XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$candidate" state_commit \
+      _state_build_inbound_client_address "$tag" "$address" "$obfs" "$tls_fallback" || return 1
+  fi
+  inbound_report_listener "$listen" "$port" "$address"
+  info "客户端连接地址已更新为 ${address}。请重新获取分享链接或订阅内容。"
+}
+
 modify_inbound_basic() {
   ensure_runtime_dependencies inbound-modify; ensure_config
-  local tag=${1-} current listen port host tmp old_port old_listen local_port="" obfs_host="" obfs_meta=""
+  local tag=${1-} listen port host tmp old_port bind_network
+  local local_port="" obfs_host="" obfs_meta="" dual_stack=false
   [[ -n $tag ]] || select_inbound tag || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
-  current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
+  old_port=$(inbound_effective_port "$tag")
+  bind_network=$(jq -r --arg tag "$tag" "$INBOUND_SOCKETS_JQ"'
+    .inbounds[] | select(.tag==$tag) | socket_network' "$CONFIG_FILE")
+  prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
+  listen=$(inbound_auto_listen "$host") || return 1
+  prompt_port port "$old_port" "$tag" "$listen" "$bind_network" || return 1
+  inbound_report_listener "$listen" "$port" "$host"
   if inbound_obfs_enabled "$tag"; then
-    old_listen=$(inbound_effective_listen "$tag")
-    old_port=$(inbound_effective_port "$tag")
     local_port=$(inbound_obfs_field "$tag" localPort)
     obfs_host=$(inbound_obfs_field "$tag" host)
-    prompt_value listen "监听地址" "${old_listen:-0.0.0.0}" || return 1
-    prompt_port port "$old_port" "$tag" || return 1
-    prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
+    [[ $listen != :: ]] || dual_stack=true
     if [[ -z $local_port || $local_port == "$port" ]] || ! validate_port "$local_port"; then
       suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
     fi
@@ -3586,27 +3865,22 @@ modify_inbound_basic() {
     jq --arg tag "$tag" --argjson localPort "$local_port" \
       '(.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp,udp")' \
       "$CONFIG_FILE" >"$tmp"
-    obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port")
+    obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$listen" "$port" "$local_port" "$dual_stack")
     state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" "$obfs_meta" || return
     obfs_service_setup "$tag" || warn "入站已修改，但 obfs-server 服务更新失败，请检查 simple-obfs 状态。"
   else
-    old_port=$(jq -r '.port' <<<"$current")
-    prompt_value listen "监听地址" "$(jq -r '.listen // "0.0.0.0"' <<<"$current")" || return 1
-    prompt_port port "$old_port" "$tag" || return 1
-    prompt_public_host host "$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE")" || return 1
     tmp=$(temp_file)
     jq --arg tag "$tag" --arg listen "$listen" --argjson port "$port" \
       '(.inbounds[]|select(.tag==$tag)) |= (.listen=$listen | .port=$port)' "$CONFIG_FILE" >"$tmp"
     state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$host" || return
   fi
   traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
-  current=$(jq --arg tag "$tag" '.inbounds[]|select(.tag==$tag)' "$CONFIG_FILE")
 }
 
 modify_inbound_transport() {
   ensure_runtime_dependencies inbound-transport; require_xray_installed; ensure_config
   local tag=${1-} protocol stream public_key="" tmp method security
-  local obfs_choice obfs_host ext_listen ext_port local_port obfs_meta="" was_obfs=0 had_active=0
+  local obfs_choice obfs_host ext_listen ext_port local_port obfs_meta="" was_obfs=0 had_active=0 dual_stack=false
   [[ -n $tag ]] || select_inbound tag '^(vless|shadowsocks)$' || return
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
@@ -3646,7 +3920,9 @@ modify_inbound_transport() {
         jq --arg tag "$tag" --argjson localPort "$local_port" '
           (.inbounds[]|select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp,udp")
         ' "$CONFIG_FILE" >"$tmp"
-        obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$ext_listen" "$ext_port" "$local_port")
+        if [[ $ext_listen == :: ]] && { ((was_obfs == 0)) ||
+          [[ $(inbound_obfs_field "$tag" dualStack) == true ]]; }; then dual_stack=true; fi
+        obfs_meta=$(_inbound_build_obfs_meta "$tag" "$obfs_host" "$ext_listen" "$ext_port" "$local_port" "$dual_stack")
         XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$tmp" state_commit_inbound_set "$tag" "$(public_host_for_tag "$tag")" "$obfs_meta" || return
         obfs_service_setup "$tag" || warn "混淆参数已更新，但 obfs-server 服务启动失败，请检查 simple-obfs 状态。"
         traffic_after_config_change || warn "入站已修改，但流量规则暂未同步，采集任务会自动重试。"
@@ -4043,7 +4319,7 @@ public_host_for_tag() {
   if [[ -z $host ]]; then
     if [[ -n ${XRAYCTL_PUBLIC_HOST:-} ]]; then host=$XRAYCTL_PUBLIC_HOST;
     elif [[ -t 0 ]]; then prompt_public_host host || return 1;
-    else die "缺少公网地址。请先运行 xrayctl inbound modify ${tag}，或设置 XRAYCTL_PUBLIC_HOST。"; fi
+    else die "缺少客户端连接地址。请在入站 ${tag} 的「修改入站信息」中设置，或指定 XRAYCTL_PUBLIC_HOST。"; fi
   fi
   printf '%s' "$host"
 }
@@ -4059,6 +4335,15 @@ print_share_entry() {
     printf '\n  %s▸%s 用户: %s%s%s\n' "$C_BOLD$C_CYAN" "$C_RESET" "$C_BOLD" "$label" "$C_RESET"
   fi
   printf '%s: %s\n' "$field" "$value"
+}
+
+_share_tls_server_name() {
+  local tag=$1 stream=$2 sni
+  sni=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
+  if [[ -z $sni ]]; then
+    sni=$(jq -r --arg tag "$tag" '.inbounds[$tag].shareTlsServerName // empty' "$META_FILE" 2>/dev/null || true)
+  fi
+  if [[ -n $sni ]]; then printf '%s' "$sni"; else public_host_for_tag "$tag"; fi
 }
 
 _share_print_params_card() {
@@ -4085,8 +4370,7 @@ _share_print_params_card() {
       esac
       case $security in
         tls)
-          sni=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
-          [[ -n $sni ]] || sni=$(public_host_for_tag "$tag")
+          sni=$(_share_tls_server_name "$tag" "$stream")
           ui_card_kv "TLS SNI" "$sni" 12
           ui_card_kv "指纹 (fp)" "chrome" 12
           ;;
@@ -4148,8 +4432,7 @@ link_query_for_stream() {
   query+="&security=$(url_encode "$security")"
   case $security in
     tls)
-      sni=$(jq -r '.tlsSettings.serverName // empty' <<<"$stream")
-      [[ -n $sni ]] || sni=$(public_host_for_tag "$tag")
+      sni=$(_share_tls_server_name "$tag" "$stream")
       query+="&sni=$(url_encode "$sni")"
       [[ $method == websocket ]] && query+="&host=$(url_encode "$sni")"
       query+="&fp=chrome"
@@ -5283,16 +5566,15 @@ traffic_inventory_json() {
   [[ -r $CONFIG_FILE ]] || { warn "无法读取 Xray 配置，流量规则保持不变。"; return 1; }
   local meta_json
   meta_json=$(meta_json_or_empty)
-  jq -e --argjson meta "$meta_json" '
+  jq -e --argjson meta "$meta_json" "$INBOUND_SOCKETS_JQ"'
     if type != "object" or ((.inbounds | type) != "null" and (.inbounds | type) != "array") then
       error("invalid inbound inventory")
     else
       [.inbounds[]? | .tag as $tag |
-        {key:$tag,value:({
-          protocol:.protocol,
-          port:(if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end),
-          disabled:false
-        } + (if .protocol=="shadowsocks" then {network:(.settings.network // "tcp,udp")} else {} end))}
+        {key:$tag,value:(effective_socket($meta) + {
+          protocol:.protocol, disabled:false
+        } + (if .protocol=="shadowsocks" or (.protocol=="socks" and .settings.udp==false)
+             then {network:socket_network} else {} end))}
       ] | from_entries
     end
   ' "$CONFIG_FILE" 2>/dev/null || { warn "Xray 配置无法解析，流量规则保持不变。"; return 1; }
@@ -5623,69 +5905,80 @@ traffic_protocols_for_inbound() {
       else printf '%s\n' tcp udp
       fi
       ;;
-    socks) printf '%s\n' tcp udp ;;
+    socks) if [[ $network == tcp ]]; then printf '%s\n' tcp; else printf '%s\n' tcp udp; fi ;;
     *) printf '%s\n' tcp ;;
   esac
 }
 
+traffic_socket_rows() {
+  traffic_inventory_json | jq -r 'to_entries[] |
+    [.key, .value.protocol, (.value.port|tostring), (.value.network // "-"), .value.listen] | @tsv'
+}
+
 traffic_restore_nft_rules() {
-  local tag inbound_protocol port inbound_network transport_protocol count_comment count=0 meta_json
+  local tag inbound_protocol port inbound_network listen transport_protocol count_comment count=0 rows
+  local -a dst=() src=()
   command_exists nft || return 1
+  rows=$(traffic_socket_rows) || return 1
   traffic_clear_nft_rules || return 1
-  meta_json=$(meta_json_or_empty)
   nft add table inet "$TRAFFIC_NFT_TABLE" || return 1
   nft 'add chain inet xrayctl_traffic input { type filter hook input priority -5; policy accept; }' || return 1
   nft 'add chain inet xrayctl_traffic output { type filter hook output priority -5; policy accept; }' || return 1
-  while IFS=$'\t' read -r tag inbound_protocol port inbound_network; do
+  while IFS=$'\t' read -r tag inbound_protocol port inbound_network listen; do
     if [[ -z $tag ]] || ! validate_port "$port"; then continue; fi
     count_comment="\"xrayctl-traffic:count:${tag}\""
+    listen=$(normalize_socket_ip "$listen") || listen=""
+    dst=(); src=()
+    case $listen in
+      0.0.0.0|::|"") ;; # Xray wildcards may receive both families.
+      *:*) dst=(ip6 daddr "$listen"); src=(ip6 saddr "$listen");;
+      *) dst=(ip daddr "$listen"); src=(ip saddr "$listen");;
+    esac
     while IFS= read -r transport_protocol; do
-      nft add rule inet "$TRAFFIC_NFT_TABLE" input "$transport_protocol" dport "$port" counter comment "$count_comment" || return 1
-      nft add rule inet "$TRAFFIC_NFT_TABLE" output "$transport_protocol" sport "$port" counter comment "$count_comment" || return 1
+      nft add rule inet "$TRAFFIC_NFT_TABLE" input "${dst[@]}" "$transport_protocol" dport "$port" counter comment "$count_comment" || return 1
+      nft add rule inet "$TRAFFIC_NFT_TABLE" output "${src[@]}" "$transport_protocol" sport "$port" counter comment "$count_comment" || return 1
       count=$((count + 1))
     done < <(traffic_protocols_for_inbound "$inbound_protocol" "$inbound_network")
-  done < <(jq -r --argjson meta "$meta_json" '
-    .inbounds[]? | .tag as $tag |
-    [$tag, .protocol,
-     ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
-     (.settings.network // "-")] | @tsv
-  ' "$CONFIG_FILE" 2>/dev/null || true)
+  done <<<"$rows"
   ((count > 0)) || traffic_clear_nft_rules
 }
 
 traffic_restore_iptables_rules() {
-  local command tag inbound_protocol port inbound_network transport_protocol count=0 meta_json
+  local command tag inbound_protocol port inbound_network listen transport_protocol count=0 rows
+  local -a dst=() src=()
+  rows=$(traffic_socket_rows) || return 1
   traffic_clear_iptables_rules || return 1
-  meta_json=$(meta_json_or_empty)
   for command in iptables ip6tables; do
     command_exists "$command" || continue
     "$command" -t filter -N "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -N "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || true
     "$command" -t filter -C INPUT -j "$TRAFFIC_IPTABLES_IN_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I INPUT 1 -j "$TRAFFIC_IPTABLES_IN_CHAIN"
     "$command" -t filter -C OUTPUT -j "$TRAFFIC_IPTABLES_OUT_CHAIN" >/dev/null 2>&1 || "$command" -t filter -I OUTPUT 1 -j "$TRAFFIC_IPTABLES_OUT_CHAIN"
-    while IFS=$'\t' read -r tag inbound_protocol port inbound_network; do
+    while IFS=$'\t' read -r tag inbound_protocol port inbound_network listen; do
       if [[ -z $tag ]] || ! validate_port "$port"; then continue; fi
+      listen=$(normalize_socket_ip "$listen") || listen=""
+      dst=(); src=()
+      case $listen in
+        0.0.0.0|::|"") ;;
+        *:*) [[ $command == ip6tables ]] || continue; dst=(-d "$listen"); src=(-s "$listen");;
+        *) [[ $command == iptables ]] || continue; dst=(-d "$listen"); src=(-s "$listen");;
+      esac
       while IFS= read -r transport_protocol; do
-        "$command" -t filter -A "$TRAFFIC_IPTABLES_IN_CHAIN" -p "$transport_protocol" --dport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
-        "$command" -t filter -A "$TRAFFIC_IPTABLES_OUT_CHAIN" -p "$transport_protocol" --sport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
+        "$command" -t filter -A "$TRAFFIC_IPTABLES_IN_CHAIN" "${dst[@]}" -p "$transport_protocol" --dport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
+        "$command" -t filter -A "$TRAFFIC_IPTABLES_OUT_CHAIN" "${src[@]}" -p "$transport_protocol" --sport "$port" -m comment --comment "xrayctl-traffic:count:${tag}" -j RETURN || return 1
         count=$((count + 1))
       done < <(traffic_protocols_for_inbound "$inbound_protocol" "$inbound_network")
-    done < <(jq -r --argjson meta "$meta_json" '
-      .inbounds[]? | .tag as $tag |
-      [$tag, .protocol,
-       ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
-       (.settings.network // "-")] | @tsv
-    ' "$CONFIG_FILE" 2>/dev/null || true)
+    done <<<"$rows"
   done
   ((count > 0)) || traffic_clear_iptables_rules
 }
 
 traffic_rules_restore() {
-  local selected inventory epoch
+  local force=${1:-0} selected inventory epoch
   epoch=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf unknown)
   selected=$(traffic_backend)
   inventory=$(traffic_inventory_json) || return 1
-  if jq -e --arg epoch "$epoch" --argjson inventory "$inventory" ' .rulesInventory==$inventory and .rulesInventory!=null and .rulesEpoch==$epoch' "$TRAFFIC_FILE" >/dev/null 2>&1; then
+  if ((force == 0)) && jq -e --arg epoch "$epoch" --argjson inventory "$inventory" ' .rulesInventory==$inventory and .rulesInventory!=null and .rulesEpoch==$epoch' "$TRAFFIC_FILE" >/dev/null 2>&1; then
     [[ $inventory != '{}' ]] || return 0
     traffic_read_counters >/dev/null
     return $?
@@ -5719,18 +6012,10 @@ traffic_rules_restore_serialized() {
   return "$rc"
 }
 
-traffic_collect() {
-  traffic_is_enabled || return 0
-  traffic_require_root internal-traffic-collect
-  # Older installs may have users but no StatsService until the quota menu was
-  # opened. Initialize once outside the traffic lock; the guard prevents the
-  # initialization's own runtime check from recursing into this step.
-  if [[ ${XRAYCTL_USER_STATS_INITIALIZING:-0} != 1 ]] && ! traffic_user_managed_config && traffic_user_has_clients; then
-    ( XRAYCTL_USER_STATS_INITIALIZING=1; traffic_user_enable ) || \
-      warn "用户统计尚未自动启用，后台会继续重试；入站统计仍会采集。"
-  fi
-  traffic_lock_acquire || { warn "另一个流量采集任务正在运行。"; return 1; }
-  local counters samples rc=0 snapshot="" raw_samples epoch inventory empty_rules=0
+# Caller holds the traffic lock. A listener change samples the old firewall
+# rules with collect_users=0; the state transaction handles Xray user stats.
+traffic_collect_locked() {
+  local collect_users=${1:-1} counters samples rc=0 snapshot="" raw_samples epoch inventory empty_rules=0
   epoch=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf unknown)
   local previous_epoch
   previous_epoch=$(jq -r '.kernelCounterEpoch // .rulesEpoch // empty' "$TRAFFIC_FILE") || rc=1
@@ -5766,7 +6051,6 @@ traffic_collect() {
     # inventory of live rules or retry their installation and reset counters.
     if ! snapshot=$(temp_file) || ! cp -p "$TRAFFIC_FILE" "$snapshot"; then
       rm -f "$snapshot"
-      traffic_lock_release
       return 1
     fi
     TRAFFIC_RAW_SNAPSHOT="$raw_samples" TRAFFIC_COUNTER_EPOCH="$epoch" traffic_update_file "$samples" || rc=1
@@ -5775,17 +6059,37 @@ traffic_collect() {
   # A failed write leaves both unchanged, allowing an idempotent retry.
   if ((rc != 0)); then
     [[ -z $snapshot ]] || traffic_write_file "$snapshot" || true
-  elif ! traffic_user_collect_locked; then
+  elif ((collect_users)) && ! traffic_user_collect_locked; then
     # User API failures must never prevent the independent inbound accounting
     # and firewall quota rules from being committed.
     warn "用户流量本次未采集；入站流量采集仍已完成。"
     rc=2
   fi
   [[ -z $snapshot ]] || rm -f "$snapshot"
-  inventory=$(traffic_inventory_json) || rc=1
-  if ((rc == 0 || rc == 2)) && jq -e --argjson inventory "$inventory" '.rulesInventory!=null and .rulesInventory!=$inventory' "$TRAFFIC_FILE" >/dev/null; then
-    traffic_rules_restore || rc=1
+  # The address transaction installs its own rules after writing the new
+  # configuration. Avoid resetting a legacy rule set immediately beforehand.
+  if ((collect_users)); then
+    inventory=$(traffic_inventory_json) || rc=1
+    if ((rc == 0 || rc == 2)) && jq -e --argjson inventory "$inventory" '.rulesInventory!=null and .rulesInventory!=$inventory' "$TRAFFIC_FILE" >/dev/null; then
+      traffic_rules_restore || rc=1
+    fi
   fi
+  return "$rc"
+}
+
+traffic_collect() {
+  traffic_is_enabled || return 0
+  traffic_require_root internal-traffic-collect
+  # Older installs may have users but no StatsService until the quota menu was
+  # opened. Initialize once outside the traffic lock; the guard prevents the
+  # initialization's own runtime check from recursing into this step.
+  if [[ ${XRAYCTL_USER_STATS_INITIALIZING:-0} != 1 ]] && ! traffic_user_managed_config && traffic_user_has_clients; then
+    ( XRAYCTL_USER_STATS_INITIALIZING=1; traffic_user_enable ) || \
+      warn "用户统计尚未自动启用，后台会继续重试；入站统计仍会采集。"
+  fi
+  local rc=0
+  traffic_lock_acquire || { warn "另一个流量采集任务正在运行。"; return 1; }
+  traffic_collect_locked || rc=$?
   traffic_lock_release
   if ((rc == 0)); then
     traffic_user_reconcile || { warn "用户额度规则暂未同步，将在下次采集时重试。"; rc=2; }
@@ -8503,7 +8807,7 @@ EOF
 }
 
 obfs_service_setup() {
-  local tag=$1 apply_runtime=${2:-1} listen="" port="" local_port="" obfs_bin svc init_sys unit_path
+  local tag=$1 apply_runtime=${2:-1} listen="" port="" local_port="" obfs_bin svc init_sys unit_path bind_arg
   [[ -r $META_FILE ]] || return 1
   jq -e --arg tag "$tag" '.inbounds[$tag].obfs.enabled==true' "$META_FILE" >/dev/null 2>&1 || return 1
   listen=$(jq -r --arg tag "$tag" '.inbounds[$tag].obfs.listen // "0.0.0.0"' "$META_FILE")
@@ -8513,6 +8817,10 @@ obfs_service_setup() {
     error "入站 ${tag} 的混淆端口元数据无效。"
     return 1
   fi
+  # simple-obfs sets IPV6_V6ONLY when given an explicit -s address.
+  # Omitting -s lets it use its built-in dual-stack wildcard.
+  bind_arg="-s ${listen} "
+  if [[ $listen == :: && $(inbound_obfs_field "$tag" dualStack) == true ]]; then bind_arg=""; fi
   obfs_bin=$(obfs_server_bin)
   svc=$(obfs_service_name "$tag")
   init_sys=$(platform_init_system 2>/dev/null || true)
@@ -8528,7 +8836,7 @@ After=network.target ${SYSTEMD_UNIT}
 
 [Service]
 Type=simple
-ExecStart=${obfs_bin} -s ${listen} -p ${port} --obfs http -r 127.0.0.1:${local_port}
+ExecStart=${obfs_bin} ${bind_arg}-p ${port} --obfs http -r 127.0.0.1:${local_port}
 Restart=on-failure
 RestartSec=3
 
@@ -8553,7 +8861,7 @@ EOF
 name="xrayctl obfs-server (${tag})"
 description="xrayctl simple-obfs server (${tag})"
 command="${obfs_bin}"
-command_args="-s ${listen} -p ${port} --obfs http -r 127.0.0.1:${local_port}"
+command_args="${bind_arg}-p ${port} --obfs http -r 127.0.0.1:${local_port}"
 command_background=true
 pidfile="/run/${svc}.pid"
 output_log="${LOG_DIR}/obfs-${tag}.log"
@@ -10323,7 +10631,7 @@ modify_inbound_menu() {
     ui_page "修改入站信息 · ${current_tag}"
     ui_menu_group "基础与网络"
     ui_menu_item 1 "修改入站名称"
-    ui_menu_item 2 "修改地址/端口"
+    ui_menu_item 2 "修改客户端连接地址"
     if [[ $protocol == vless ]]; then
       ui_menu_group "传输与安全"
       ui_menu_item 3 "修改传输/安全"
@@ -10346,7 +10654,7 @@ modify_inbound_menu() {
         fi
         pause
         ;;
-      2) run_menu_action modify_inbound_basic "$current_tag"; pause;;
+      2) run_menu_action modify_inbound_client_address "$current_tag"; pause;;
       3)
         if [[ $protocol == vless || $protocol == shadowsocks ]]; then run_menu_action modify_inbound_transport "$current_tag"
         else warn "无效选项。"; fi
