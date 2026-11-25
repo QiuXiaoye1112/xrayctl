@@ -131,7 +131,8 @@ nft() {
 restart_service() {
   [[ ${TRAFFIC_LOCK_HELD:-0} == 1 ]] || fail "listener restarted outside the traffic lock"
   jq -e --slurpfile config "$CONFIG_FILE" '
-    .rulesInventory.v4.listen == ($config[0].inbounds[] | select(.tag=="v4") | .listen)
+    ($config[0].inbounds[] | select(.tag=="v4")) as $inbound |
+    .rulesInventory.v4.listen == $inbound.listen and .rulesInventory.v4.port == $inbound.port
   ' "$TRAFFIC_FILE" >/dev/null || fail "listener restarted before preparing its firewall rule"
   printf '%s\n' restart >>"$root/restart-log"
 }
@@ -154,3 +155,9 @@ assert_eq restart "$(cat "$root/restart-log")" "firewall failure must stop befor
 jq -e '.rulesInventory.v4.listen=="192.0.2.11" and .inbounds.v4.cycles["2026-11-01 00:00:00"]==380 and
   .totals.cycles["2026-11-01 00:00:00"]==550 and .inbounds.v6.users.kept.limit.enabled' "$TRAFFIC_FILE" >/dev/null
 pass "listener edits protect the counter transition and roll back when firewall rules cannot be installed"
+
+sample 5 0 >"$root/counters.json"
+modify_inbound_port v4 <<<'8443' >/dev/null
+jq -e '.rulesInventory.v4.port==8443 and .rulesInventory.v4.listen=="192.0.2.11" and
+  .inbounds.v4.cycles["2026-11-01 00:00:00"]==390 and .totals.cycles["2026-11-01 00:00:00"]==560' "$TRAFFIC_FILE" >/dev/null
+pass "port-only edits save the old counter before replacing the firewall rule"

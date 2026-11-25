@@ -223,3 +223,32 @@ pass "SOCKS address edits repair an advertised wildcard and preserve explicit re
   assert_eq 2001:db8::10 "$(inbound_effective_listen vless-node)" 'single-family edit picked the wrong IP'
 )
 pass "single-family edits open the matching address list directly"
+
+cp "$TEST_ROOT/original.json" "$CONFIG_FILE"
+cp "$TEST_ROOT/original-meta.json" "$META_FILE"
+(
+  pause() { :; }
+  clear_screen() { :; }
+  modify_inbound_menu vless-node vless
+) <<<$'4\n8443\n0' >"$TEST_ROOT/port-edit.out"
+grep -Fq '修改监听端口' "$TEST_ROOT/port-edit.out"
+if grep -Fq '选择客户端连接地址类型' "$TEST_ROOT/port-edit.out"; then fail 'port-only edit asked for an address'; fi
+assert_eq :: "$(inbound_effective_listen vless-node)" 'port-only edit changed the wildcard listener'
+assert_eq 8443 "$(inbound_effective_port vless-node)" 'port-only edit did not set the new port'
+assert_file_eq "$TEST_ROOT/original-meta.json" "$META_FILE" 'port-only edit changed metadata'
+assert_eq "${expected/:443\?/:8443?}" "$(print_subscription vless-node | base64 --decode)" 'port-only edit did not update the share URI'
+cp "$CONFIG_FILE" "$TEST_ROOT/port-edit-config.json"
+touch "$TEST_ROOT/force-restart-failure"
+assert_failure modify_inbound_port vless-node <<<'8444'
+assert_file_eq "$TEST_ROOT/port-edit-config.json" "$CONFIG_FILE" 'failed port-only edit did not restore config'
+assert_file_eq "$TEST_ROOT/original-meta.json" "$META_FILE" 'failed port-only edit changed metadata'
+port_restarts=$(cat "$TEST_ROOT/restarts")
+modify_inbound_port vless-node <<<'' >/dev/null
+assert_eq "$port_restarts" "$(cat "$TEST_ROOT/restarts")" 'accepting the current port restarted Xray'
+jq '.inbounds += [{tag:"occupied",listen:"2001:db8::20",port:8444,protocol:"vless"}]' \
+  "$TEST_ROOT/port-edit-config.json" >"$CONFIG_FILE"
+cp "$CONFIG_FILE" "$TEST_ROOT/port-conflict.json"
+assert_failure modify_inbound_port vless-node <<<'8444'
+assert_file_eq "$TEST_ROOT/port-conflict.json" "$CONFIG_FILE" 'port conflict changed config'
+assert_eq "$port_restarts" "$(cat "$TEST_ROOT/restarts")" 'port conflict restarted Xray'
+pass "port-only edits keep the address and rollback on restart failure"

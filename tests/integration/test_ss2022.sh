@@ -238,6 +238,13 @@ assert_eq "$expected" "$(dispatch subscription | base64 --decode)" "all-inbound 
   assert_eq 2001:db8::1 "$(traffic_inventory_json | jq -r '.["ss2022-obfs"].listen')" "traffic inventory must track the public IPv6 listener"
   (eval "$original_prompt_value"$'\n'"$original_choose"$'\n'"$original_prompt_inbound_ip"; modify_inbound_client_address ss2022-obfs) <<<$'1\n1' >/dev/null
   grep -Fq "ExecStart=${OBFS_SERVER_BIN} -s 192.0.2.10 -p 39183 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
+  next_port=39184
+  modify_inbound_port ss2022-obfs >/dev/null
+  grep -Fq "ExecStart=${OBFS_SERVER_BIN} -s 192.0.2.10 -p 39184 --obfs http -r 127.0.0.1:${local_port}" "$unit_file"
+  jq -e '.inbounds[0] | .listen=="192.0.2.10" and .port==39184' "$OBFS_UDP_CONFIG" >/dev/null
+  jq -e --argjson port "$local_port" '.inbounds[0] | .listen=="127.0.0.1" and .port==$port' "$CONFIG_FILE" >/dev/null
+  next_port=39183
+  modify_inbound_port ss2022-obfs >/dev/null
 
   dispatch inbound rename ss2022-obfs ss2022-obfs2 >/dev/null
   [[ ! -e $unit_file ]]

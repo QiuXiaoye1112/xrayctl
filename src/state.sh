@@ -669,7 +669,7 @@ _state_build_inbound_meta_set() {
 _state_build_inbound_client_address() {
   local current=$1 candidate=$2 tag=$3 address=$4 obfs=$5 tls_fallback=$6
   jq --arg tag "$tag" --arg address "$address" --argjson obfs "${obfs:-null}" --arg tlsFallback "$tls_fallback" '
-    .inbounds[$tag].host = $address |
+    if $address != "" then .inbounds[$tag].host = $address else . end |
     if $obfs != null then .inbounds[$tag].obfs = $obfs else . end |
     if $tlsFallback != "" and (.inbounds[$tag].shareTlsServerName // "") == "" then
       .inbounds[$tag].shareTlsServerName = $tlsFallback

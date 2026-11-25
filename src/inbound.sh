@@ -397,9 +397,9 @@ prompt_inbound_ip() {
 }
 
 modify_inbound_client_address() {
-  local tag=$1 edit_port=${2:-0} current address tls_fallback="" old_listen port old_port network candidate obfs="" old_obfs=""
+  local tag=$1 edit_mode=${2:-address} current address share_address="" tls_fallback="" old_listen port old_port network candidate obfs="" old_obfs=""
   local local_port="" reset_socks_udp_ip=false
-  if ((edit_port)); then
+  if [[ $edit_mode == both ]]; then
     ensure_runtime_dependencies inbound-modify || return 1
     ensure_config || return 1
     [[ -n $tag ]] || select_inbound tag || return 1
@@ -408,18 +408,22 @@ modify_inbound_client_address() {
   fi
   inbound_exists "$tag" || die "找不到入站：$tag"
   inbound_require_supported_configuration "$tag"
-  current=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
   old_listen=$(inbound_effective_listen "$tag") || return 1
   old_port=$(inbound_effective_port "$tag") || return 1
-  info "监听地址：${old_listen}"
-  prompt_inbound_ip address || return 1
+  address=$old_listen
+  if [[ $edit_mode != port ]]; then
+    current=$(jq -r --arg tag "$tag" '.inbounds[$tag].host // empty' "$META_FILE" 2>/dev/null || true)
+    info "监听地址：${old_listen}"
+    prompt_inbound_ip address || return 1
+    share_address=$address
 
-  # Older TLS inbounds reused the share host as SNI. Keep the name in links
-  # when migrating one of those inbounds to an IP address.
-  if jq -e --arg tag "$tag" '.inbounds[] | select(.tag==$tag) |
-    .protocol=="vless" and .streamSettings.security=="tls" and
-    (.streamSettings.tlsSettings.serverName // "")==""' "$CONFIG_FILE" >/dev/null; then
-    tls_fallback=${current:-${XRAYCTL_PUBLIC_HOST:-}}
+    # Older TLS inbounds reused the share host as SNI. Keep the name in links
+    # when migrating one of those inbounds to an IP address.
+    if jq -e --arg tag "$tag" '.inbounds[] | select(.tag==$tag) |
+      .protocol=="vless" and .streamSettings.security=="tls" and
+      (.streamSettings.tlsSettings.serverName // "")==""' "$CONFIG_FILE" >/dev/null; then
+      tls_fallback=${current:-${XRAYCTL_PUBLIC_HOST:-}}
+    fi
   fi
 
   port=$old_port
@@ -427,17 +431,20 @@ modify_inbound_client_address() {
     .inbounds[] | select(.tag==$tag) | socket_network' "$CONFIG_FILE") || return 1
   # A wildcard SOCKS UDP reply is unusable for clients that use the advertised
   # address. With ip omitted, Xray uses the local address of the TCP connection.
-  if jq -e --arg tag "$tag" '.inbounds[] | select(.tag==$tag) |
+  if [[ $edit_mode != port ]] && jq -e --arg tag "$tag" '.inbounds[] | select(.tag==$tag) |
     .protocol=="socks" and .settings.udp==true and (.settings.ip=="0.0.0.0" or .settings.ip=="::")' "$CONFIG_FILE" >/dev/null; then
     reset_socks_udp_ip=true
   fi
-  if ((edit_port)); then
+  if [[ $edit_mode != address ]]; then
     prompt_port port "$old_port" "$tag" "$address" "$network" || return 1
   fi
   if inbound_obfs_enabled "$tag"; then
     old_obfs=$(jq -c --arg tag "$tag" '.inbounds[$tag].obfs' "$META_FILE") || return 1
-    obfs=$(jq -c --arg address "$address" '.listen=$address | del(.dualStack)' <<<"$old_obfs") || return 1
-    if ((edit_port)); then
+    obfs=$old_obfs
+    if [[ $edit_mode != port ]]; then
+      obfs=$(jq -c --arg address "$address" '.listen=$address | del(.dualStack)' <<<"$old_obfs") || return 1
+    fi
+    if [[ $edit_mode != address ]]; then
       local_port=$(jq -r '.localPort // empty' <<<"$obfs") || return 1
       if [[ $local_port == "$port" ]] || ! validate_port "$local_port"; then
         suggest_available_port_excluding local_port "$port" || die "无法分配内部转发端口。"
@@ -448,6 +455,10 @@ modify_inbound_client_address() {
   fi
 
   if [[ $address == "$old_listen" && $port == "$old_port" && $obfs == "$old_obfs" && $reset_socks_udp_ip == false ]]; then
+    if [[ $edit_mode == port ]]; then
+      info "监听端口未更改。"
+      return 0
+    fi
     if [[ $address == "$current" ]]; then
       info "客户端连接地址未更改。"
       return 0
@@ -465,28 +476,38 @@ modify_inbound_client_address() {
     fi
     candidate=$(temp_file) || return 1
     if [[ -n $local_port ]]; then
-      jq --arg tag "$tag" --argjson localPort "$local_port" '
-        (.inbounds[] | select(.tag==$tag)) |= (.listen="127.0.0.1" | .port=$localPort | .settings.network="tcp,udp")
+      jq --arg tag "$tag" --argjson localPort "$local_port" --arg mode "$edit_mode" '
+        (.inbounds[] | select(.tag==$tag)) |= (.port=$localPort |
+          if $mode=="port" then . else .listen="127.0.0.1" | .settings.network="tcp,udp" end)
       ' "$CONFIG_FILE" >"$candidate" || { rm -f "$candidate"; return 1; }
     elif [[ -n $obfs ]]; then
       cp "$CONFIG_FILE" "$candidate" || { rm -f "$candidate"; return 1; }
     else
-      jq --arg tag "$tag" --arg address "$address" --argjson port "$((10#$port))" --argjson editPort "$edit_port" \
+      jq --arg tag "$tag" --arg address "$address" --argjson port "$((10#$port))" --arg mode "$edit_mode" \
         --argjson resetSocksUdpIP "$reset_socks_udp_ip" '
         (.inbounds[] | select(.tag==$tag)) |=
-          (.listen=$address | if $editPort==1 then .port=$port else . end |
+          (if $mode!="port" then .listen=$address else . end |
+           if $mode!="address" then .port=$port else . end |
            if $resetSocksUdpIP then del(.settings.ip) else . end)
       ' "$CONFIG_FILE" >"$candidate" || { rm -f "$candidate"; return 1; }
     fi
     XRAYCTL_QUIET_CONFIG_APPLIED=1 state_apply_candidate_file "$candidate" state_commit \
-      _state_build_inbound_client_address "$tag" "$address" "$obfs" "$tls_fallback" || return 1
+      _state_build_inbound_client_address "$tag" "$share_address" "$obfs" "$tls_fallback" || return 1
   fi
   inbound_report_listener "$address" "$port"
-  info "客户端连接地址已更新为 ${address}。请重新获取分享链接或订阅内容。"
+  if [[ $edit_mode == port ]]; then
+    info "监听端口已更新为 ${port}。请重新获取分享链接或订阅内容。"
+  else
+    info "客户端连接地址已更新为 ${address}。请重新获取分享链接或订阅内容。"
+  fi
+}
+
+modify_inbound_port() {
+  modify_inbound_client_address "$1" port
 }
 
 modify_inbound_basic() {
-  modify_inbound_client_address "${1-}" 1
+  modify_inbound_client_address "${1-}" both
 }
 
 modify_inbound_transport() {
