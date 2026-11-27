@@ -788,28 +788,22 @@ delete_client() {
     managed_id=$label
     count=$(jq --arg tag "$tag" --arg client_label "$label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || die "找不到用户：$label"
-    jq --arg tag "$tag" --arg client_label "$label" --arg id "$managed_id" '
+    jq --arg tag "$tag" --arg client_label "$label" --arg id "$managed_id" "$OUTBOUND_USER_MATCH_JQ"'
       (.inbounds[]|select(.tag==$tag)|.settings) |= (
         ((.accounts // .users // [])|map(select(.user!=$client_label))) as $all |
         .accounts=$all | .users=$all
       ) |
       if (.routing.rules|type)=="array" then .routing.rules |= map(select(
-        (.ruleTag // "") != ("xrayctl-user-limit:"+$id) and
-        ((((.ruleTag // "") | startswith("xrayctl-user-outbound:")) and .inboundTag==[$tag] and .user==[$id])|not) and
-        ((((.ruleTag // "") | startswith("xrayctl-user-domain:")) and .inboundTag==[$tag] and .user==[$id])|not)
-      )) else . end |
+        (.ruleTag // "") != ("xrayctl-user-limit:"+$id) ) | if managed_user_rule($tag;$id) then replace_user_term($id;"") else . end) else . end |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
   else
     managed_id=$(jq -r --arg tag "$tag" --arg client_label "$label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select((.xrayctlLabel // .email)==$client_label)|.email // empty' "$CONFIG_FILE")
     count=$(jq --arg tag "$tag" --arg client_label "$label" '[.inbounds[]|select(.tag==$tag)|.settings.clients[]|select((.xrayctlLabel // .email)==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || die "找不到用户：$label"
-    jq --arg tag "$tag" --arg client_label "$label" --arg id "$managed_id" '
+    jq --arg tag "$tag" --arg client_label "$label" --arg id "$managed_id" "$OUTBOUND_USER_MATCH_JQ"'
       (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(select((.xrayctlLabel // .email)!=$client_label)) |
       if (.routing.rules|type)=="array" then .routing.rules |= map(select(
-        ($id=="" or (.ruleTag // "") != ("xrayctl-user-limit:"+$id)) and
-        ((((.ruleTag // "") | startswith("xrayctl-user-outbound:")) and .inboundTag==[$tag] and .user==[$id])|not) and
-        ((((.ruleTag // "") | startswith("xrayctl-user-domain:")) and .inboundTag==[$tag] and .user==[$id])|not)
-      )) else . end
+        ($id=="" or (.ruleTag // "") != ("xrayctl-user-limit:"+$id)) ) | if managed_user_rule($tag;$id) then replace_user_term($id;"") else . end) else . end
     ' "$CONFIG_FILE" >"$tmp"
   fi
   state_apply_candidate_file "$tmp" state_commit_user_template_identity "$tag" "$managed_id" "" || return
@@ -895,14 +889,14 @@ rename_client() {
   if [[ $protocol == socks || $protocol == http ]]; then
     count=$(jq --arg tag "$tag" --arg client_label "$old_label" '[.inbounds[]|select(.tag==$tag)|(.settings.accounts // .settings.users // [])[]|select(.user==$client_label)]|length' "$CONFIG_FILE")
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
-    jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '
+    jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" "$OUTBOUND_USER_MATCH_JQ"'
       (.inbounds[]|select(.tag==$tag)|.settings) |= (
         ((.accounts // .users // [])|map(if .user==$old then .user=$new else . end)) as $all |
         .accounts=$all | .users=$all
       ) |
       if (.routing.rules|type)=="array" then .routing.rules |= map(
         if (.ruleTag // "")==("xrayctl-user-limit:"+$old) then .ruleTag="xrayctl-user-limit:"+$new | .user=[$new]
-        elif .inboundTag==[$tag] and .user==[$old] and (((.ruleTag // "")|startswith("xrayctl-user-outbound:")) or ((.ruleTag // "")|startswith("xrayctl-user-domain:"))) then .user=[$new]
+        elif managed_user_rule($tag;$old) then replace_user_term($old;$new)
         else . end
       ) else . end |
       del(.accounts,.users,.auth)' "$CONFIG_FILE" >"$tmp"
@@ -911,10 +905,10 @@ rename_client() {
     ((count > 0)) || { rm -f "$tmp"; die "找不到用户：$old_label"; }
     old_identity=$(jq -r --arg tag "$tag" --arg old "$old_label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select((.xrayctlLabel // .email)==$old)|.email' "$CONFIG_FILE")
     new_identity=$(jq -r --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" '.inbounds[]|select(.tag==$tag)|.settings.clients[]?|select((.xrayctlLabel // .email)==$old)|if .xrayctlLabel!=null then .email else $new end' "$CONFIG_FILE")
-    jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" --arg oldIdentity "$old_identity" --arg newIdentity "$new_identity" '
+    jq --arg tag "$tag" --arg old "$old_label" --arg new "$new_label" --arg oldIdentity "$old_identity" --arg newIdentity "$new_identity" "$OUTBOUND_USER_MATCH_JQ"'
       (.inbounds[]|select(.tag==$tag)|.settings.clients) |= map(if (.xrayctlLabel // .email)==$old then if .xrayctlLabel != null then .xrayctlLabel=$new else .email=$new end else . end) |
       if (.routing.rules|type)=="array" then .routing.rules |= map(
-        if .inboundTag==[$tag] and .user==[$oldIdentity] and (((.ruleTag // "")|startswith("xrayctl-user-outbound:")) or ((.ruleTag // "")|startswith("xrayctl-user-domain:"))) then .user=[$newIdentity] else . end
+        if $oldIdentity!=$newIdentity and managed_user_rule($tag;$oldIdentity) then replace_user_term($oldIdentity;$newIdentity) else . end
       ) else . end
     ' "$CONFIG_FILE" >"$tmp"
   fi

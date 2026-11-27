@@ -379,10 +379,38 @@ _state_cleanup_transaction_files() {
   done
 }
 
+# Resolve legacy aliases within their inbound, preferring an exact identity.
+_state_resolve_user_template_bindings() {
+  jq --slurpfile config "$1" '
+    if ((.domainTemplates.userBindings // [])|length)==0 then . else
+      ([ $config[0].inbounds[]? | .tag as $tag |
+         if .protocol=="vless" or .protocol=="shadowsocks" then
+           .settings.clients[]? | {inbound:$tag,id:.email,name:.xrayctlLabel}
+         elif .protocol=="socks" or .protocol=="http" then
+           (.settings.accounts // .settings.users // [])[]? | {inbound:$tag,id:.user}
+         else empty end ]) as $users |
+      .domainTemplates.userBindings |=
+        (map(. as $binding |
+          if any($users[]; .inbound==$binding.inbound and .id==$binding.user) then .
+          else
+            [ $config[0].routing.rules[]? | select(.inboundTag==[$binding.inbound] and
+                .template==$binding.template and ((.ruleTag // "")|startswith("xrayctl-user-domain:")) and
+                any(.user[]?; .==$binding.user)) | .user[] ] as $terms |
+            ([$users[] | select(.inbound==$binding.inbound and
+              (.id|type)=="string" and (.id|startswith("xrayctl-user-"))) | . as $account |
+              select(.name==$binding.user or any($terms[]; .==$account.id)) | .id] | unique) as $matches |
+            if ($matches|length)==1 then .user=$matches[0] else . end
+          end) |
+         reduce .[] as $binding ({}; .[([$binding.inbound,$binding.user,$binding.template]|@json)]=$binding) |
+         [.[]])
+    end
+  ' "${2:--}"
+}
+
 state_commit() {
   trap '' HUP PIPE
   local candidate=$1 meta_mutator=${2-} old_active=0 traffic_locked=0
-  local config_snapshot meta_snapshot meta_candidate="" obfs_ext_port="" obfs_port_bound_before=0
+  local config_snapshot meta_snapshot meta_candidate="" resolved_meta source_meta obfs_ext_port="" obfs_port_bound_before=0
   local listener_change=0 remap_traffic=0 obfs_tag="" apply_error=""
   if [[ -n $meta_mutator ]]; then shift 2; else shift; fi
   if [[ $meta_mutator == _state_build_inbound_client_address ]]; then
@@ -407,15 +435,30 @@ state_commit() {
   if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} != 1 ]]; then setup_runtime_access || return 1; fi
 
   if [[ -n $meta_mutator ]]; then
-    meta_candidate=$(temp_file)
+    meta_candidate=$(temp_file) || return 1
     if ! "$meta_mutator" "$META_FILE" "$meta_candidate" "$@"; then
       _state_cleanup_transaction_files "$meta_candidate"
       return 1
     fi
-    if ! state_validate_metadata_candidate "$meta_candidate"; then
-      _state_cleanup_transaction_files "$meta_candidate"
+  fi
+  source_meta=${meta_candidate:-$META_FILE}
+  if [[ ${TRAFFIC_USER_RECONCILE_COMMIT:-0} != 1 ]] &&
+     jq -e '((.domainTemplates.userBindings // [])|length)>0' "$source_meta" >/dev/null; then
+    resolved_meta=$(temp_file) || { _state_cleanup_transaction_files "$meta_candidate"; return 1; }
+    if ! _state_resolve_user_template_bindings "$candidate" "$source_meta" >"$resolved_meta"; then
+      _state_cleanup_transaction_files "$meta_candidate" "$resolved_meta"
       return 1
     fi
+    if jq -s -e '.[0]==.[1]' "$source_meta" "$resolved_meta" >/dev/null; then
+      rm -f "$resolved_meta"
+    else
+      _state_cleanup_transaction_files "$meta_candidate"
+      meta_candidate=$resolved_meta
+    fi
+  fi
+  if [[ -n $meta_candidate ]] && ! state_validate_metadata_candidate "$meta_candidate"; then
+    _state_cleanup_transaction_files "$meta_candidate"
+    return 1
   fi
 
   config_snapshot=$(temp_file)
@@ -720,11 +763,11 @@ state_commit_inbound_rename() {
 
 _state_build_user_template_identity() {
   local current=$1 candidate=$2 inbound=$3 old=$4 new=$5
-  jq --arg inbound "$inbound" --arg old "$old" --arg new "$new" '
+  _state_resolve_user_template_bindings "$CONFIG_FILE" "$current" | jq --arg inbound "$inbound" --arg old "$old" --arg new "$new" '
     .domainTemplates.userBindings = [.domainTemplates.userBindings[]? |
       if .inbound==$inbound and .user==$old then
         if $new=="" then empty else .user=$new end
-      else . end]' "$current" >"$candidate"
+      else . end]' >"$candidate"
 }
 
 state_commit_user_template_identity() {

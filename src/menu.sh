@@ -37,26 +37,18 @@ _outbound_user_labels() {
   ' "$CONFIG_FILE"
 }
 
-_outbound_user_default() {
-  local inbound=$1 identity=$2
-  jq -r --arg inbound "$inbound" --arg identity "$identity" '
-    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and .inboundTag==[$inbound] and .user==[$identity]) | .outboundTag][0] // empty
-  ' "$CONFIG_FILE"
-}
-
 _outbound_user_domain_count() {
-  jq -r --arg inbound "$1" --arg identity "$2" '
-    [.routing.rules[]? | select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and .inboundTag==[$inbound] and .user==[$identity])] | length
+  jq -r --arg inbound "$1" --arg identity "$2" "$OUTBOUND_USER_MATCH_JQ"'
+    [.routing.rules[]? | select(user_rule("xrayctl-user-domain:";$inbound;$identity))] | length
   ' "$CONFIG_FILE"
 }
 
 
 _outbound_user_domain_rules_display() {
   local inbound=$1 identity=$2 rows type match outbound found=0 number=0 groups=0
-  rows=$(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+  rows=$(jq -r --arg inbound "$inbound" --arg identity "$identity" "$OUTBOUND_USER_MATCH_JQ"'
     [ .routing.rules[]? |
-      select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and
-        .inboundTag==[$inbound] and .user==[$identity] and (.template // "")=="") |
+      select(user_rule("xrayctl-user-domain:";$inbound;$identity) and (.template // "")=="") |
       (.domain[0] // "") as $value |
       {match:(if ($value|startswith("full:")) then "exact"
               elif ($value|startswith("domain:")) then "suffix" else "" end),
@@ -114,10 +106,9 @@ user_domain_delete_menu() {
     [[ $r_match == exact ]] && display_match='精确' || display_match='子域名'
     display_out=$(_outbound_display_name "$r_outbound")
     display_items+=("$r_domain（$display_match → $display_out）")
-  done < <(jq -r --arg inbound "$inbound" --arg identity "$identity" '
+  done < <(jq -r --arg inbound "$inbound" --arg identity "$identity" "$OUTBOUND_USER_MATCH_JQ"'
     [ .routing.rules[]? |
-      select(((.ruleTag // "")|startswith("xrayctl-user-domain:")) and
-        .inboundTag==[$inbound] and .user==[$identity] and (.template // "")==""  ) |
+      select(user_rule("xrayctl-user-domain:";$inbound;$identity) and (.template // "")==""  ) |
       (.domain[0] // "") as $value |
       {match:(if ($value|startswith("full:")) then "exact"
               elif ($value|startswith("domain:")) then "suffix" else "" end),
@@ -150,18 +141,18 @@ template_bindings_display() {
     [[ -n $name ]] || continue
     printf '%s%s → %s\n' "$indent" "$name" "$(_outbound_display_name "$outbound")"
     found=1
-  done < <(jq -r --arg inbound "$inbound" --arg user "$identity" '
+  done < <(_state_resolve_user_template_bindings "$CONFIG_FILE" "$META_FILE" | jq -r --arg inbound "$inbound" --arg user "$identity" '
     (if $user=="" then .domainTemplates.bindings[]? | select(.inbound==$inbound)
      else .domainTemplates.userBindings[]? | select(.inbound==$inbound and .user==$user) end) |
-    [.template,.outbound] | @tsv' "$META_FILE")
+    [.template,.outbound] | @tsv')
   if ((found == 0)); then printf '%s无\n' "$indent"; fi
 }
 
 user_template_remove_menu() {
   local inbound=$1 label=$2 identity=$3 choice name
   local -a names=()
-  mapfile -t names < <(jq -r --arg inbound "$inbound" --arg user "$identity" \
-    '.domainTemplates.userBindings[]? | select(.inbound==$inbound and .user==$user) | .template' "$META_FILE")
+  mapfile -t names < <(_state_resolve_user_template_bindings "$CONFIG_FILE" "$META_FILE" | jq -r --arg inbound "$inbound" --arg user "$identity" \
+    '.domainTemplates.userBindings[]? | select(.inbound==$inbound and .user==$user) | .template')
   if ((${#names[@]}==0)); then info '该用户没有已应用模板。'; pause; return 0; fi
   choose choice '选择要移除的模板' "${names[@]}" || return 0
   name=${names[$((choice-1))]}

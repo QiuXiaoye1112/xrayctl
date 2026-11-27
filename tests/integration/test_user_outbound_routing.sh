@@ -162,6 +162,48 @@ state_apply_candidate_file "$candidate" apply_candidate >/dev/null
 charlie_identity=$(jq -r '.inbounds[]|select(.tag=="in-a")|.settings.clients[]|select(.xrayctlLabel=="charlie")|.email' "$XRAYCTL_CONFIG_FILE")
 assert_eq 1 "$(jq --arg id "$charlie_identity" '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-outbound:"))|select(.inboundTag==["in-a"] and (.user|index($id)!=null))]|length' "$XRAYCTL_CONFIG_FILE")" 'StatsService identity migration retained user route'
 
+# Reproduce a grouped default with a legacy alias and another active identity.
+# Changing Charlie's outbound must preserve the other matches.
+tmp=$(temp_file)
+jq --arg id "$charlie_identity" --arg peer "$bob_a" '
+  (.routing.rules[] | select(.inboundTag==["in-a"] and
+    ((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and any(.user[]?; .==$id)) | .user) |= (. + ["charlie",$peer] | unique)
+' "$CONFIG_FILE" >"$tmp"
+state_commit "$tmp" >/dev/null
+assert_eq proxy-us "$(_outbound_user_default in-a "$charlie_identity")" 'grouped default is shown as the effective route'
+outbound_user_default_set in-a charlie proxy-jp >/dev/null
+assert_eq proxy-jp "$(_outbound_user_default in-a "$charlie_identity")" 'old grouped route did not override the new default'
+jq -e --arg id "$charlie_identity" --arg peer "$bob_a" '
+  [.routing.rules[] | select(.inboundTag==["in-a"] and
+    ((.ruleTag // "")|startswith("xrayctl-user-outbound:")))] as $defaults |
+  ([$defaults[] | select(any(.user[]?; .==$id)) | .outboundTag]==["proxy-jp"]) and
+  any($defaults[]; .outboundTag=="proxy-us" and .user==["charlie",$peer])
+' "$CONFIG_FILE" >/dev/null
+tmp=$(temp_file)
+jq --arg id "$charlie_identity" '
+  (.routing.rules[] | select(.inboundTag==["in-a"] and
+    ((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and .user==[$id]) | .user) += ["charlie"]
+' "$CONFIG_FILE" >"$tmp"
+state_commit "$tmp" >/dev/null
+outbound_user_default_unset in-a charlie >/dev/null
+assert_eq "" "$(_outbound_user_default in-a "$charlie_identity")" 'unset removed the selected identity from the grouped route'
+assert_eq proxy-jp "$(_outbound_user_default in-a "$bob_a")" 'another user kept their effective default'
+
+outbound_user_domain_add in-a charlie exact migrated.example.com proxy-us >/dev/null
+tmp=$(temp_file)
+jq --arg peer "$bob_a" '
+  (.routing.rules[] | select(.domain==["full:migrated.example.com"]) | .user) += [$peer]
+' "$CONFIG_FILE" >"$tmp"
+state_commit "$tmp" >/dev/null
+[[ $(outbound_user_domain_list in-a charlie) == *'migrated.example.com'* ]]
+applies_before=$apply_calls
+outbound_user_domain_add in-a charlie exact migrated.example.com proxy-jp >/dev/null 2>&1
+assert_eq "$applies_before" "$apply_calls" 'grouped domain match was not duplicated'
+outbound_user_domain_delete in-a charlie exact migrated.example.com >/dev/null
+[[ $(outbound_user_domain_list in-a charlie) != *'migrated.example.com'* ]]
+[[ $(outbound_user_domain_list in-a bob) == *'migrated.example.com'* ]]
+outbound_user_domain_delete in-a bob exact migrated.example.com >/dev/null
+
 rule_id() {
   jq -r --arg id "$alice_a" --arg domain "$2" '[.routing.rules[]|select((.ruleTag // "")|startswith("xrayctl-user-domain:"))|select(.inboundTag==["in-a"] and .user==[$id] and .domain==[$domain])|.ruleTag][0]' "$XRAYCTL_CONFIG_FILE"
 }
@@ -187,6 +229,15 @@ user_template_apply in-a alice shared proxy-us >/dev/null
 add_domain_template_domains shared exact combined.example.com >/dev/null
 assert_eq 1 "$(jq '[.routing.rules[] | select(.template=="shared" and .inboundTag==["in-a"] and .domain==["full:combined.example.com"] and (.user // [])==[])] | length' "$CONFIG_FILE")" 'template edit updated the inbound binding'
 assert_eq 1 "$(jq --arg id "$alice_a" '[.routing.rules[] | select(.template=="shared" and .inboundTag==["in-a"] and .domain==["full:combined.example.com"] and .user==[$id])] | length' "$CONFIG_FILE")" 'template edit updated the user binding'
+tmp=$(temp_file)
+jq --arg id "$alice_a" '
+  (.routing.rules[] | select(.template=="shared" and .inboundTag==["in-a"] and .user==[$id]) | .user) += ["legacy-alice"]
+' "$CONFIG_FILE" >"$tmp"
+state_commit "$tmp" >/dev/null
+tmp=$(temp_file)
+jq --arg id "$alice_a" '(.domainTemplates.userBindings[] | select(.inbound=="in-a" and .user==$id) | .user)="legacy-alice"' "$META_FILE" >"$tmp"
+mv "$tmp" "$META_FILE"
+[[ $(template_bindings_display in-a "$alice_a") == *shared* ]]
 user_template_remove in-a alice shared >/dev/null
 
 quota=$(jq -n --arg id "$alice_a" '{type:"field",ruleTag:("xrayctl-user-limit:"+$id),inboundTag:["in-a"],user:[$id],outboundTag:"blocked"}')
@@ -281,9 +332,18 @@ if ! selector_has direct || ! selector_has proxy-us; then
   printf 'not ok - inheritance replaced existing choices\n' >&2; exit 1
 fi
 assert_eq 1 "$(jq --arg id "$bob_a" '[.routing.rules[] | select(.inboundTag==["renamed-a"] and .user==[$id] and ((.ruleTag // "")|startswith("xrayctl-user-outbound:")))] | length' "$CONFIG_FILE")" 'bob starts with an independent default'
-rules_before=$(jq -S --arg id "$bob_a" '[.routing.rules[] | select((.inboundTag==["renamed-a"] and .user==[$id] and ((.ruleTag // "")|startswith("xrayctl-user-outbound:"))) | not)]' "$CONFIG_FILE")
+rules_before=$(jq -S --arg id "$bob_a" '
+  [.routing.rules[] |
+    if .inboundTag==["renamed-a"] and ((.ruleTag // "")|startswith("xrayctl-user-outbound:")) and any(.user[]?; .==$id)
+    then .user -= [$id] | select(.user!=[])
+    else . end]
+' "$CONFIG_FILE")
 meta_before=$(cat "$META_FILE")
+lock_attempts=0
+ensure_runtime_dependencies() { lock_attempts=$((lock_attempts+1)); }
 outbound_user_default_set renamed-a bob >/dev/null
+assert_eq 1 "$lock_attempts" 'menu inheritance reused the existing management lock'
+ensure_runtime_dependencies() { :; }
 assert_eq "$rules_before" "$(jq -S '.routing.rules' "$CONFIG_FILE")" 'inheritance only removed the selected user default and preserved domain rules'
 assert_eq "$meta_before" "$(cat "$META_FILE")" 'inheritance preserved template metadata'
 assert_eq '' "$(_outbound_user_default renamed-a "$bob_a")" 'inherited user has no independent default'
@@ -307,3 +367,48 @@ if selector_has '跟随入站（direct）' || selector_has '跟随入站（192.0
 fi
 
 printf 'ok - per-inbound user outbound scope, priority, inheritance, blocked rules, identity lifecycle, rollback, and safe refusal pass\n'
+
+
+assign_outbound renamed-a proxy-us >/dev/null
+tmp=$(temp_file)
+jq '.routing.rules += [.routing.rules[] | select(.ruleTag=="xrayctl-outbound:renamed-a")]' "$CONFIG_FILE" >"$tmp"
+mv "$tmp" "$CONFIG_FILE"
+assign_outbound renamed-a proxy-jp >/dev/null
+jq -e '[.routing.rules[] | select(.ruleTag=="xrayctl-outbound:renamed-a")] |
+  length==1 and .[0].outboundTag=="proxy-jp"' "$CONFIG_FILE" >/dev/null
+tmp=$(temp_file)
+jq '(.routing.rules[] | select(.ruleTag=="xrayctl-outbound:renamed-a") | .inboundTag) += ["in-b"]' "$CONFIG_FILE" >"$tmp"
+mv "$tmp" "$CONFIG_FILE"
+before=$(cat "$CONFIG_FILE")
+if assign_outbound renamed-a direct >/dev/null 2>&1; then exit 1; fi
+if remove_inbound_default_outbound renamed-a >/dev/null 2>&1; then exit 1; fi
+assert_eq "$before" "$(cat "$CONFIG_FILE")" 'a reserved tag shared by two inbounds was left intact'
+tmp=$(temp_file)
+jq '(.routing.rules[] | select(.ruleTag=="xrayctl-outbound:renamed-a") | .ruleTag)="custom-fallback"' "$CONFIG_FILE" >"$tmp"
+mv "$tmp" "$CONFIG_FILE"
+before=$(cat "$CONFIG_FILE")
+if assign_outbound renamed-a direct >/dev/null 2>&1; then exit 1; fi
+assert_eq "$before" "$(cat "$CONFIG_FILE")" 'an earlier custom fallback was not shadowed or replaced'
+printf 'ok - inbound default edits remain scoped and eliminate duplicate managed fallbacks\n'
+
+
+tmp=$(temp_file)
+jq '.outbounds += [{tag:"audit-dependency",protocol:"freedom"}]' "$CONFIG_FILE" >"$tmp"
+mv "$tmp" "$CONFIG_FILE"
+for dependency in proxySettings dialerProxy; do
+  tmp=$(temp_file)
+  jq --arg dependency "$dependency" '
+    (.outbounds[] | select(.tag=="direct")) |=
+      (if $dependency=="proxySettings" then .proxySettings={tag:"audit-dependency"}
+       else .streamSettings.sockopt.dialerProxy="audit-dependency" end)
+  ' "$CONFIG_FILE" >"$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+  before=$(cat "$CONFIG_FILE")
+  if failure=$( (delete_outbound audit-dependency) 2>&1); then exit 1; fi
+  [[ $failure == *'代理或拨号链路'* ]]
+  assert_eq "$before" "$(cat "$CONFIG_FILE")" 'outbound used by a proxy chain cannot be deleted'
+  tmp=$(temp_file)
+  jq '(.outbounds[] | select(.tag=="direct")) |= del(.proxySettings,.streamSettings)' "$CONFIG_FILE" >"$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+done
+printf 'ok - outbound deletion preserves referenced proxy and dialer chains\n'

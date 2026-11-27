@@ -1490,7 +1490,7 @@ show_main_inbounds() {
      ((if .protocol=="shadowsocks" and $meta.inbounds[$tag].obfs.enabled==true then ($meta.inbounds[$tag].obfs.port // .port) else .port end)|tostring),
      (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
       else ((.settings.accounts // .settings.users // []) | length) end | tostring),
-     ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
+     ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag) and .inboundTag==[$tag]) | .outboundTag][0] // $native)] | @tsv' "$CONFIG_FILE" \
     | while IFS=$'\t' read -r tag protocol port users outbound; do
         if declare -F _outbound_display_name >/dev/null 2>&1; then
           out_disp=$(_outbound_display_name "$outbound")
@@ -1526,7 +1526,7 @@ show_node_summary() {
          else "noauth" end),
         (if (.protocol=="vless" or .protocol=="shadowsocks") then (.settings.clients // [] | length)
          else ((.settings.accounts // .settings.users // []) | length) end | tostring),
-        ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag)) | .outboundTag][0] // $native),
+        ([$rules[]? | select((.ruleTag // "")==("xrayctl-outbound:"+$tag) and .inboundTag==[$tag]) | .outboundTag][0] // $native),
         ($meta.inbounds[$tag].obfs.enabled // false | tostring),
         ($meta.inbounds[$tag].obfs.host // ""),
         (($meta.inbounds[$tag].obfs.localPort // "")|tostring)
