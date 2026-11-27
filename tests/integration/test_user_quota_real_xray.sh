@@ -144,6 +144,7 @@ jq -e '[.routing.rules[] | select((.ruleTag // "")|startswith("xrayctl-user-limi
 # samples. If the API disappears while the user is blocked, inbound
 # collection still succeeds and the persisted ban remains in place.
 traffic_user_limit_set a alice 0.00000001 1 00:00
+traffic_collect
 jq -e --arg id "$id_a" '.inbounds.a.users[$id].limit.usedBytes>0' "$TRAFFIC_FILE" >/dev/null
 jq -e --arg id "$id_a" '[.routing.rules[] | select(.ruleTag==("xrayctl-user-limit:"+$id))] | length==1' "$CONFIG_FILE" >/dev/null
 before_user=$(jq -cS --arg id "$id_a" '.inbounds.a.users[$id]' "$TRAFFIC_FILE")

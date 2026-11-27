@@ -217,7 +217,6 @@ exercise_menu_route main_menu 7 'uninstall_xray'
 traffic_is_enabled() { return 0; }
 traffic_collect() { record traffic_collect; }
 traffic_users_show() { record "traffic_users_show ${1-}"; }
-traffic_user_ensure_configured() { record traffic_user_ensure_configured; }
 traffic_user_menu() { record traffic_user_menu; }
 # Restore the real menu functions after main-menu routing stubs.
 # shellcheck source=../../src/menu.sh
@@ -225,9 +224,13 @@ source "${REPO_ROOT}/src/menu.sh"
 traffic_user_menu() { record traffic_user_menu; }
 exercise_menu_route traffic_limit_menu 2 traffic_user_menu
 : >"$EVENT_LOG"; set_inputs 0; traffic_limit_menu >"$TEST_ROOT/traffic-limit-menu.txt"
-ensure_line=$(grep -n '^traffic_user_ensure_configured$' "$EVENT_LOG" | cut -d: -f1)
-show_line=$(grep -n '^traffic_users_show' "$EVENT_LOG" | cut -d: -f1)
-[[ -n $ensure_line && -n $show_line && $ensure_line -lt $show_line ]] || fail 'user StatsService was not ensured before the first traffic limit display'
+[[ $(cat "$EVENT_LOG") == 'traffic_users_show ' ]] || fail 'entering the quota menu ran a management or collection action'
+(
+  info() { printf '%s\n' "$*"; }
+  : >"$EVENT_LOG"; set_inputs 2 1 0; traffic_limit_menu >"$TEST_ROOT/traffic-limit-menu.txt"
+  [[ $(grep -Fxc traffic_collect "$EVENT_LOG") == 1 ]] || fail 'only explicit quota refresh should collect once'
+  rg -q '正在刷新流量' "$TEST_ROOT/traffic-limit-menu.txt" || fail 'quota refresh gave no progress feedback'
+)
 if rg -q '入站额度' "$TEST_ROOT/traffic-limit-menu.txt"; then fail 'user flow limit menu still exposes inbound quota controls'; fi
 if rg -q '开启流量限制|关闭流量限制|3\)' "$TEST_ROOT/traffic-limit-menu.txt"; then fail 'user flow limit menu still exposes a global toggle'; fi
 
@@ -235,10 +238,12 @@ traffic_show() { :; }
 traffic_clear_tag_records() { record traffic_clear_tag_records; }
 traffic_clear_all_records() { record traffic_clear_all_records; }
 traffic_period_set() { record traffic_period_set; }
-for spec in '1 traffic_collect' '2 traffic_clear_tag_records' '3 traffic_clear_all_records' '4 traffic_period_set'; do
+traffic_refresh() { record traffic_refresh "$@"; }
+for spec in '1 traffic_refresh 0' '2 traffic_clear_tag_records' '3 traffic_clear_all_records' '4 traffic_period_set'; do
   choice=${spec%% *}; action=${spec#* }; exercise_menu_route traffic_menu "$choice" "$action"
 done
 : >"$EVENT_LOG"; set_inputs 0; traffic_menu >"$TEST_ROOT/traffic-menu.txt"
+[[ ! -s $EVENT_LOG ]] || fail 'opening the inbound traffic menu collected or changed state'
 if rg -q '开启流量统计|停止流量统计|4\) (开启|停止)' "$TEST_ROOT/traffic-menu.txt"; then fail 'traffic information menu still exposes a manual traffic toggle'; fi
 if ! rg -q '4\) 设置月度统计起点' "$TEST_ROOT/traffic-menu.txt"; then fail 'traffic period option was not renumbered after removing the toggle'; fi
 

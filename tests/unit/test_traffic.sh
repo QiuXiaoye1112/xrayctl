@@ -531,6 +531,69 @@ XRAYCTL_TRAFFIC_TODAY=2026-09-22
 MOCK_COUNTERS=$'a\t100'
 traffic_collect
 jq -e '.totals.cycles=={"2026-09-22 18:30:00":100} and .totals.daily=={"2026-09-22":100}' "$TRAFFIC_FILE" >/dev/null
+# Viewing, cancelled clears, and changing the display period do not read
+# counters. Confirmed clears reuse one inbound-only sample as their baseline.
+counter_log="$TRAFFIC_FILE.events"
+traffic_read_counters() {
+  printf 'inbound\n' >>"$counter_log"
+  [[ ${reject_counters:-0} == 0 ]] || return 1
+  printf '%s\n' "$MOCK_COUNTERS"
+}
+traffic_user_collect_locked() { printf 'user\n' >>"$counter_log"; }
+traffic_user_reconcile() { printf 'quota\n' >>"$counter_log"; }
+: >"$counter_log"
+before=$(cat "$TRAFFIC_FILE")
+traffic_show >/dev/null
+traffic_period_show >/dev/null
+confirm() { return 1; }
+traffic_clear_tag_records a >/dev/null
+traffic_clear_all_records <<<N >/dev/null
+[[ $(cat "$TRAFFIC_FILE") == "$before" && ! -s $counter_log ]]
+traffic_period_set 20 06:00 >/dev/null
+[[ ! -s $counter_log ]]
+(
+  live_traffic="$TRAFFIC_FILE"
+  before=$(cat "$live_traffic")
+  mv() {
+    [[ ${!#} != "$live_traffic" ]] || return 1
+    command mv "$@"
+  }
+  if traffic_period_set 21 06:00 >/dev/null; then exit 1; fi
+  [[ $(cat "$live_traffic") == "$before" && ! -s $counter_log ]]
+)
+
+tmp=$(temp_file)
+jq --argjson inventory "$(traffic_inventory_json)" '
+    .rulesInventory=$inventory | .kernelCounters.removed=5 |
+    .inbounds.a.users.test={uplinkBytes:41,limit:{usedBytes:82}} |
+    .inbounds.removed={deleted:true,daily:{"2026-09-22":5}}' "$TRAFFIC_FILE" >"$tmp"
+mv -f "$tmp" "$TRAFFIC_FILE"
+traffic_clear_tag_records removed 1 >/dev/null
+[[ ! -s $counter_log ]]
+jq -e '.inbounds.removed==null' "$TRAFFIC_FILE" >/dev/null
+
+before=$(cat "$TRAFFIC_FILE")
+if reject_counters=1 traffic_clear_tag_records a 1 >/dev/null 2>&1; then exit 1; fi
+if reject_counters=1 traffic_clear_all_records 1 >/dev/null 2>&1; then exit 1; fi
+[[ $(cat "$TRAFFIC_FILE") == "$before" && $(cat "$counter_log") == $'inbound\ninbound' ]]
+
+: >"$counter_log"
+MOCK_COUNTERS=$'a\t120'
+traffic_clear_tag_records a 1 >/dev/null
+[[ $(cat "$counter_log") == inbound ]]
+jq -e '.kernelCounters.a==120 and .inbounds.a.daily=={} and .inbounds.a.users.test.limit.usedBytes==82' "$TRAFFIC_FILE" >/dev/null
+: >"$counter_log"
+MOCK_COUNTERS=$'a\t130'
+traffic_refresh 0
+[[ $(cat "$counter_log") == inbound ]]
+jq -e '.inbounds.a.daily["2026-09-22"]==20 and .inbounds.a.users.test.limit.usedBytes==82' "$TRAFFIC_FILE" >/dev/null
+
+: >"$counter_log"
+MOCK_COUNTERS=$'a\t140'
+traffic_clear_all_records 1 >/dev/null
+[[ $(cat "$counter_log") == inbound ]]
+jq -e '.kernelCounters.a==140 and .totals=={daily:{},cycles:{}} and .inbounds.a.users.test.limit.usedBytes==82' "$TRAFFIC_FILE" >/dev/null
+
 BASH_AGGREGATE
 
 # Clearing a deleted inbound removes its entire retained record. Legacy

@@ -186,6 +186,55 @@ cp "$TRAFFIC_FILE" "$tmp/before-limit-edit"
   traffic_user_limit_remove a alice
   jq -e --arg id "$id_a" '.inbounds.a.users[$id].limit==null and .inbounds.a.users[$id].label=="alice"' "$TRAFFIC_FILE" >/dev/null
 )
+# A quota edit or removal without a routing change must not read the API.
+# If applying rules needs a restart, reuse a sample already taken by the action.
+cp "$CONFIG_FILE" "$tmp/sample-config"
+cp "$tmp/before-limit-edit" "$tmp/sample-state"
+check_quota_sampling() (
+  sample_events="$tmp/sample-events"
+  ensure_config() { :; }
+  traffic_user_require_manager() { :; }
+  traffic_user_enable() { printf 'unexpected setup\n' >>"$sample_events"; return 1; }
+  traffic_user_collect_locked() {
+    printf 'sample\n' >>"$sample_events"
+    [[ ${sample_failure:-0} == 0 ]]
+  }
+  service_is_active() { :; }
+  state_commit() { printf 'restart\n' >>"$sample_events"; cp "$1" "$CONFIG_FILE"; }
+  jq 'del(.routing.rules[0])' "$CONFIG_FILE" >"$tmp/config-no-ban"
+  cp "$tmp/config-no-ban" "$CONFIG_FILE"
+  : >"$sample_events"
+  traffic_user_limit_set a alice 100 15 00:00
+  traffic_user_limit_remove a alice 1
+  [[ ! -s $sample_events ]]
+  jq -e --arg id "$id_a" '.inbounds.a.users[$id] | .limit==null and .cycles["2026-02-01 00:00:00"]==10' "$TRAFFIC_FILE" >/dev/null
+
+  cp "$tmp/before-limit-edit" "$TRAFFIC_FILE"
+  traffic_user_limit_set a alice 0.000000001 15 00:00
+  [[ $(cat "$sample_events") == $'sample\nrestart' ]]
+
+  : >"$sample_events"
+  cp "$TRAFFIC_FILE" "$tmp/before-failed-reset"
+  if sample_failure=1 traffic_user_reset a alice 1; then exit 1; fi
+  [[ $(cat "$sample_events") == sample ]]
+  cmp -s "$TRAFFIC_FILE" "$tmp/before-failed-reset"
+
+  : >"$sample_events"
+  traffic_user_reset a alice 1
+  [[ $(cat "$sample_events") == $'sample\nrestart' ]]
+  jq -e --arg id "$id_a" '.inbounds.a.users[$id].limit.usedBytes==0' "$TRAFFIC_FILE" >/dev/null
+
+  : >"$sample_events"
+  cp "$tmp/before-limit-edit" "$TRAFFIC_FILE"
+  traffic_collect_locked() { traffic_user_collect_locked; }
+  traffic_collect
+  [[ $(cat "$sample_events") == $'sample\nrestart' ]]
+
+  : >"$sample_events"
+  traffic_user_limit_remove a alice 1
+  [[ $(cat "$sample_events") == $'sample\nrestart' ]]
+)
+CONFIG_FILE="$tmp/sample-config" TRAFFIC_FILE="$tmp/sample-state" XRAYCTL_MANAGEMENT_LOCK_HELD=1 check_quota_sampling
 cp "$tmp/before-limit-edit" "$TRAFFIC_FILE"
 jq --arg a "$id_a" '.inbounds.a.users[$a].limit.usedBytes=0' "$TRAFFIC_FILE" >"$tmp/state"
 cp "$tmp/state" "$TRAFFIC_FILE"

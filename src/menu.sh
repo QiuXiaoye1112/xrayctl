@@ -777,12 +777,12 @@ bbr_state_summary() {
 }
 
 traffic_menu() {
-  local choice
+  local choice refresh_failed=0
   local XRAYCTL_UI_CRUMB="首页 › 流量信息"
-  traffic_is_enabled && run_menu_action traffic_collect
   while true; do
     clear_screen
     ui_page "流量信息"
+    if ((refresh_failed)); then warn "入站流量刷新未完成，请查看当前记录或重试。"; fi
     traffic_show || true
     ui_menu_group "统计操作"
     ui_menu_item 1 "刷新"
@@ -791,8 +791,12 @@ traffic_menu() {
     ui_menu_item 4 "设置月度统计起点"
     ui_menu_footer "返回"
     read -r -p "  请选择: " choice || { cancel_selection; return 0; }
+    refresh_failed=0
     case $choice in
-      1) run_menu_action traffic_collect;;
+      1)
+        info "正在刷新入站流量…"
+        ( traffic_refresh 0 ) || refresh_failed=1
+        ;;
       2) run_menu_action traffic_clear_tag_records; pause;;
       3) run_menu_action traffic_clear_all_records; pause;;
       4) run_menu_action traffic_period_set; pause;;
@@ -803,21 +807,28 @@ traffic_menu() {
 }
 
 traffic_limit_menu() {
-  local choice
+  local choice refresh_failed=0 last_collected
   local XRAYCTL_UI_CRUMB="首页 › 流量限制"
-  run_menu_action traffic_user_ensure_configured
   while true; do
-    if traffic_is_enabled; then run_menu_action traffic_collect || true; fi
     clear_screen
     ui_page "流量限制"
+    if ((refresh_failed)); then warn "流量刷新未完成，请查看当前记录或重试。"; fi
+    if [[ -r $TRAFFIC_FILE ]]; then
+      last_collected=$(jq -r '.userLastCollectedAt // empty' "$TRAFFIC_FILE") || last_collected=""
+      [[ -z $last_collected ]] || ui_kv "上次用户流量采集" "$last_collected"
+    fi
     traffic_users_show "" || true
     ui_menu_group "配额管理"
     ui_menu_item 1 "刷新流量"
     ui_menu_item 2 "管理用户额度"
     ui_menu_footer "返回"
     read -r -p "  请选择: " choice || { cancel_selection; return 0; }
+    refresh_failed=0
     case $choice in
-      1) continue;;
+      1)
+        info "正在刷新流量…"
+        ( traffic_refresh ) || refresh_failed=1
+        ;;
       2) traffic_user_menu;;
       0) return 0;;
       *) warn "无效选项。"; pause;;
@@ -828,7 +839,6 @@ traffic_limit_menu() {
 traffic_user_menu() {
   local tag label choice current_bytes used quota enabled status id period_start record start end day clock index selected inventory conflict
   local -a user_labels=()
-  ensure_config
   select_inbound tag '^(vless|shadowsocks|socks|http)$' || return 0
   if ! jq -e --arg tag "$tag" '.inbounds[]? | select(.tag==$tag and (
     ((.protocol=="vless" or .protocol=="shadowsocks") and ((.settings.clients // [])|length)>0) or
@@ -839,9 +849,10 @@ traffic_user_menu() {
     pause
     return 0
   fi
-  if ! traffic_user_managed_config; then
-    if ! traffic_user_enable; then pause; return 0; fi
-    if ! traffic_user_managed_config; then pause; return 0; fi
+  if ! traffic_user_managed_config || [[ ! -r $TRAFFIC_FILE ]]; then
+    info '用户流量统计尚未就绪，请选择「刷新流量」初始化。'
+    pause
+    return 0
   fi
   inventory=$(traffic_user_inventory_json "$CONFIG_FILE") || { pause; return 0; }
   if ! jq -e --arg tag "$tag" 'any(.[]; .tag==$tag)' <<<"$inventory" >/dev/null; then
@@ -1031,39 +1042,34 @@ dispatch() {
       case ${1:-show} in
         enable|start) traffic_enable;;
         disable|stop) traffic_disable;;
-        *)
-          traffic_runtime_ensure || true
-          case ${1:-show} in
-            show) traffic_collect || true; traffic_show "${2-}" "${3-}";;
-            collect|refresh) traffic_collect;;
-            period)
-              case ${2:-show} in
-                show) traffic_period_show;;
-                set) traffic_period_set "${3-}" "${4-}";;
-                *) die "未知 traffic period 子命令：${2}";;
-              esac
-              ;;
-            reset)
-              if [[ ${2-} == --all ]]; then
-                traffic_clear_all_records "$([[ ${3-} == --yes ]] && printf 1 || printf 0)"
-              else
-                traffic_clear_tag_records "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)"
-              fi
-              ;;
-            user)
-              case ${2:-show} in
-                show) traffic_user_ensure_configured || true; traffic_collect || true; traffic_users_show "${3-}";;
-                enable) traffic_user_enable;;
-                set) traffic_user_limit_set "${3-}" "${4-}" "${5-}" "${6-}" "${7-}";;
-                remove|delete) traffic_user_limit_remove "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
-                reset) traffic_user_reset "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
-                *) die "未知 traffic user 子命令：${2}";;
-              esac
-              ;;
-            [0-9][0-9][0-9][0-9]-*) traffic_collect || true; traffic_show "$1" "${2:-$(traffic_today)}";;
-            *) die "未知 traffic 子命令：${1}";;
+        collect|refresh) traffic_refresh;;
+        user)
+          case ${2:-show} in
+            show) traffic_users_show "${3-}";;
+            enable) traffic_user_enable;;
+            set) traffic_user_limit_set "${3-}" "${4-}" "${5-}" "${6-}" "${7-}";;
+            remove|delete) traffic_user_limit_remove "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
+            reset) traffic_user_reset "${3-}" "${4-}" "$([[ ${5-} == --yes ]] && printf 1 || printf 0)";;
+            *) die "未知 traffic user 子命令：${2}";;
           esac
           ;;
+        show) traffic_show "${2-}" "${3-}";;
+        period)
+          case ${2:-show} in
+            show) traffic_period_show;;
+            set) traffic_period_set "${3-}" "${4-}";;
+            *) die "未知 traffic period 子命令：${2}";;
+          esac
+          ;;
+        reset)
+          if [[ ${2-} == --all ]]; then
+            traffic_clear_all_records "$([[ ${3-} == --yes ]] && printf 1 || printf 0)"
+          else
+            traffic_clear_tag_records "${2-}" "$([[ ${3-} == --yes ]] && printf 1 || printf 0)"
+          fi
+          ;;
+        [0-9][0-9][0-9][0-9]-*) traffic_show "$1" "${2:-$(traffic_today)}";;
+        *) die "未知 traffic 子命令：${1}";;
       esac
       ;;
     inbound)
